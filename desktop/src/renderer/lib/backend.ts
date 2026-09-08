@@ -11,7 +11,7 @@ import type { AgentEvent, ChatMessage, Session } from './types';
 import { useBackendStore, useSessionStore, useParamsStore, usePermissionStore, useUIStore } from '../store';
 import { useSideChatStore } from '../store/sideChat';
 import { useTasksStore } from '../store/tasks';
-import { loadConfig } from './appConfig';
+import { loadConfig, displayAgentName } from './appConfig';
 
 /** preload 通过 contextBridge 暴露的桌面 API（仅 Electron 环境存在） */
 declare global {
@@ -22,6 +22,7 @@ declare global {
       getBackendBase: () => Promise<string>;
       /** 应用版本号（package.json） */
       getVersion?: () => Promise<string>;
+      setShellTitle?: (name: string) => Promise<boolean>;
       getWorkdir?: () => Promise<string>;
       pickDirectory?: () => Promise<{ ok: boolean; path?: string }>;
       setTitleBarOverlay?: (theme: 'light' | 'dark') => Promise<void>;
@@ -420,7 +421,7 @@ export async function connectBackend(): Promise<void> {
         store.setSkillsMatched(null);
         store.setGlobalStats('');
         // 运行状态外显：窗口标题 + 完成时任务栏闪烁
-        document.title = '▶ 运行中 · 小悟 Desktop';
+        document.title = `▶ 运行中 · ${displayAgentName(loadConfig().agentName)} Desktop`;
       }
       if (msg.type === 'run_end') {
         flushStreamBuffer(); store.setRunning(false); streamingMessageId = null;
@@ -429,7 +430,7 @@ export async function connectBackend(): Promise<void> {
         store.setSkillsMatched(null);
         // 任务收尾：把仍未回填的工具调用卡片标记为失败（停止/中断场景，避免卡片永远"执行中"）
         failPendingToolCalls((msg.data || {}).status);
-        document.title = '小悟 Desktop';
+        document.title = `${displayAgentName(loadConfig().agentName)} Desktop`;
         runSessionId = null;   // 任务结束：解除会话锁定
         void window.desktopApi?.notifyDone?.(String((msg.data || {}).status || ''));
         // 任务队列：上一轮结束 → 自动下发下一条排队任务（稍等 UI 落定）
@@ -916,6 +917,13 @@ export async function fetchRunning(): Promise<{ running: boolean; sessions: stri
   } catch {
     return { running: false, sessions: [] };
   }
+}
+
+/** 名字保存后刷新界面壳标题（文档标题 + Electron 窗口标题/通知跟随） */
+export function refreshShellTitle(name?: string): void {
+  const n = displayAgentName(name ?? loadConfig().agentName);
+  document.title = `${n} Desktop`;
+  void window.desktopApi?.setShellTitle?.(n).catch(() => {});
 }
 
 /** 运行中切换某会话的权限模式（auto/ask/block）：对进行中的任务立即生效 */

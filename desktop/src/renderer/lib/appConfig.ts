@@ -56,6 +56,12 @@ export function persistSecureKey(name: 'apiKey' | 'visionApiKey', value: string)
   void window.desktopApi?.secureSet?.(name, value).catch(() => {});
 }
 
+/** 有效显示名：配置名 → 回退默认「小悟」（界面壳与系统提示共用同一口径） */
+export function displayAgentName(name?: string): string {
+  const v = (name ?? '').trim();
+  return v || DEFAULT_CONFIG.agentName || '小悟';
+}
+
 export function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(KEY);

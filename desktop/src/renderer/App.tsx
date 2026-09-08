@@ -11,6 +11,7 @@ import { OnboardingModal } from './components/Onboarding';
 import { RightDock } from './components/RightDock';
 import { ResizeHandle } from './components/ResizeHandle';
 import { loadConfig, markSecureInUse, needsOnboarding, setSecureCache } from './lib/appConfig';
+import { refreshShellTitle } from './lib/backend';
 import { connectBackend, sendGoal, createNewSession, syncSessionsFromBackend, hydrateSessionMessages, stopRun } from './lib/backend';
 import { useSessionStore, useUIStore, useBackendStore, clampWidthToWindow } from './store';
 import { X, Search } from 'lucide-react';
@@ -197,6 +198,13 @@ export default function App() {
     window.addEventListener('embedded-terminal-open', onTermOpen);
     window.desktopApi?.onTerminalOpen?.();
     return () => window.removeEventListener('embedded-terminal-open', onTermOpen);
+  }, []);
+
+  // 启动/挂载：把已保存的 Agent 名字推入 store 并同步壳标题（窗口/通知跟随）
+  useEffect(() => {
+    const n = loadConfig().agentName || '小悟';
+    useUIStore.getState().setAgentName(n);
+    refreshShellTitle(n);
   }, []);
 
   // 键盘快捷键（终端风格）

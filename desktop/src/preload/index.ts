@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('desktopApi', {
   getBackendBase: (): Promise<string> => ipcRenderer.invoke('app:get-backend-base'),
   /** 应用版本号（StatusBar 显示用，帮用户确认是否跑的是最新构建） */
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
+  /** Agent 改名：窗口标题/通知随显示名（小悟 Desktop → <名> Desktop） */
+  setShellTitle: (name: string): Promise<boolean> => ipcRenderer.invoke('app:set-title', name),
   /** 当前工作目录（多工作区） */
   getWorkdir: (): Promise<string> => ipcRenderer.invoke('app:get-workdir'),
   /** 原生目录选择器（项目添加/切换） */
@@ -123,6 +125,7 @@ export type DesktopApi = {
   backendRestart: (workDir?: string) => Promise<{ ok: boolean }>;
   getBackendBase: () => Promise<string>;
   getVersion: () => Promise<string>;
+  setShellTitle: (name: string) => Promise<boolean>;
   getWorkdir: () => Promise<string>;
   pickDirectory: () => Promise<{ ok: boolean; path?: string }>;
   setTitleBarOverlay: (theme: 'light' | 'dark') => Promise<void>;

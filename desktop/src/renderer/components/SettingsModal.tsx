@@ -10,8 +10,8 @@ import React, { useMemo, useState } from 'react';
 import {
   Cpu, Zap, Settings as SettingsIcon, Info, X, Check, ExternalLink, ShieldCheck, Plus, Sparkles,
 } from 'lucide-react';
-import { loadConfig, saveConfig, persistSecureKey, type AppConfig } from '../lib/appConfig';
-import { syncRuntimeConfig, testLlmConnection } from '../lib/backend';
+import { loadConfig, saveConfig, persistSecureKey, displayAgentName, type AppConfig } from '../lib/appConfig';
+import { syncRuntimeConfig, testLlmConnection, refreshShellTitle } from '../lib/backend';
 import { useParamsStore, useUIStore } from '../store';
 import { SkillPane } from './SkillPane';
 import { PROVIDER_MODEL_SUGGESTIONS, lookupMaxOutput } from '../lib/modelCatalog';
@@ -99,7 +99,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       <div className="settings-modal">
         <div className="settings-nav">
           <div className="settings-brand">
-            <ShieldCheck size={15} /> 小悟 · 设置
+            <ShieldCheck size={15} /> {displayAgentName(useUIStore((s) => s.agentName))} · 设置
           </div>
           {NAV.map((n) => (
             <button
@@ -466,8 +466,11 @@ function GeneralTab() {
           defaultValue={loadConfig().agentName}
           placeholder="小悟"
           onBlur={(e) => {
+            const name = e.target.value.trim() || '小悟';
             const c = loadConfig();
-            saveConfig({ ...c, agentName: e.target.value.trim() || '小悟' });
+            saveConfig({ ...c, agentName: name });
+            useUIStore.getState().setAgentName(name);
+            refreshShellTitle(name);
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
@@ -509,12 +512,13 @@ function PetToggleRow() {
 
 function AboutTab() {
   const [version, setVersion] = useState('0.6.0');
+  const shellName = displayAgentName(useUIStore((s) => s.agentName));
   React.useEffect(() => {
     void window.desktopApi?.getVersion?.().then((v) => { if (v) setVersion(v); }).catch(() => {});
   }, []);
   return (
     <div className="settings-pane">
-      <h3>小悟 Desktop</h3>
+      <h3>{shellName} Desktop</h3>
       <p className="settings-hint">
         my_agent 桌面客户端 v{version} —— Python 通用 AI Agent 的图形工作台。
         单循环执行 · 多标签会话 · 工作区文件树 · 任务中心 · 技能包 · 审批沙箱 ·

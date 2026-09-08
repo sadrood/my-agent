@@ -6,7 +6,8 @@
 import React, { useEffect, useState } from 'react';
 import { Bot, Eye, EyeOff, FolderOpen, Rocket, Settings as SettingsIcon, SlidersHorizontal, X } from 'lucide-react';
 import { AppConfig, loadConfig, saveConfig } from '../lib/appConfig';
-import { useParamsStore } from '../store';
+import { refreshShellTitle } from '../lib/backend';
+import { useParamsStore, useUIStore } from '../store';
 
 const FALLBACK_BASE = 'http://127.0.0.1:8090';
 
@@ -75,6 +76,9 @@ export function OnboardingModal({ firstRun, onDone, onClose }: Props) {
   const finish = () => {
     const finalCfg = { ...cfg, workDir: workDirPicker || cfg.workDir, onboarded: true };
     saveConfig(finalCfg);
+    // 改名即时同步界面壳（状态栏/标题/窗口标题）
+    useUIStore.getState().setAgentName(finalCfg.agentName || '小悟');
+    refreshShellTitle(finalCfg.agentName || '小悟');
     onDone(finalCfg);
     // 密钥：安全层可用时加密落盘（saveConfig 已把明文从 localStorage 剥离）
     if (window.desktopApi?.secureSet) {
@@ -116,7 +120,7 @@ export function OnboardingModal({ firstRun, onDone, onClose }: Props) {
         <div className="modal-header">
           <h2>
             {firstRun
-              ? <><Rocket size={16} style={{ display: 'inline', marginRight: 6 }} />欢迎使用小悟 Desktop</>
+              ? <><Rocket size={16} style={{ display: 'inline', marginRight: 6 }} />欢迎使用 {cfg.agentName || '小悟'} Desktop</>
               : <><SettingsIcon size={16} style={{ display: 'inline', marginRight: 6 }} />设置</>}
           </h2>
           <p>{firstRun ? '配好这几块就能开干：名字 · 对话模型 · 视觉模型 · 工作目录' : '名字 · 对话模型 · 视觉模型 · 工作目录 · 生成参数'}</p>
