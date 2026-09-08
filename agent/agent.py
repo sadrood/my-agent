@@ -30,6 +30,28 @@ from agent.ui_theme import (
 )
 
 
+# 未完成判定：结果/摘要里出现这些标记 = 任务没跑完（上限/停止/中断）
+INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务已停止", "已停止", "中断", "max_ops")
+
+def compose_handoff(goal: str, reason: str, final: str, done_hint: str = "") -> str:
+    """无 LLM 可用的兜底交接文本（也用作 LLM 生成的统一外壳）。
+
+    目标是让下一轮/用户明确知道：没做完、做到哪、只续不重做。
+    """
+    parts = [
+        "【任务进度交接｜未完成】",
+        f"原因：{reason}",
+        f"目标：{goal[:200]}",
+    ]
+    if done_hint:
+        parts.append(f"已完成（供参考）：{done_hint[:600]}")
+    parts.append("要求：后续继续本任务时，只执行未完成部分并沿用既有成果，"
+                 "不要重新执行已完成的操作；如需重做必须向用户说明理由。")
+    if final:
+        parts.append(f"原始收尾信息：{final[:500]}")
+    return "\n".join(parts)
+
+
 def _resolve_compact_threshold(llm=None) -> int:
     """压缩触发阈值解析（供实例方法/无 llm 场景共用）。
 
@@ -282,6 +304,38 @@ class Agent:
         """当前生效的 Agent 名字：用户自定义优先，缺省回人格名。"""
         name = (getattr(self.config, "agent_name", "") or "").strip()
         return name or str(PERSONALITY.get("name", "小悟"))
+
+    def _handoff_for_incomplete(self, goal: str, reason: str, final: str) -> str:
+        """未完成任务 → 结构化交接清单（LLM 总结；失败时兜底模板）。
+
+        产出同时成为用户看到的最终文案与持久化摘要，供下一轮"继续"使用。
+        """
+        rule = "要求：后续继续本任务时只执行未完成部分并沿用既有成果，不要重新执行已完成的操作。"
+        try:
+            recent = self.memory.get_recent_messages(40)
+            lines = []
+            for m in recent:
+                role = "用户" if m["role"] == "user" else self._agent_name()
+                lines.append(f"- {role}: {str(m['content'] or '')[:180]}")
+            transcript = "\n".join(lines[-36:])
+            prompt = (
+                f"刚才的任务没有完成（原因：{reason}）。根据以下本会话近期执行记录，"
+                "输出精炼中文交接清单（正文≤600字，只输出清单）：\n"
+                "✅ 已完成：明确写出成果（文件/操作/验证状态），没有就写'无'\n"
+                "❌ 未完成：剩余工作逐项列出\n"
+                "📍 断点：下一步从哪继续（具体文件/命令/位置）\n\n"
+                f"目标：{goal[:300]}\n\n近期执行记录：\n{transcript[-6000:]}"
+            )
+            resp = self.llm.chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=700, temperature=0.2,
+            )
+            text = (resp or "").strip()
+            if text:
+                return f"【任务进度交接｜未完成（{reason}）】\n{text}\n\n{rule}"
+        except Exception:
+            pass
+        return compose_handoff(goal, reason, final)
 
     def _build_llm(self):
         """按临时覆盖配置构建主 LLM（无覆盖时走 .env 配置）。"""
@@ -1184,9 +1238,16 @@ class Agent:
 
         # 3. 上下文：会话历史 + 经验 + 策略 + 失败警告
         context_parts = []
+        # B/C. 未完成续跑：放宽回忆预算 + 注入"只续不重做"指令
         if keep_session:
+            prev_summary = self.last_execution_summary or ""
+            resume_unfinished = any(k in prev_summary for k in INCOMPLETE_MARKERS)
             ctx_count = int(SESSION_CONFIG.get("context_messages", 12))
             ctx_chars = int(SESSION_CONFIG.get("context_message_chars", 400))
+            if resume_unfinished:
+                # 上轮没跑完：回忆窗口自动加大，避免断点细节被 12×400 截掉
+                ctx_count = max(ctx_count, int(SESSION_CONFIG.get("resume_context_messages", 30)))
+                ctx_chars = max(ctx_chars, int(SESSION_CONFIG.get("resume_context_chars", 600)))
             recent = self.memory.get_recent_messages(ctx_count)
             if len(recent) > 1:
                 ctx_lines = ["\n## 之前的对话记录"]
@@ -1195,6 +1256,10 @@ class Agent:
                     ctx_lines.append(f"- {role_label}: {m['content'][:ctx_chars]}")
                 if self.last_execution_summary:
                     ctx_lines.append(f"上一轮执行摘要: {self.last_execution_summary}")
+                if resume_unfinished:
+                    ctx_lines.append(
+                        "⚠️ 上一轮任务未完成：你只允许执行「未完成清单」中的事项并继续断点；"
+                        "已完成项视为已交付，不得重新执行；若用户新目标与上轮明显不同则以新目标为准。")
                 context_parts.append("\n".join(ctx_lines))
         if experience_context:
             context_parts.append(f"\n## 历史经验（可参考的成功做法）\n{experience_context}")
@@ -1298,6 +1363,21 @@ class Agent:
         self._stop_turn_spinner()
 
         final = result.get("output", "").strip() or "任务执行完毕（无文字总结）。"
+        # A. 未完成交接：停止/达到最大轮数 → 生成结构化进度清单，
+        #    替换原收尾文案（同时成为下一轮注入的 last_summary 与用户可见总结）
+        incomplete_reason = None
+        if result.get("stopped"):
+            incomplete_reason = "任务被停止/中断"
+        elif not result.get("success") and (
+            "已达到任务最大操作轮数" in final or "已达到任务最大操作轮数" in str(result.get("errors"))
+        ):
+            incomplete_reason = f"达到任务最大操作轮数（{result.get('ops') or '?'}）"
+        if incomplete_reason and self.rollout is not None:
+            # 交接收尾也进 rollout，日志可复盘
+            try:
+                self.rollout.emit("handoff", {"reason": incomplete_reason, "text": final[:200]})
+            except Exception:
+                pass
         # 空回复：明确记为失败并补充原因（供失败模式学习，防止污染经验库）
         if not result.get("output", "").strip():
             result["errors"] = list(result.get("errors") or []) + ["模型返回空回复（上游服务可能降级）"]
@@ -1308,6 +1388,9 @@ class Agent:
             if name:
                 tool_usage[name] = tool_usage.get(name, 0) + 1
                 self._tools_used_this_run.add(name)
+
+        if incomplete_reason:
+            final = self._handoff_for_incomplete(goal, incomplete_reason, final)
 
         # 6. 记忆与自我进化（与计划模式一致）
         self.memory.add_message("user", goal)

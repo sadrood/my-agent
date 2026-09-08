@@ -343,6 +343,9 @@ SESSION_CONFIG = {
     "max_sessions": int(os.getenv("SESSION_MAX", "50")),
     # 继续任务时注入上下文的"之前对话"条数（含当前句；注入 recent[:-1]）
     "context_messages": int(os.getenv("SESSION_CONTEXT_MESSAGES", "12")),
+    # 上轮未完成（上限/停止）时自动放宽的回忆预算
+    "resume_context_messages": int(os.getenv("SESSION_RESUME_CONTEXT_MESSAGES", "30")),
+    "resume_context_chars": int(os.getenv("SESSION_RESUME_CONTEXT_CHARS", "600")),
     # 每条历史消息注入的最大字符数（防超长回答撑爆上下文）
     "context_message_chars": int(os.getenv("SESSION_CONTEXT_CHARS", "400")),
 }
