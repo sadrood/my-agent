@@ -69,7 +69,7 @@ def _cache_path(kind: str) -> str:
     url_n = url.replace("\\", "/").rstrip("/")
     name = re.sub(r"[^A-Za-z0-9_.-]+", "-",
                   url_n.rsplit("/", 1)[-1].replace(".git", ""))
-    base = str(cfg.get("cache_dir") or "./memory/experience_lib")
+    base = os.path.abspath(str(cfg.get("cache_dir") or "./memory/experience_lib"))
     return os.path.join(base, f"{kind}-{name}")
 
 
@@ -208,6 +208,8 @@ class ExperienceTool(BaseTool):
         notes: List[str] = []
         hits: List[Tuple[str, str, str, float]] = []   # (kind, rel, full, score)
         for kind in ("private", "public"):
+            if not _repo_url(kind):
+                continue        # 公共库可选：未配置不打扰
             path, err = self._ensure_repo(kind)
             if err or not path:
                 if err:
@@ -292,7 +294,8 @@ class ExperienceTool(BaseTool):
             full = os.path.join(target_dir, fname)
             with open(full, "w", encoding="utf-8", newline="\n") as f:
                 f.write(entry)
-            _git(["add", full], cwd=path)
+            rel_entry = os.path.relpath(full, path)
+            _git(["add", "--", rel_entry], cwd=path)
             _git(["commit", "-m", f"experience: {domain} - {topic}"], cwd=path)
             sha = _git(["rev-parse", "--short", "HEAD"], cwd=path)[1]
             code, msg = _git(["push", "origin",
