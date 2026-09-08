@@ -8,6 +8,7 @@ import {
   MessageSquare, Plus, Search, Settings, ListChecks, PanelLeft, Sparkles,
 } from 'lucide-react';
 import { useUIStore } from '../store';
+import { displayAgentName } from '../lib/appConfig';
 
 interface RailAction {
   icon: React.ReactNode;
@@ -17,6 +18,7 @@ interface RailAction {
 
 export function RailPanel() {
   const expand = () => useUIStore.getState().toggleLeftPanel();
+  const shellName = displayAgentName(useUIStore((s) => s.agentName));
 
   const actions: RailAction[] = [
     { icon: <MessageSquare size={17} />, title: '会话列表', onOpen: expand },
@@ -40,7 +42,7 @@ export function RailPanel() {
 
   return (
     <div className="rail-panel">
-      <div className="rail-brand" title="小悟 Desktop（展开侧栏）" onClick={expand}>
+      <div className="rail-brand" title={`${shellName} Desktop（展开侧栏）`} onClick={expand}>
         <Sparkles size={15} />
       </div>
       <div className="rail-nav">

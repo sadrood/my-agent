@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { PanelRight, PanelLeft, Shield, ShieldCheck, ShieldOff, Wifi, WifiOff, Moon, Sun } from 'lucide-react';
 import { useUIStore, useBackendStore, setCurrentWorkspace } from '../store';
+import { displayAgentName } from '../lib/appConfig';
 import { stopRun } from '../lib/backend';
 import type { PermissionMode } from '../lib/types';
 
@@ -17,6 +18,8 @@ export const MODE_META: Record<PermissionMode, { label: string; dot: string; ico
 };
 
 export function StatusBar({ sessionId }: { sessionId: string | null }) {
+  // Agent 显示名：设置改名后全壳跟随（空 = 默认「小悟」）
+  const shellName = displayAgentName(useUIStore((s) => s.agentName));
   const { theme, setTheme, toggleRightPanel, toggleLeftPanel } = useUIStore();
   const { connected, running, turnStart } = useBackendStore();
   const [version, setVersion] = useState('');
@@ -47,14 +50,14 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   };
 
   const brandTitle = [
-    '小悟 Desktop',
+    `${shellName} Desktop`,
     version ? `构建 v${version}` : '',
     sessionId ? `会话 #${sessionId.slice(-8)}` : '',
   ].filter(Boolean).join(' · ');
 
   return (
     <div className="status-bar">
-      <span className="brand" title={brandTitle}>小悟</span>
+      <span className="brand" title={brandTitle}>{shellName}</span>
       <span className="spacer" />
       {running && turnStart && (
         <button className="status-chip running-chip" title={`任务运行中（第 ${turnStart.turn} 轮）；点击停止`} onClick={() => void stopRun()}>

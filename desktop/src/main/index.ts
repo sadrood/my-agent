@@ -641,13 +641,23 @@ function startBrowserBridge(): void {
   server.on('error', (e) => console.warn(`[main] 内嵌浏览器桥启动失败（桌面端 Agent 将回退独立浏览器）: ${e.message}`));
 }
 
+// Agent 显示名（设置里改名字 → IPC app:set-title 更新；窗口标题/通知/桌宠标题跟随）
+let appDisplayName = '小悟';
+
+ipcMain.handle('app:set-title', (_e, name: string) => {
+  const v = String(name || '').trim();
+  if (v) appDisplayName = v;
+  if (mainWindow) mainWindow.setTitle(`${appDisplayName} Desktop`);
+  return true;
+});
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 960,
     minHeight: 600,
-    title: '小悟 Desktop',
+    title: `${appDisplayName} Desktop`,
     backgroundColor: '#0f1115',
     // 自定义标题栏：隐藏原生标题条，Windows 用原生 overlay 窗口按钮（缩放/关闭），
     // 拖拽区由状态栏承担（CSS -webkit-app-region）
@@ -711,7 +721,7 @@ function createPetWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
-    title: '小悟',
+    title: appDisplayName,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -854,7 +864,7 @@ ipcMain.handle('app:notify-done', (_event, status?: string) => {
       : status === 'completed' ? '✅ 任务完成'
         : '任务已结束';
   if (Notification.isSupported()) {
-    const n = new Notification({ title: '小悟 Desktop', body, silent: false });
+    const n = new Notification({ title: `${appDisplayName} Desktop`, body, silent: false });
     n.on('click', () => {
       if (mainWindow) {
         if (mainWindow.isMinimized()) mainWindow.restore();
@@ -930,7 +940,7 @@ function createPetPanelWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: true,
-    title: '小悟 · 对话',
+    title: `${appDisplayName} · 对话`,
     backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),

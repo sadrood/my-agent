@@ -44,6 +44,8 @@ export function clampWidthToWindow(): void {
 }
 
 interface UIState {
+  agentName: string;
+  setAgentName: (name: string) => void;
   theme: 'light' | 'dark';
   rightPanelOpen: boolean;
   leftPanelOpen: boolean;
@@ -77,6 +79,9 @@ export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       theme: 'light',
+      // Agent 显示名：界面壳动态跟随（设置里改名字后全局生效；空=默认「小悟」）
+      agentName: '',
+      setAgentName: (name) => set({ agentName: name }),
       rightPanelOpen: false,       // 默认两栏（左+中）；右栏（工作台）手动打开
       leftPanelOpen: true,
       rightTab: 'overview',
