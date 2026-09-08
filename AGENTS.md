@@ -8,9 +8,10 @@ my_agent 是一个 Python 实现的通用 AI Agent，融合了主流开源 agent
 与上游宿主框架的设计优点。
 
 ## 云经验库
-- 你有云经验库工具 `experience`（本机 .env 已配置私有 GitHub 经验仓）：
-  陌生领域/踩坑先用 `experience search` 检索参考；重要任务或复盘用
-  `experience save` 沉淀（只写方法论，绝不写真实密钥）。条目仅作参考。
+- 你有云经验库工具 `experience`：陌生领域/踩坑先用 `experience search` 检索参考；
+  重要任务或复盘用 `experience save` 沉淀（只写方法论，绝不写真实密钥）。条目仅作参考。
+- 仓库地址来自 `.env`（`EXPERIENCE_PRIVATE_REPO` 私有学习仓 / `EXPERIENCE_PUBLIC_REPO`
+  公共分享仓）；本机未配置时先填 .env 再使用，未配置的仓会自动跳过。
 
 ## 开发规则
 1. 一次只改一个模块；改完立即运行测试（命令见 `.env` 的 `TEST_COMMAND`，
