@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>pet</title>
+<style>
+  /* 桌面宠物（上游桌面宠物插件的鲸鱼娘 spritesheet 动画）：
+     透明置顶小窗；状态经 IPC 'pet:status' 推送；纯 vanilla。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { background: transparent; overflow: hidden; height: 100%; }
+  body {
+    -webkit-app-region: no-drag;
+    font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  }
+  /* 精灵容器：鲸鱼画面区域（点击可拖拽/单击弹菜单） */
+  #stage {
+    position: absolute; left: 50%; bottom: 30px;
+    transform: translateX(-50%);
+    width: 119px; height: 130px;
+    cursor: pointer;
+  }
+  #sprite {
+    width: 119px; height: 130px;
+    background-repeat: no-repeat;
+    image-rendering: auto;
+    transform-origin: 50% 100%;
+    transform: translateZ(0);
+    will-change: background-position;
+  }
+  #stage { transform: translateX(-50%) translateZ(0); }
+  #sprite.bounce { animation: hop .4s ease; }
+  @keyframes hop { 0%,100% { transform: translateY(0); } 40% { transform: translateY(-10px); } }
+  /* 任务结束头顶飘字 */
+  #endPop {
+    position: absolute; top: -26px; left: 50%;
+    font-size: 22px; pointer-events: none;
+    transform: translateX(-50%);
+    opacity: 0;
+  }
+  #endPop.go { animation: popUp 1.7s ease-out forwards; }
+  @keyframes popUp {
+    0% { opacity: 0; transform: translate(-50%, 8px) scale(.6); }
+    25% { opacity: 1; transform: translate(-50%, -4px) scale(1.2); }
+    100% { opacity: 0; transform: translate(-50%, -40px) scale(1); }
+  }
+  /* 状态气泡（悬浮于精灵上方，随状态自动消失） */
+  #bubble {
+    position: absolute; left: 50%; bottom: calc(100% + 10px);
+    transform: translateX(-50%) translateY(4px);
+    max-width: 150px; padding: 5px 10px;
+    font-size: 11px; line-height: 1.45; color: #4a3b35;
+    background: rgba(255,255,255,.95);
+    border: 1px solid rgba(120,150,180,.35);
+    border-radius: 12px 12px 12px 3px;
+    box-shadow: 0 3px 10px rgba(20,30,45,.22);
+    text-align: center;
+    opacity: 0; pointer-events: none;
+    transition: opacity .22s ease, transform .22s ease;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  #bubble.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* 右上角小操作钮 */
+  #actions { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; }
+  .pet-btn {
+    width: 20px; height: 20px; border-radius: 50%;
+    border: 1px solid rgba(120,150,180,.45); cursor: pointer;
+    background: rgba(255,255,255,.9); color: #48637a;
+    font-size: 10.5px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 6px rgba(20,30,45,.15);
+    transition: transform .12s;
+  }
+  .pet-btn:hover { transform: scale(1.15); background: #fff; }
+  /* 状态点（运行中橙色呼吸） */
+  #dot {
+    position: absolute; top: 10px; left: 6px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #9fb3c3; transition: background .2s;
+  }
+  #dot.on { background: #fbbf24; animation: blinkDot 1s infinite; }
+  @keyframes blinkDot { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  /* 菜单 */
+  #menu {
+    position: fixed; left: 6px; bottom: 148px; z-index: 20;
+    min-width: 116px; padding: 4px;
+    background: rgba(255,255,255,.97);
+    border: 1px solid rgba(120,150,180,.35);
+    border-radius: 10px; box-shadow: 0 6px 18px rgba(20,30,45,.25);
+    display: none; flex-direction: column; gap: 1px;
+  }
+  #menu.show { display: flex; }
+  #menu button {
+    display: flex; align-items: center; gap: 6px;
+    border: none; background: transparent; cursor: pointer;
+    font-size: 11.5px; color: #33414e; padding: 6px 9px; border-radius: 7px;
+    text-align: left; font-family: inherit;
+  }
+  #menu button:hover { background: rgba(120,150,180,.14); }
+</style>
+</head>
+<body>
+  <div id="dot" title="运行状态"></div>
+  <div id="actions">
+    <button class="pet-btn" id="btn-focus" title="打开主窗口">⌂</button>
+    <button class="pet-btn" id="btn-close" title="收起宠物">✕</button>
+  </div>
+  <div id="bubble">小悟待命中<br/>拖拽移动 · 单击菜单</div>
+  <div id="menu">
+    <button id="menu-panel">💬 对话面板</button>
+    <button data-action="new-session">✚ 新对话</button>
+    <button data-action="stop-run">⏹ 暂停任务</button>
+    <button data-action="focus-main">⌂ 主窗口</button>
+  </div>
+  <div id="stage" title="小悟">
+    <div id="sprite"></div>
+    <div id="endPop"></div>
+  </div>
+<script>
+/* ===== 鲸鱼娘 spritesheet（MIT 参考实现，资产随构建进入 public/pet-assets） ===== */
+const CELL_W = 192, CELL_H = 208;          // 1536x1872 / 8列 x 9行
+const SCALE = 130 / CELL_H;                 // 显示高 130
+const SPRITE_W = Math.round(CELL_W * SCALE); // 119
+const SPRITE_H = 130;
+const ROW_OF = { idle: 0, 'running-right': 1, 'running-left': 2, waving: 3, jumping: 4, failed: 5, waiting: 6, running: 7, review: 8 };
+const TRACKS = {"idle": {"durations": [400, 400, 500, 400, 400, 500]}, "running-right": {"durations": [225, 225, 225, 225, 225, 225, 225, 225]}, "running-left": {"durations": [225, 225, 225, 225, 225, 225, 225, 225]}, "waving": {"durations": [350, 350, 350, 350]}, "jumping": {"durations": [300, 300, 300, 350, 350]}, "failed": {"durations": [450, 450, 450, 500, 550, 600, 450, 450]}, "waiting": {"durations": [450, 450, 500, 450, 450, 500]}, "running": {"durations": [250, 250, 250, 250, 250, 250]}, "review": {"durations": [550, 550, 550, 550, 550, 550]}};
+
+const sprite = document.getElementById('sprite');
+sprite.style.width = SPRITE_W + 'px';
+sprite.style.height = SPRITE_H + 'px';
+sprite.style.backgroundImage = 'url("pet-assets/whale/spritesheet.webp")';
+sprite.style.backgroundSize = `${Math.round(1536 * SCALE)}px ${Math.round(1872 * SCALE)}px`;
+
+let phase = 'idle';
+let anim = null; // { name, i, last, loop, oneShot }
+let endTimer = null;
+let atlasReady = false;
+const preload = new Image();
+preload.onload = () => { atlasReady = true; play('idle', false); };
+preload.src = 'pet-assets/whale/spritesheet.webp';
+
+function play(name, oneShot) {
+  const t = TRACKS[name];
+  if (!t) return;
+  if (anim && anim.name === name && anim.loop === !oneShot) return; // 同动画不重启，防抖
+  phase = name;
+  anim = { name, i: 0, last: performance.now(), loop: !oneShot, oneShot: !!oneShot };
+  sprite.style.backgroundPosition = framePos(name, 0); // 立即切首帧，避免上一动画残帧
+  // 一次性动画播完提前回 idle（对齐同类实现的 finishTimer 逻辑），避免停在末帧
+  if (oneShot) {
+    const total = t.durations.reduce((a, b) => a + b, 0);
+    if (endTimer) clearTimeout(endTimer);
+    endTimer = setTimeout(() => { if (phase === name) play('idle', false); }, total + 40);
+  }
+}
+function framePos(name, i) {
+  const row = ROW_OF[name] || 0;
+  return `${-Math.round(i * CELL_W * SCALE)}px ${-Math.round(row * CELL_H * SCALE)}px`;
+}
+let elapsedAcc = 0;
+function tick(now) {
+  const a = anim;
+  if (!a || !atlasReady) { requestAnimationFrame(tick); return; }
+  const durs = TRACKS[a.name].durations;
+  const delta = now - a.last;
+  a.last = now;
+  elapsedAcc += delta;
+  let idx = a.i;
+  let changed = false;
+  while (elapsedAcc >= (durs[idx] || 0)) {
+    elapsedAcc -= durs[idx] || 0;
+    idx += 1;
+    changed = true;
+    if (idx >= durs.length) {
+      if (a.loop) { idx = 0; }
+      else {
+        idx = durs.length - 1;
+        break;
+      }
+    }
+  }
+  if (anim === a && (changed || idx !== a.i)) {
+    a.i = idx;
+    sprite.style.backgroundPosition = framePos(a.name, Math.min(idx, durs.length - 1));
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+/* ===== 气泡 / 状态 / 结束飘字 ===== */
+const bubble = document.getElementById('bubble');
+const endPop = document.getElementById('endPop');
+const dot = document.getElementById('dot');
+let bubbleTimer = null;
+
+function say(text, sticky) {
+  bubble.textContent = text;
+  bubble.classList.add('show');
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  if (!sticky) bubbleTimer = setTimeout(() => bubble.classList.remove('show'), 2600);
+}
+function popEnd(sym) {
+  endPop.textContent = sym;
+  endPop.classList.remove('go');
+  void endPop.offsetWidth; // 重启动画
+  endPop.classList.add('go');
+  if (endTimer) clearTimeout(endTimer);
+  endTimer = setTimeout(() => endPop.classList.remove('go'), 1800);
+}
+function setRunning(v, endStatus) {
+  dot.classList.toggle('on', v);
+  if (v) {
+    play('running', false);
+    say('工作中…', true);
+  } else {
+    dot.classList.remove('on');
+    const map = {
+      completed: ['✅', '搞定啦 ✌', 'jumping'],
+      failed: ['❌', '任务失败', 'failed'],
+      stopped: ['⏹', '已停止', 'idle'],
+      error: ['❌', '出错了', 'failed'],
+    };
+    const hit = endStatus && map[endStatus];
+    if (hit) {
+      popEnd(hit[0]);
+      say(hit[1], false);
+      play(hit[2], true);
+    } else {
+      play('idle', false);
+      say('待命中', false);
+    }
+  }
+}
+if (window.desktopApi?.onPetStatus) window.desktopApi.onPetStatus();
+window.addEventListener('pet-status', (e) => {
+  const [v, end] = e.detail || [];
+  setRunning(Boolean(v), end);
+});
+
+/* ===== 菜单 / 拖拽 / 点击 ===== */
+const menu = document.getElementById('menu');
+document.getElementById('menu-panel')?.addEventListener('click', () => {
+  menu.classList.remove('show');
+  window.desktopApi?.petOpenPanel?.();
+  play('waving', true);
+});
+menu.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  menu.classList.remove('show');
+  const action = btn.dataset.action;
+  if (action === 'focus-main') window.desktopApi?.focusMain?.();
+  else window.desktopApi?.sendPetAction?.(action);
+});
+window.addEventListener('mousedown', (e) => {
+  if (!menu.contains(e.target) && !stage.contains(e.target)) menu.classList.remove('show');
+});
+
+let drag = null;
+stage.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  drag = { sx: e.screenX, sy: e.screenY, moved: false };
+});
+window.addEventListener('mousemove', (e) => {
+  if (!drag) return;
+  const dx = e.screenX - drag.sx;
+  const dy = e.screenY - drag.sy;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  if (drag.moved) {
+    drag.sx = e.screenX;
+    drag.sy = e.screenY;
+    window.desktopApi?.moveWindow?.(dx, dy);
+  }
+});
+window.addEventListener('mouseup', () => {
+  if (!drag) return;
+  const wasDrag = drag.moved;
+  drag = null;
+  if (!wasDrag) {
+    menu.classList.toggle('show');
+    play('waving', true); // 点击反馈
+  }
+});
+
+document.getElementById('btn-focus').addEventListener('click', () => window.desktopApi?.focusMain?.());
+document.getElementById('btn-close').addEventListener('click', () => {
+  window.desktopApi?.petToggle?.(false);
+  window.close();
+});
+</script>
+</body>
+</html>

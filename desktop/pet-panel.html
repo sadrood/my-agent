@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>小悟 · 对话</title>
+<style>
+  /* 桌宠对话面板（对齐同类桌宠面板）：透明圆角窗 + 深色玻璃。
+     数据链路：主窗口 PetBridge 推送 pet:push（state/status/answer/done/error），
+     本页发送经 pet:send-message → 主窗口 sendGoal 真实执行。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body {
+    background: transparent; overflow: hidden; height: 100%;
+    font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  }
+  #shell {
+    position: absolute; inset: 0;
+    background: rgba(18, 22, 28, 0.92);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 16px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0,0,0,.45);
+  }
+  /* 头部：整条可拖窗 */
+  #head {
+    -webkit-app-region: drag;
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    color: #e8edf4; font-size: 12.5px; font-weight: 600;
+  }
+  #head button { -webkit-app-region: no-drag; }
+  #sessionName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: #5c6b7c; flex-shrink: 0; }
+  #dot.on { background: #fbbf24; animation: blink 1s infinite; }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .head-btn {
+    margin-left: auto; flex-shrink: 0;
+    width: 22px; height: 22px; border-radius: 7px;
+    border: none; background: rgba(255,255,255,0.06); color: #aab6c4;
+    cursor: pointer; font-size: 12px; line-height: 1;
+  }
+  .head-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+  /* 消息区 */
+  #msgs { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 86%; padding: 6px 10px; font-size: 12px; line-height: 1.55;
+    word-break: break-word; white-space: pre-wrap; user-select: text; }
+  .msg.user { align-self: flex-end; background: linear-gradient(135deg, #3a5a8c, #2d4a76);
+    color: #eef3fa; border-radius: 11px 11px 3px 11px; }
+  .msg.assistant { align-self: flex-start; background: rgba(255,255,255,0.07); color: #d8e1ec;
+    border-radius: 11px 11px 11px 3px; }
+  .msg.sys { align-self: center; font-size: 10.5px; color: #8fa0b3; background: none; max-width: 100%; }
+  .msg .ts { display: block; font-size: 9px; opacity: .5; margin-top: 2px; }
+  /* 状态摘要行 */
+  #statusBar { padding: 5px 12px; border-top: 1px solid rgba(255,255,255,0.07);
+    color: #8fa0b3; font-size: 10px; min-height: 22px;
+    display: flex; align-items: center; gap: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  #statusBar b { color: #a9c6ec; font-weight: 600; }
+  #statusBar .stop-btn {
+    margin-left: auto; flex-shrink: 0;
+    border: 1px solid rgba(255,120,120,.45); background: rgba(220,60,60,.16);
+    color: #ffb3b3; font-size: 10px; font-weight: 600;
+    padding: 2px 10px; border-radius: 999px; cursor: pointer;
+  }
+  #statusBar .stop-btn:hover { background: rgba(220,60,60,.3); }
+  /* 会话切换下拉 */
+  #sessionMenu {
+    position: absolute; top: 40px; left: 10px; right: 10px; z-index: 30;
+    background: rgba(24,29,36,.98); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px; box-shadow: 0 12px 30px rgba(0,0,0,.5);
+    display: none; flex-direction: column; max-height: 260px; overflow-y: auto; padding: 4px;
+  }
+  #sessionMenu.show { display: flex; }
+  #sessionMenu button {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: none; color: #d8e1ec;
+    font-size: 11.5px; padding: 6px 9px; border-radius: 7px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: inherit;
+  }
+  #sessionMenu button:hover { background: rgba(255,255,255,.08); }
+  #sessionMenu button.cur { color: #9fc3f2; font-weight: 600; }
+  /* 输入行 */
+  #composer { display: flex; gap: 6px; padding: 8px 10px 10px; }
+  #input {
+    flex: 1; min-width: 0; resize: none;
+    background: rgba(255,255,255,0.07); color: #eef3fa;
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 10px;
+    padding: 7px 10px; font-size: 12.5px; line-height: 1.4;
+    outline: none; user-select: text;
+    font-family: inherit;
+  }
+  #input:focus { border-color: #4a7bbd; }
+  #send {
+    align-self: flex-end; border: none; border-radius: 10px;
+    background: #4a7bbd; color: #fff; font-size: 12px; font-weight: 600;
+    padding: 7px 14px; cursor: pointer;
+  }
+  #send:disabled { opacity: .5; cursor: default; }
+  #hint { padding: 0 12px 8px; color: #5f6f82; font-size: 9.5px; }
+  /* 浅色主题（跟随主窗口） */
+  #shell.light {
+    background: rgba(246, 248, 251, 0.96);
+    border-color: rgba(0,0,0,.08);
+    box-shadow: 0 18px 50px rgba(30,40,60,.25);
+  }
+  #shell.light #head { color: #22303c; border-bottom-color: rgba(0,0,0,.06); }
+  #shell.light .msg.assistant { background: rgba(0,0,0,.05); color: #2c3945; }
+  #shell.light .msg.user { color: #eef3fa; }
+  #shell.light #statusBar { color: #5f6f82; border-top-color: rgba(0,0,0,.06); }
+  #shell.light #statusBar b { color: #33568a; }
+  #shell.light #input { background: #fff; color: #22303c; border-color: rgba(0,0,0,.12); }
+  #shell.light .head-btn { background: rgba(0,0,0,.05); color: #5a6a7a; }
+  #shell.light .head-btn:hover { background: rgba(0,0,0,.1); color: #22303c; }
+  #shell.light #sessionMenu { background: rgba(255,255,255,.98); border-color: rgba(0,0,0,.1); }
+  #shell.light #sessionMenu button { color: #2c3945; }
+  #shell.light #sessionMenu button:hover { background: rgba(0,0,0,.05); }
+  #shell.light #sessionMenu button.cur { color: #2f5f9f; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+</style>
+</head>
+<body>
+  <div id="shell">
+    <div id="head">
+      <span id="dot"></span>
+      <span id="sessionName" title="点击切换会话">小悟 ▾</span>
+      <button class="head-btn" id="pin" title="置顶切换">📌</button>
+      <button class="head-btn" id="close" title="关闭面板">✕</button>
+    </div>
+    <div id="sessionMenu"></div>
+    <div id="msgs"></div>
+    <div id="statusBar">
+      <span id="stText">等待任务…</span>
+      <button id="stopBtn" class="stop-btn" style="display:none" title="终止当前任务">⏹ 停止</button>
+    </div>
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="给 Agent 派活…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <button id="send">发送</button>
+    </div>
+    <div id="hint">运行摘要来自主窗口实时推送 · 消息在主对话可见</div>
+  </div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const msgs = $('msgs');
+  const api = window.desktopApi;
+  let sessionId = null;
+  let running = false;
+  let autoScroll = true;
+  let pinTop = false;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
+  }
+  function clock() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function addMsg(kind, text) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + kind;
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = clock();
+    const body = document.createElement('span');
+    body.innerHTML = esc(text);
+    wrap.appendChild(body);
+    wrap.appendChild(ts);
+    msgs.appendChild(wrap);
+    while (msgs.children.length > 200) msgs.removeChild(msgs.firstChild);
+    if (autoScroll) msgs.scrollTop = msgs.scrollHeight;
+  }
+  function setRunning(v) {
+    running = v;
+    $('dot').classList.toggle('on', v);
+    $('stopBtn').style.display = v ? 'inline-block' : 'none';
+  }
+  function setStatus(t) { $('stText').textContent = t; }
+  function setSession(name, id) {
+    const newId = id || sessionId;
+    const changed = newId !== sessionId;
+    sessionId = newId;
+    $('sessionName').textContent = (name || '小悟') + ' ▾';
+    if (changed) void loadHistory(); // 同会话的状态推送不重复拉历史（防闪烁）
+  }
+  // 会话切换下拉（后端 /api/sessions 列表）
+  let sessionsList = [];
+  $('sessionName').addEventListener('click', async () => {
+    const menu = $('sessionMenu');
+    if (menu.classList.contains('show')) { menu.classList.remove('show'); return; }
+    try {
+      const base = (api?.getBackendBase ? (await api.getBackendBase()).replace(/\/+$/, '') : 'http://127.0.0.1:8090');
+      const res = await fetch(`${base}/api/sessions`);
+      const json = await res.json();
+      sessionsList = json.sessions || [];
+    } catch { sessionsList = []; }
+    menu.innerHTML = '';
+    if (!sessionsList.length) {
+      menu.innerHTML = '<button disabled>没有可用会话</button>';
+    }
+    for (const sv of sessionsList.slice(0, 50)) {
+      const b = document.createElement('button');
+      b.textContent = `${sv.title || '会话'} · ${sv.count || 0} 条`;
+      if (sv.id === sessionId) b.classList.add('cur');
+      b.addEventListener('click', () => {
+        setSession(sv.title || sv.id.slice(-8), sv.id);
+        menu.classList.remove('show');
+      });
+      menu.appendChild(b);
+    }
+    menu.classList.add('show');
+  });
+  window.addEventListener('mousedown', (e) => {
+    const m = $('sessionMenu');
+    if (!m.contains(e.target) && e.target !== $('sessionName')) m.classList.remove('show');
+  });
+  // 打开时拉当前会话最近消息（后端会话 API；直连 BACKEND_BASE 需在 preload 暴露？先经由推送，历史走 fetch api）
+  async function loadHistory() {
+    if (!sessionId || !api?.getBackendBase) return;
+    try {
+      const base = (await api.getBackendBase()).replace(/\/+$/, '');
+      const res = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`);
+      const json = await res.json();
+      const list = (json.conversation?.messages) || [];
+      msgs.innerHTML = '';
+      // 最多最近 40 条，保留 消息对
+      const tail = list.slice(-40);
+      for (const m of tail) {
+        const role = String(m.role || '');
+        const content = String(m.content || '');
+        if (!content.trim()) continue;
+        if (role === 'user') addMsg('user', content.slice(0, 400));
+        else if (role === 'assistant') addMsg('assistant', content.slice(0, 1200));
+      }
+      if (!tail.length) addMsg('sys', '这个对话还没有消息，直接派活吧');
+    } catch { /* 后端不可达：忽略（仍可发消息走主窗口） */ }
+  }
+
+  // 推送订阅
+  if (api?.onPetPush) api.onPetPush();
+  window.addEventListener('pet-push', (e) => {
+    const d = (e.detail || {});
+    if (d.kind === 'state') {
+      setSession(d.session, d.sessionId);
+      setRunning(Boolean(d.running));
+      $('shell').classList.toggle('light', d.theme === 'light');
+    } else if (d.kind === 'user') {
+      setRunning(true);
+      addMsg('user', String(d.text || ''));
+    } else if (d.kind === 'status') {
+      setRunning(true);
+      addMsg('sys', '⚙ ' + String(d.text || ''));
+      setStatus(String(d.text || ''));
+    } else if (d.kind === 'answer') {
+      setRunning(false);
+      addMsg('assistant', String(d.text || ''));
+    } else if (d.kind === 'done') {
+      setRunning(false);
+      addMsg('sys', '✔ ' + String(d.text || ''));
+      setStatus(String(d.text || ''));
+    } else if (d.kind === 'error') {
+      setRunning(false);
+      addMsg('sys', '⚠ ' + String(d.text || ''));
+      setStatus('出错了：' + String(d.text || '').slice(0, 80));
+    }
+  });
+
+  // 发送
+  function send() {
+    const v = $('input').value.trim();
+    if (!v) return;
+    addMsg('user', v);
+    $('input').value = '';
+    $('input').style.height = 'auto';
+    $('send').disabled = true;
+    setRunning(true);
+    if (api?.petSendMessage) {
+      api.petSendMessage(v, sessionId || null).then(() => { $('send').disabled = false; });
+    }
+  }
+  $('send').addEventListener('click', send);
+  $('input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  $('input').addEventListener('input', () => {
+    const el = $('input');
+    el.style.height = 'auto';
+    el.style.height = Math.min(88, el.scrollHeight) + 'px';
+  });
+  msgs.addEventListener('scroll', () => {
+    autoScroll = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60;
+  });
+  $('stopBtn').addEventListener('click', () => {
+    api?.sendPetAction?.('stop-run');
+    addMsg('sys', '已请求停止任务…');
+  });
+  $('close').addEventListener('click', () => window.close());
+  // 置顶切换（简单本地记忆 + 主进程不做则仅提示）
+  $('pin').addEventListener('click', () => {
+    pinTop = !pinTop;
+    $('pin').style.opacity = pinTop ? 1 : 0.5;
+  });
+  setStatus('等待任务…');
+</script>
+</body>
+</html>

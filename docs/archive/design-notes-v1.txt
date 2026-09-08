@@ -1,0 +1,693 @@
+
+
+# 我们目前的目标
+
+**不是做聊天机器人，而是做一个真正的 AI Agent。**
+
+Agent 以后可以：
+
+* 思考（Think）
+* 制定计划（Plan）
+* 调用工具（Tool）
+* 观察结果（Observe）
+* 重新规划（RePlan）
+* 长期记忆（Memory）
+* 看视频（Vision）
+* 操作电脑（Computer Use）
+
+---
+
+# 第一阶段：搭建 Agent 骨架（我们现在就在这里）
+
+## 已完成
+
+### ① 项目结构
+
+```text
+my-agent/
+│
+├── agent/
+│   ├── __init__.py
+│   ├── agent.py
+│   └── state.py
+│
+├── models/
+│
+├── tools/
+│
+├── main.py
+│
+└── requirements.txt
+```
+
+---
+
+### ② Agent
+
+你已经创建了：
+
+```python
+class Agent:
+
+    def run(self):
+        ...
+
+    def think(self):
+        ...
+
+    def act(self):
+        ...
+
+    def observe(self):
+        ...
+```
+
+这里不要着急写实现。
+
+目前只是定义 Agent 有哪些职责。
+
+---
+
+### ③ AgentState
+
+你已经创建了：
+
+```python
+AgentState
+```
+
+它负责保存 Agent 当前的工作状态。
+
+例如：
+
+```python
+goal
+
+plan
+
+current_step
+
+history
+
+finished
+```
+
+以后：
+
+Planner
+
+Memory
+
+Browser
+
+Vision
+
+都会共享这一份 State。
+
+---
+
+# 我们为什么先写 State？
+
+很多人以为：
+
+Agent = LLM
+
+其实不是。
+
+真正的是：
+
+```text
+           Agent
+              │
+     ┌────────┴────────┐
+     ▼                 ▼
+ AgentState          Planner
+```
+
+LLM 不保存状态。
+
+State 永远属于 Agent。
+
+---
+
+# 我们讨论过的重要概念
+
+你问：
+
+> "规划不是大模型生成的吗？"
+
+答案：
+
+**规划是 LLM 生成的。**
+
+但是：
+
+**保存规划的是 Agent。**
+
+例如：
+
+第一次：
+
+```text
+用户：
+
+下载Python
+```
+
+LLM：
+
+```text
+① 打开浏览器
+② 搜索
+③ 下载
+④ 安装
+```
+
+Agent：
+
+保存：
+
+```python
+state.plan = [...]
+```
+
+以后：
+
+如果第三步失败：
+
+Agent：
+
+再告诉 LLM：
+
+> 前两步已经完成，第三步失败，请重新规划。
+
+所以：
+
+State 是 Agent 的。
+
+Plan 可以来自 LLM。
+
+---
+
+# 我们决定的架构
+
+以后整个项目：
+
+```text
+                User
+                  │
+                  ▼
+              Agent.run()
+                  │
+                  ▼
+             AgentState
+                  │
+                  ▼
+              Planner
+                  │
+                  ▼
+                LLM
+                  │
+                  ▼
+      OpenAI Compatible API
+```
+
+---
+
+# 我们决定使用
+
+不是 OpenAI 官方。
+
+而是：
+
+**OpenAI Compatible API**
+
+这样以后可以换：
+
+* DeepSeek
+* Qwen
+* Kimi
+* 智谱
+* GPT
+* SiliconFlow
+
+不用改 Agent。
+
+---
+
+# 下一步准备做什么？
+
+我们准备写：
+
+```text
+models/
+    llm.py
+```
+
+但是：
+
+不是直接写 API。
+
+而是：
+
+先设计接口。
+
+例如：
+
+```python
+class LLM:
+
+    def __init__(...):
+        ...
+
+    def chat(...):
+        ...
+```
+
+以后：
+
+Planner：
+
+只需要：
+
+```python
+llm.chat(messages)
+```
+
+不用知道：
+
+DeepSeek
+
+Qwen
+
+GPT
+
+是谁。
+
+---
+
+# 目前完整的数据流（这是最重要的）
+
+```text
+User
+ │
+ ▼
+Agent.run(goal)
+ │
+ ▼
+state.goal = goal
+ │
+ ▼
+Planner
+ │
+ ▼
+LLM.chat(messages)
+ │
+ ▼
+得到 Plan
+ │
+ ▼
+state.plan = plan
+ │
+ ▼
+Agent 执行第一步
+```
+
+**这是我们第一阶段要完成的数据流。**
+
+---
+
+# 后面的开发路线（不要现在写）
+
+### 第二阶段
+
+ToolManager
+
+```text
+Agent
+
+↓
+
+ToolManager
+
+↓
+
+Browser
+Terminal
+Python
+File
+```
+
+---
+
+### 第三阶段
+
+真正执行：
+
+```text
+LLM
+
+↓
+
+{
+tool:"browser",
+action:"open"
+}
+
+↓
+
+BrowserTool.execute()
+```
+
+---
+
+### 第四阶段
+
+加入视觉
+
+```text
+截图
+
+↓
+
+Vision
+
+↓
+
+Agent
+```
+
+---
+
+### 第五阶段
+
+加入 Memory
+
+长期记忆。
+
+---
+
+### 第六阶段
+
+加入 Video
+
+OpenCV
+
+Whisper
+
+Qwen-VL
+
+---
+
+### 第七阶段
+
+多个 Agent 协作。
+
+---
+
+# 我们以后开发的规则（非常重要）
+
+这是我希望我们一直遵守的原则：
+
+1. **一次只做一个模块。** 比如今天只做 `LLM`，不同时写浏览器和记忆。
+2. **先设计接口，再实现功能。** 先确定类和方法该怎么调用，再写内部逻辑。
+3. **每完成一个模块就测试。** 不等到所有功能都写完才运行。
+4. **每个类只负责一件事。** 例如 `Planner` 不负责浏览器操作，`LLM` 不负责状态管理。
+
+---
+
+## 我还有一个建议
+
+为了让这个项目更像一个真实的开源项目，我们以后可以采用下面的节奏：
+
+* **第 1 节：** Agent、State、LLM（当前）
+* **第 2 节：** Planner（调用 LLM 生成计划）
+* **第 3 节：** Prompt（设计让模型输出固定格式）
+* **第 4 节：** ToolManager（统一管理工具）
+* **第 5 节：** BrowserTool（第一个真正可执行的工具）
+* **第 6 节：** Agent Loop（Think → Act → Observe → RePlan）
+* **第 7 节：** Memory（短期和长期记忆）
+* **第 8 节：** Vision（屏幕截图 + 视觉模型）
+* **第 9 节：** Computer Use（鼠标、键盘、OCR）
+* **第 10 节：** 视频理解、MCP、多 Agent 等高级功能
+
+这样每一节结束时，你的代码都能运行，并且整个 Agent 会一步一步成长，而不是最后才拼在一起。
+这个方向可以，但是**我建议调整一下顺序**。
+
+你说的是：
+
+> **"做一个可以像人一样操作浏览器的 Agent。"**
+
+这个目标完全可以，而且现在很多 Agent（如浏览器自动化 Agent）都是这么做的。
+
+但是这里有一个关键问题：
+
+> **"操作浏览器"** 和 **"理解浏览器"** 是两件完全不同的事情。
+
+真正像人一样，需要这四个能力：
+
+```text
+            Browser Agent
+                  │
+    ┌─────────────┼─────────────┐
+    ▼             ▼             ▼
+  看网页        思考        操作网页
+(Vision)      (LLM)       (Playwright)
+                  │
+                  ▼
+             判断是否成功
+```
+
+很多初学者一开始就：
+
+```python
+page.goto(...)
+page.click(...)
+page.fill(...)
+```
+
+这只是**浏览器自动化（Automation）**。
+
+而真正的 Agent 是：
+
+```text
+截图
+    │
+    ▼
+视觉模型分析
+
+"页面有一个登录按钮"
+
+    │
+    ▼
+LLM
+
+"应该点击登录"
+
+    │
+    ▼
+Playwright
+
+click(...)
+```
+
+所以，**Playwright 是"手"，视觉模型是"眼"，LLM 是"大脑"。**
+
+---
+
+## 我建议我们的目标改成
+
+不是：
+
+> 做一个浏览器脚本。
+
+而是：
+
+> **做一个 Browser Agent。**
+
+它以后应该像这样：
+
+```text
+User:
+帮我去淘宝搜索机械键盘
+
+↓
+
+Agent:
+① 打开浏览器
+② 打开淘宝
+③ 搜索
+④ 分析结果
+⑤ 返回最适合的商品
+```
+
+以后还能：
+
+> 登录网站
+
+> 下载文件
+
+> 填表
+
+> 发邮件
+
+甚至：
+
+> 自己判断下一步。
+
+---
+
+# 那第一步该写什么？
+
+很多教程会告诉你：
+
+安装 Playwright。
+
+我不会这么教。
+
+我希望先设计 BrowserTool。
+
+例如：
+
+```text
+BrowserTool
+
+├── open()
+
+├── click()
+
+├── type()
+
+├── scroll()
+
+├── back()
+
+├── forward()
+
+├── screenshot()
+
+├── current_url()
+
+└── html()
+```
+
+注意。
+
+**Agent 永远不知道 Playwright。**
+
+Agent 只知道：
+
+```python
+browser.click(...)
+```
+
+以后：
+
+如果你想换成：
+
+* Selenium
+* Chrome DevTools Protocol (CDP)
+* 远程浏览器
+
+Agent 一行代码都不用改。
+
+---
+
+## 然后第二步才是 Playwright
+
+BrowserTool 内部：
+
+```
+BrowserTool
+
+↓
+
+Playwright
+```
+
+这样 BrowserTool 就是对底层浏览器能力的封装。
+
+---
+
+## 但是，我还想再往前走一步
+
+如果我们的目标是**像人一样操作浏览器**，那么以后不要依赖：
+
+```python
+page.click("#login")
+```
+
+因为很多现代网站：
+
+* DOM 经常变化
+* CSS 选择器会变
+* React/Vue 动态渲染
+* Shadow DOM
+* Canvas
+
+真正的 Agent 更应该支持：
+
+```text
+Agent：
+
+点击"登录"
+
+↓
+
+视觉模型
+
+↓
+
+发现按钮坐标
+
+↓
+
+Playwright 鼠标点击
+```
+
+这和目前很多先进的 Computer Use Agent 思路一致：优先理解界面，再决定操作，而不是死记元素选择器。
+
+---
+
+# 我建议我们这样规划 Browser Agent
+
+第一版（基础）
+
+* 启动浏览器
+* 打开网址
+* 获取标题
+* 获取 HTML
+* 截图
+
+第二版（自动化）
+
+* 点击元素
+* 输入文本
+* 滚动
+* 下载文件
+
+第三版（智能化）
+
+* 截图
+* OCR
+* 视觉模型分析
+* 根据自然语言点击
+
+第四版（接近真人）
+
+* 多标签页
+* 文件上传
+* 登录状态
+* 下载管理
+* 弹窗处理
+* 验证页面是否达到目标
+
+---
+
+## 我建议从 BrowserTool 开始，而不是直接写 Agent
+
+因为 BrowserTool 是以后所有浏览器操作的基础。
+
+如果它设计得好，后面的 Planner、ToolManager、Vision 都可以复用。
+
+**下一步，我们就一起把 `BrowserTool` 设计出来，然后接入 Playwright。** 我会带你从启动浏览器开始，一步一步做到最终能够接受自然语言命令并自主完成网页任务，而不是只会执行固定脚本。

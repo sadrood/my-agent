@@ -1,0 +1,43 @@
+# 环境变量（含 API Key，绝对不要提交）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.pytest_cache/
+
+# 运行时数据
+screenshots/
+memory/
+rollouts/
+generated_images/
+skills/
+*.log
+
+# 调试/临时脚本与输出（开发过程产生的一次性文件）
+_*.py
+_*.txt
+*.bak
+*.py.bak
+pytest_out.txt
+test_output.txt
+test_result.txt
+tmp_exec.txt
+
+# 任务输出产物（统一存放目录，禁止散落根目录）
+output/
+# 打包/测试产物（不入库；别人电脑自行生成）
+packaging/build/
+packaging/dist/
+desktop/test-results/
+test-results/
+desktop/release/
+desktop/dist/
