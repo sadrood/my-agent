@@ -62,6 +62,10 @@ def _cfg() -> dict:
     return EXPERIENCE_CONFIG
 
 
+def _repo_url(kind: str) -> str:
+    return str(_cfg().get(f"{kind}_repo") or "").strip()
+
+
 def _cache_path(kind: str) -> str:
     cfg = _cfg()
     url = str(cfg.get(f"{kind}_repo") or "").strip()
