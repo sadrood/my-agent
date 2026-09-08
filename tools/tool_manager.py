@@ -14,6 +14,7 @@ from config import TOOL_CONFIG
 from tools.base import BaseTool, ToolResult, truncate_output
 from tools.terminal import TerminalTool
 from tools.delegate import DelegateTool
+from tools.experience import ExperienceTool
 from tools.file import FileTool
 from tools.python import PythonTool
 from tools.browser import BrowserTool
@@ -83,6 +84,7 @@ class ToolManager:
         browser = _create_browser_tool()
         self.register(_create_terminal_tool())
         self.register(DelegateTool())
+        self.register(ExperienceTool())
         self.register(FileTool())
         self.register(PythonTool())
         self.register(browser)

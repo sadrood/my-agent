@@ -1236,6 +1236,10 @@ class Agent:
         if self.tool_manager.get_tool("delegate") is not None:
             from models.prompts import DELEGATE_GUIDE_PROMPT
             system_prompt += "\n\n" + DELEGATE_GUIDE_PROMPT
+        # 云经验库：学习/沉淀跨 Agent 经验（experience 工具存在时）
+        if self.tool_manager.get_tool("experience") is not None:
+            from models.prompts import EXPERIENCE_GUIDE_PROMPT
+            system_prompt += "\n\n" + EXPERIENCE_GUIDE_PROMPT
         if self.approval is not None:
             system_prompt += APPROVAL_NOTICE_TEMPLATE.format(
                 approval_policy=self.approval.mode,

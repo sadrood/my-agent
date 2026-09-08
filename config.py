@@ -316,6 +316,25 @@ ROLLOUT_CONFIG = {
 }
 
 # ============================================================
+# 云经验库配置（GitHub 经验共享：私有学习库 + 公共分享库）
+# - private_repo：agent 复盘条目的读写仓（私有，clone+push）
+# - public_repo： 只读学习源（可选，他人分享的经验库；分享条目经 PR 合并）
+# - cache_dir：本地克隆缓存（gitignored memory/ 下）
+# - 学习预算：单次注入条目数与字符上限，防提示注入与上下文爆炸
+# ============================================================
+EXPERIENCE_CONFIG = {
+    "enabled": os.getenv("EXPERIENCE_ENABLED", "true").lower() == "true",
+    "private_repo": os.getenv("EXPERIENCE_PRIVATE_REPO", ""),
+    "public_repo": os.getenv("EXPERIENCE_PUBLIC_REPO", ""),
+    "branch": os.getenv("EXPERIENCE_BRANCH", "main"),
+    "cache_dir": os.getenv("EXPERIENCE_CACHE_DIR", "./memory/experience_lib"),
+    "learn_max_entries": int(os.getenv("EXPERIENCE_LEARN_MAX", "3")),
+    "learn_max_chars": int(os.getenv("EXPERIENCE_LEARN_CHARS", "2500")),
+    "entry_max_chars": int(os.getenv("EXPERIENCE_ENTRY_MAX", "8000")),
+    "pull_ttl_sec": int(os.getenv("EXPERIENCE_PULL_TTL", "600")),
+}
+
+# ============================================================
 # 会话持久化配置（借鉴同类实现的 thread/session）
 # ============================================================
 SESSION_CONFIG = {
