@@ -553,7 +553,8 @@ function sendTermEcho(e: TermEntry): void {
 function runTermCommand(command: string, from: 'user' | 'agent'): Promise<TermEntry> {
   return new Promise((resolve) => {
     const child = process.platform === 'win32'
-      ? spawn('cmd', ['/d', '/s', '/c', command], { windowsHide: true, env: process.env })
+      // chcp 65001：cmd 输出统一 UTF-8，回显不再按 GBK 乱码
+      ? spawn('cmd', ['/d', '/s', '/c', `chcp 65001>nul& ${command}`], { windowsHide: true, env: process.env })
       : spawn('sh', ['-c', command], { env: process.env });
     let out = '';
     let done = false;

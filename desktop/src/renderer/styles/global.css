@@ -2702,3 +2702,11 @@ body {
   outline: none;
 }
 .term-input:focus { border-color: var(--accent); }
+
+/* 终端面板错误提示条 */
+.term-error {
+  margin: 6px 12px 0; padding: 6px 10px;
+  font-size: 12px; color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  border-left: 2px solid var(--color-error); border-radius: 0 6px 6px 0;
+}
