@@ -1,0 +1,75 @@
+{
+  "name": "my-agent-desktop",
+  "version": "0.6.0",
+  "description": "my_agent 图形化桌面客户端 —— 融合主流 CLI 与桌面客户端优点",
+  "main": "dist/main/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.renderer.json && vite build && tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",
+    "build:main": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",
+    "start": "npm run build && electron .",
+    "desktop:dev": "npm run build:main && concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "desktop:backend": "python -m dashboard.server --port 8090",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "highlight.js": "^11.10.0",
+    "lucide-react": "^0.454.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "rehype-highlight": "^7.0.0",
+    "remark-gfm": "^4.0.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.5.4",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^33.0.2",
+    "electron-builder": "^25.1.8",
+    "jsdom": "^30.0.1",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^4.1.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.myagent.desktop",
+    "productName": "小悟 Desktop",
+    "files": [
+      "dist/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "extraResources": [
+      {
+        "from": "../packaging/dist/myagent-backend",
+        "to": "backend"
+      }
+    ]
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}
