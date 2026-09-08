@@ -26,6 +26,7 @@ export function TerminalPane() {
   const [entries, setEntries] = useState<TermEntry[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [lastError, setLastError] = useState('');
   const bodyRef = useRef<HTMLDivElement>(null);
 
   // 挂载：取历史 + 订阅回显（Agent 与用户自己的命令都会经 terminal:echo 回来）
@@ -53,10 +54,13 @@ export function TerminalPane() {
     if (!cmd || busy) return;
     setInput('');
     setBusy(true);
+    setLastError('');
     try {
-      await window.desktopApi?.terminalUserRun?.(cmd);
-      // 回显经 terminal:echo 统一落地，无需在此重复追加
-    } catch { /* 忽略 */ } finally {
+      const r = await window.desktopApi?.terminalUserRun?.(cmd);
+      if (r && !r.ok) setLastError(r.error || '执行失败（exit != 0）');
+    } catch (e) {
+      setLastError(`调用终端失败：${String((e as Error)?.message || e).slice(0, 300)}`);
+    } finally {
       setBusy(false);
     }
   };
@@ -72,6 +76,9 @@ export function TerminalPane() {
         <button className="collapse-btn" title="清空回显" onClick={clearAll}><Trash2 size={12} /></button>
       </div>
       <div className="term-body" ref={bodyRef}>
+        {lastError && (
+          <div className="term-error">⚠️ {lastError}</div>
+        )}
         {entries.length === 0 && (
           <div className="term-empty">暂无命令。Agent 执行 terminal 命令时会实时显示在这里；你也可以在下面输入框直接跑命令。</div>
         )}
