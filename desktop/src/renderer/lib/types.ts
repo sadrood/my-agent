@@ -42,6 +42,8 @@ export interface ModelParams {
   temperature: number;
   topP: number;
   maxTokens: number;
+  /** 任务最大操作轮数（0 = 后端默认，如 .env MAX_LOOP_OPS=80） */
+  maxOps: number;
 }
 
 /** 会话 */
