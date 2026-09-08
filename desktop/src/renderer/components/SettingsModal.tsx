@@ -202,12 +202,13 @@ function ProvidersTab() {
     if (editing === id) setEditing(null);
   };
 
-  const numParam = (k: 'temperature' | 'topP' | 'maxTokens', max: number) => (
+  const numParam = (k: 'temperature' | 'topP' | 'maxTokens' | 'maxOps', max: number) => (
     <label className="param-field">
-      {k === 'temperature' ? 'Temperature' : k === 'topP' ? 'Top P' : 'Max Tokens'}
+      {k === 'temperature' ? 'Temperature' : k === 'topP' ? 'Top P'
+        : k === 'maxTokens' ? 'Max Tokens' : '任务最大轮数 Max Ops（0=默认80）'}
       <input
         type="number"
-        step={k === 'maxTokens' ? 256 : 0.05}
+        step={k === 'maxTokens' ? 256 : k === 'maxOps' ? 10 : 0.05}
         min={0}
         max={max}
         value={params[k]}
@@ -288,6 +289,7 @@ function ProvidersTab() {
         {numParam('temperature', 2)}
         {numParam('topP', 1)}
         {numParam('maxTokens', 1000000)}
+        {numParam('maxOps', 600)}
         <span className="param-hint">temperature 采样温度 · topP 核采样 · maxTokens 单次输出上限</span>
       </div>
       {(() => {

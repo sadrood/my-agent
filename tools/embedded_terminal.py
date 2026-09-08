@@ -40,13 +40,13 @@ class EmbeddedTerminalTool(TerminalTool):
             with _urlreq.urlopen(req, timeout=320) as resp:
                 return _json.loads(resp.read().decode("utf-8"))
         except Exception as e:
-            return {
-                "ok": False,
-                "error": (
-                    f"内嵌终端桥不可达（{str(e)[:120]}）。"
-                    "请确认桌面端正在运行（桥端口 8091）。"
-                ),
-            }
+            detail = str(e)
+            if "404" in detail:
+                hint = ("桌面主进程是旧构建（没有 /terminal 路由）：请完整重启桌面端，"
+                        "或用源码模式 启动桌面.bat（删除 desktop/release/win-unpacked 避免旧包优先）。")
+            else:
+                hint = "请确认桌面端正在运行（桥端口 8091；纯 CLI 无桌面桥时请勿使用内嵌终端）。"
+            return {"ok": False, "error": f"内嵌终端桥不可达（{detail[:120]}）。{hint}"}
 
     def execute(self, input_str: str) -> ToolResult:
         command = input_str.strip()

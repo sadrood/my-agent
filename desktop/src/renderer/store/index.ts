@@ -352,21 +352,23 @@ interface ParamsState {
 export const useParamsStore = create<ParamsState>()(
   persist(
     (set) => ({
-      params: { temperature: 0.7, topP: 1.0, maxTokens: 8192 },
+      params: { temperature: 0.7, topP: 1.0, maxTokens: 8192, maxOps: 0 },
       setParam: (k, v) => set((s) => ({ params: { ...s.params, [k]: v } })),
     }),
     {
       name: 'my-agent-params',
-      version: 2,
+      version: 3,
       // v1 曾为慢思考模型把上限压到 2048——思考长的任务会在"只思考未回答"处被截断
       // （finish_reason=length、正文为空），体验与 CLI（8192）不一致 → v2 恢复 8192。
+      // v3：新增 maxOps（0=后端默认），旧存档补 0。
       migrate: (persisted: any) => {
         const p = (persisted && persisted.params) || {};
         return {
           params: {
             temperature: typeof p.temperature === 'number' ? p.temperature : 0.7,
             topP: typeof p.topP === 'number' ? p.topP : 1.0,
-            maxTokens: 8192,
+            maxTokens: typeof p.maxTokens === 'number' ? p.maxTokens : 8192,
+            maxOps: typeof p.maxOps === 'number' ? p.maxOps : 0,
           },
         };
       },

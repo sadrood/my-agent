@@ -574,6 +574,7 @@ if HAS_FASTAPI:
             "base_url": (payload or {}).get("base_url"),
             "api_key": (payload or {}).get("api_key"),
             "agent_name": (payload or {}).get("agent_name"),
+            "max_ops": (payload or {}).get("max_ops"),
             "temperature": (payload or {}).get("temperature"),
             "top_p": (payload or {}).get("top_p"),
             "max_tokens": (payload or {}).get("max_tokens"),
@@ -617,7 +618,8 @@ if HAS_FASTAPI:
         if not goal:
             return {"ok": False, "error": "goal 不能为空"}
         kwargs = {k: (payload or {}).get(k) for k in
-                  ("model", "base_url", "api_key", "agent_name", "permission_mode", "sandbox_mode")}
+                  ("model", "base_url", "api_key", "agent_name", "permission_mode",
+                   "sandbox_mode", "max_ops")}
         threading.Thread(
             target=_run_agent_worker, args=(goal, kwargs, main_session_id), daemon=True,
         ).start()
@@ -1180,6 +1182,12 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
             config.top_p = float(kwargs["top_p"])
         if kwargs.get("max_tokens") is not None:
             config.max_tokens = int(kwargs["max_tokens"])
+        # 任务最大操作轮数：>0 覆盖（0/缺省 → TOOL_CONFIG.max_loop_ops 或 .env MAX_LOOP_OPS）
+        if kwargs.get("max_ops"):
+            try:
+                config.max_ops = max(1, int(kwargs["max_ops"]))
+            except (TypeError, ValueError):
+                pass
 
         tool_manager = ToolManager()
         # 桌面端「设置」下发的视觉模型覆盖：应用到 see / computer 工具

@@ -736,6 +736,8 @@ function buildPayload(
     temperature: params.temperature,
     top_p: params.topP,
     max_tokens: params.maxTokens,
+    // 任务最大操作轮数：0 = 后端默认（.env MAX_LOOP_OPS）；>0 覆盖本轮
+    max_ops: params.maxOps > 0 ? params.maxOps : undefined,
     permission_mode: permMode,
     // 关键：把桌面端初始化填的模型/端点/key 真正传给后端（否则一直用 .env 默认值）
     model: cfg?.model || undefined,

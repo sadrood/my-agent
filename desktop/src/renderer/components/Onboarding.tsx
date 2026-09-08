@@ -106,6 +106,7 @@ export function OnboardingModal({ firstRun, onDone, onClose }: Props) {
     { key: 'temperature', label: '温度 Temperature', min: 0, max: 2, step: 0.1, fmt: (v: number) => v.toFixed(1) },
     { key: 'topP', label: 'Top P', min: 0, max: 1, step: 0.05, fmt: (v: number) => v.toFixed(2) },
     { key: 'maxTokens', label: '最大输出 Max Tokens', min: 256, max: 32768, step: 256, fmt: (v: number) => String(v) },
+    { key: 'maxOps', label: '任务最大轮数 Max Ops（0=系统默认80）', min: 0, max: 600, step: 10, fmt: (v: number) => String(v) },
   ] as const);
 
   return (
