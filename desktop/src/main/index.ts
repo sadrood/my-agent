@@ -373,9 +373,35 @@ async function handleBrowserAction(action: string, p: Record<string, unknown>): 
         if (!wc) return { ok: false, error: '浏览器标签未能自动创建（渲染层未响应）；可先手动在侧栏浏览器开一个标签后重试' };
       }
       if (!wc) return { ok: false, error: '侧栏内嵌浏览器未打开（请先 browser open <url>）' };
-      await wc.loadURL(url);
-      await sleep(400);
-      return { ok: true, output: `已导航到: ${wc.getURL()}\n页面标题: ${wc.getTitle()}` };
+      // ERR_ABORTED 是假失败：目标站重定向/替换导航会让 loadURL 的 Promise 以
+      // ERR_ABORTED 拒绝，但页面实际会加载成功。不能因此判死——等页面落定再按真实状态回报。
+      let navErr = '';
+      try {
+        await wc.loadURL(url);
+      } catch (e) {
+        navErr = String((e as Error)?.message || e);
+      }
+      // 最多等 8s 让重定向链落定（每 250ms 查一次）
+      const dl = Date.now() + 8000;
+      let settled = false;
+      while (Date.now() < dl) {
+        let cur = '';
+        let loading = true;
+        try { cur = wc.getURL() || ''; } catch { /* */ }
+        try { loading = wc.isLoading(); } catch { /* */ }
+        if (!loading && cur && !cur.startsWith('about:')) { settled = true; break; }
+        await sleep(250);
+      }
+      let cur = '';
+      let title = '';
+      try { cur = wc.getURL() || ''; } catch { /* */ }
+      try { title = wc.getTitle() || ''; } catch { /* */ }
+      if (settled || (cur && !cur.startsWith('about:'))) {
+        const redirectNote = cur !== url ? `（最终地址: ${cur}）` : '';
+        return { ok: true, output: `已导航到: ${url}${redirectNote}
+页面标题: ${title || '(无标题)'}` };
+      }
+      return { ok: false, error: navErr ? `导航失败: ${navErr.slice(0, 200)}` : `导航超时：${url}` };
     }
     case 'back':
       return { ok: true, output: (await evalInWebview('history.back(); "ok"') as string) ? '已返回上一页。' : '' };
