@@ -7,7 +7,7 @@
  * 3. 通过 IPC 暴露后端控制能力（启动/停止/状态）给渲染进程
  */
 import { app, BrowserWindow, ipcMain, shell, Menu, Notification, safeStorage, webContents, clipboard, dialog, screen } from 'electron';
-import { spawn, exec, ChildProcess } from 'child_process';
+import { spawn, exec, execSync, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -697,35 +697,22 @@ function repoRoot(): string {
 }
 function runGit(args: string[], cwd: string, timeoutMs = 90000): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
-    const cmd = ['git'];
+    let proxyVal = '';
     try {
-      const proxy = exec('git config --get http.proxy', { cwd: repoRoot(), timeout: 8000 },
-        (e, stdout) => { /* 忽略 */ });
-    } catch { /* 忽略 */ }
-    // 代理：读仓库级配置（用户机器通常已为 GitHub 配好）
-    try {
-      const cfg = exec('git config --get http.proxy', { cwd: repoRoot(), timeout: 8000 },
-        (_err, stdout) => {
-          const proxyVal = String(stdout || '').trim();
-          const full = proxyVal ? [...cmd, '-c', `http.proxy=${proxyVal}`, ...args] : [...cmd, ...args];
-          const child = spawn(full[0], full.slice(1), { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, windowsHide: true });
-          let out = '';
-          child.stdout?.on('data', (d: Buffer | string) => { out += String(d); });
-          child.stderr?.on('data', (d: Buffer | string) => { out += String(d); });
-          const timer = setTimeout(() => { try { child.kill(); } catch { /* */ } }, timeoutMs);
-          child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
-          child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out: out.trim() }); });
-        });
-      if (!cfg) throw new Error('no exec');
-    } catch {
-      const child = spawn(cmd[0], [...cmd, ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, windowsHide: true });
-      let out = '';
-      child.stdout?.on('data', (d: Buffer | string) => { out += String(d); });
-      child.stderr?.on('data', (d: Buffer | string) => { out += String(d); });
-      const timer = setTimeout(() => { try { child.kill(); } catch { /* */ } }, timeoutMs);
-      child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
-      child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out: out.trim() }); });
-    }
+      proxyVal = execSync('git config --get http.proxy', { cwd: repoRoot(), timeout: 8000, encoding: 'utf-8' }).trim();
+    } catch { /* 仓库没配代理时直连 */ }
+    const gitArgs = proxyVal ? ['-c', `http.proxy=${proxyVal}`, ...args] : args;
+    const child = spawn('git', gitArgs, {
+      cwd,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    let out = '';
+    child.stdout?.on('data', (d: Buffer | string) => { out += String(d); });
+    child.stderr?.on('data', (d: Buffer | string) => { out += String(d); });
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* */ } }, timeoutMs);
+    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out: out.trim() }); });
   });
 }
 async function gitUpdateState(): Promise<Record<string, unknown>> {
@@ -747,7 +734,12 @@ async function gitUpdateState(): Promise<Record<string, unknown>> {
 async function gitUpdateNow(): Promise<Record<string, unknown>> {
   const root = repoRoot();
   const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root)).out.trim() || 'main';
-  const pull = await runGit(['pull', '--ff-only', 'origin', branch], root, 180000);
+  let pull = await runGit(['pull', '--ff-only', 'origin', branch], root, 180000);
+  if (pull.code !== 0) {
+    // 一次自动重试（网络/代理瞬断很常见）
+    await new Promise((r) => setTimeout(r, 1200));
+    pull = await runGit(['pull', '--ff-only', 'origin', branch], root, 180000);
+  }
   if (pull.code !== 0) return { ok: false, error: `git pull 失败：${pull.out.slice(-300)}` };
   // 新代码已落盘 → 重编译 renderer/main/preload（dev/git 安装的自更新路径）
   const desktop = path.join(root, 'desktop');
