@@ -309,8 +309,10 @@ async function handleBrowserAction(action: string, p: Record<string, unknown>): 
     case 'open': {
       const url = String(p.url || '').trim();
       // 让渲染层开新标签（或同 URL 已开则切过去）
-      mainWindow?.webContents.send('embedded-browser:open', { url: normalizeUrl(url) });
-      const deadline = Date.now() + 6000;
+      const sendOpen = () => mainWindow?.webContents.send('embedded-browser:open', { url: normalizeUrl(url) });
+      sendOpen();
+      const deadline = Date.now() + 9000;
+      let lastResend = 0;
       while (Date.now() < deadline) {
         const wc = findEmbeddedWebview();
         if (wc) {
@@ -323,7 +325,12 @@ async function handleBrowserAction(action: string, p: Record<string, unknown>): 
               : `内嵌浏览器已在运行中（当前 ${tabs.length} 个标签页）。`,
           };
         }
-        await sleep(150);
+        // 事件可能丢失：3s/6s 各重发一次（同 URL 已开会自动切换，不会重复建标签）
+        if (Date.now() - lastResend > 3000 && Date.now() - deadline < 7000) {
+          lastResend = Date.now();
+          sendOpen();
+        }
+        await sleep(200);
       }
       return { ok: false, error: '侧栏 webview 未创建（渲染层未响应 browser:open）' };
     }
@@ -353,9 +360,19 @@ async function handleBrowserAction(action: string, p: Record<string, unknown>): 
       return { ok: true, output: '标签页已关闭。' };
     }
     case 'navigate': {
-      const wc = findEmbeddedWebview();
-      if (!wc) return { ok: false, error: '侧栏内嵌浏览器未打开' };
       const url = normalizeUrl(String(p.url || ''));
+      let wc = findEmbeddedWebview();
+      if (!wc && url && url !== 'about:blank') {
+        // Agent 直接 navigate：自动让渲染层开标签（无需用户先手动打开网站）
+        mainWindow?.webContents.send('embedded-browser:open', { url });
+        const dl = Date.now() + 8000;
+        while (Date.now() < dl && !wc) {
+          await sleep(250);
+          wc = findEmbeddedWebview();
+        }
+        if (!wc) return { ok: false, error: '浏览器标签未能自动创建（渲染层未响应）；可先手动在侧栏浏览器开一个标签后重试' };
+      }
+      if (!wc) return { ok: false, error: '侧栏内嵌浏览器未打开（请先 browser open <url>）' };
       await wc.loadURL(url);
       await sleep(400);
       return { ok: true, output: `已导航到: ${wc.getURL()}\n页面标题: ${wc.getTitle()}` };
