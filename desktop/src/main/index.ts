@@ -645,6 +645,91 @@ function startBrowserBridge(): void {
 // Agent 显示名（设置里改名字 → IPC app:set-title 更新；窗口标题/通知/桌宠标题跟随）
 let appDisplayName = '小悟';
 
+// ==================== Git 更新（源码/git 安装版自更新） ====================
+// 逻辑：git fetch → 落后判定 → git pull → npm run build（重编译）→ relaunch。
+// 打包 exe（无 .git）走提示，不用本通道。
+function repoRoot(): string {
+  // 本文件位于 desktop/dist/main → 上溯三级 = 项目根（my_agent）
+  return path.resolve(__dirname, '..', '..', '..');
+}
+function runGit(args: string[], cwd: string, timeoutMs = 90000): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    const cmd = ['git'];
+    try {
+      const proxy = exec('git config --get http.proxy', { cwd: repoRoot(), timeout: 8000 },
+        (e, stdout) => { /* 忽略 */ });
+    } catch { /* 忽略 */ }
+    // 代理：读仓库级配置（用户机器通常已为 GitHub 配好）
+    try {
+      const cfg = exec('git config --get http.proxy', { cwd: repoRoot(), timeout: 8000 },
+        (_err, stdout) => {
+          const proxyVal = String(stdout || '').trim();
+          const full = proxyVal ? [...cmd, '-c', `http.proxy=${proxyVal}`, ...args] : [...cmd, ...args];
+          const child = spawn(full[0], full.slice(1), { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, windowsHide: true });
+          let out = '';
+          child.stdout?.on('data', (d: Buffer | string) => { out += String(d); });
+          child.stderr?.on('data', (d: Buffer | string) => { out += String(d); });
+          const timer = setTimeout(() => { try { child.kill(); } catch { /* */ } }, timeoutMs);
+          child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
+          child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out: out.trim() }); });
+        });
+      if (!cfg) throw new Error('no exec');
+    } catch {
+      const child = spawn(cmd[0], [...cmd, ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, windowsHide: true });
+      let out = '';
+      child.stdout?.on('data', (d: Buffer | string) => { out += String(d); });
+      child.stderr?.on('data', (d: Buffer | string) => { out += String(d); });
+      const timer = setTimeout(() => { try { child.kill(); } catch { /* */ } }, timeoutMs);
+      child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out: out.trim() }); });
+    }
+  });
+}
+async function gitUpdateState(): Promise<Record<string, unknown>> {
+  const root = repoRoot();
+  if (!fs.existsSync(path.join(root, '.git'))) {
+    return { git: false, reason: '非 git 安装（打包版请用新安装包/整包更新）' };
+  }
+  const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root)).out.trim() || 'main';
+  await runGit(['fetch', 'origin'], root);
+  const cur = (await runGit(['rev-parse', '--short', 'HEAD'], root)).out.trim();
+  const remote = `origin/${branch}`;
+  const behindRaw = (await runGit(['rev-list', '--count', `HEAD..${remote}`], root)).out.trim();
+  const aheadRaw = (await runGit(['rev-list', '--count', `${remote}..HEAD`], root)).out.trim();
+  const behind = parseInt(behindRaw || '0', 10) || 0;
+  const ahead = parseInt(aheadRaw || '0', 10) || 0;
+  const latest = (await runGit(['rev-parse', '--short', remote], root)).out.trim();
+  return { git: true, branch, current: cur, latest, behind, ahead };
+}
+async function gitUpdateNow(): Promise<Record<string, unknown>> {
+  const root = repoRoot();
+  const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root)).out.trim() || 'main';
+  const pull = await runGit(['pull', '--ff-only', 'origin', branch], root, 180000);
+  if (pull.code !== 0) return { ok: false, error: `git pull 失败：${pull.out.slice(-300)}` };
+  // 新代码已落盘 → 重编译 renderer/main/preload（dev/git 安装的自更新路径）
+  const desktop = path.join(root, 'desktop');
+  await new Promise<void>((resolve) => {
+    const child = spawn('npm', ['run', 'build'], { cwd: desktop, shell: true, windowsHide: true, env: process.env });
+    child.on('close', () => resolve());
+    child.on('error', () => resolve());
+  });
+  const head = (await runGit(['rev-parse', '--short', 'HEAD'], root)).out.trim();
+  return { ok: true, head };
+}
+ipcMain.handle('app:update-check', () => gitUpdateState());
+ipcMain.handle('app:update-now', async () => {
+  const r = await gitUpdateNow();
+  if (r.ok) {
+    // 去掉 dev server 指向，重启后加载刚编译的 dist 资源
+    setTimeout(() => {
+      process.env.VITE_DEV_SERVER_URL = '';
+      app.relaunch();
+      app.exit(0);
+    }, 800);
+  }
+  return r;
+});
+
 ipcMain.handle('app:set-title', (_e, name: string) => {
   const v = String(name || '').trim();
   if (v) appDisplayName = v;

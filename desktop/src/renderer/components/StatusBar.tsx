@@ -23,6 +23,28 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
   const { theme, setTheme, toggleRightPanel, toggleLeftPanel } = useUIStore();
   const { connected, running, turnStart } = useBackendStore();
   const [version, setVersion] = useState('');
+  // git 安装版更新检测：启动 6s 后静默 fetch，落后则显示「有更新」chip
+  const [upd, setUpd] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      try {
+        const r = await window.desktopApi?.updateCheck?.();
+        if (r && r.git && Number(r.behind) > 0) setUpd(r);
+      } catch { /* 非 git/无网：安静跳过 */ }
+    }, 6000);
+    return () => clearTimeout(t);
+  }, []);
+  const doUpdate = () => {
+    if (!upd) return;
+    if (!window.confirm(
+      `发现新版本：${String(upd.current)} → ${String(upd.latest)}（落后 ${String(upd.behind)} 个提交）。
+立即更新并自动重启？`,
+    )) return;
+    void window.desktopApi?.updateNow?.().then((r) => {
+      if (r && !r.ok) window.alert(`更新失败：${String(r.error || '未知')}`);
+      // ok：主进程 0.8s 后自动 relaunch
+    });
+  };
 
   // 应用版本号（悬停品牌可见：帮用户确认是否跑的是最新构建；
   // 看到旧版本 = 没重启到新 dist，需 Ctrl+C 后 npm start）
@@ -62,6 +84,11 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       {running && turnStart && (
         <button className="status-chip running-chip" title={`任务运行中（第 ${turnStart.turn} 轮）；点击停止`} onClick={() => void stopRun()}>
           <span className="status-dot green" /> 运行中 · 第 {turnStart.turn} 轮
+        </button>
+      )}
+      {upd && (
+        <button className="status-chip update-chip" title={`新版本 ${String(upd.latest)}（当前 ${String(upd.current)}），点击更新`} onClick={doUpdate}>
+          <span className="status-dot yellow" /> 有更新 ⬆ {String(upd.behind)}
         </button>
       )}
       <span className="status-chip" title={connected ? '后端已连接' : '后端未连接'}>

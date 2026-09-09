@@ -22,6 +22,8 @@ declare global {
       getBackendBase: () => Promise<string>;
       /** 应用版本号（package.json） */
       getVersion?: () => Promise<string>;
+      updateCheck?: () => Promise<Record<string, unknown>>;
+      updateNow?: () => Promise<Record<string, unknown>>;
       setShellTitle?: (name: string) => Promise<boolean>;
       getWorkdir?: () => Promise<string>;
       pickDirectory?: () => Promise<{ ok: boolean; path?: string }>;
