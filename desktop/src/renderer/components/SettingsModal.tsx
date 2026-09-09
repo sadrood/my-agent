@@ -490,6 +490,47 @@ function GeneralTab() {
   );
 }
 
+/* ---------------- 更新检测（git 安装版） ---------------- */
+
+function UpdateRow() {
+  const [info, setInfo] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+  const check = async () => {
+    setBusy(true); setInfo('检查中…');
+    try {
+      const r = await window.desktopApi?.updateCheck?.();
+      if (!r) { setInfo('当前环境不支持（打包版请用新安装包更新）。'); return; }
+      if (!r.git) { setInfo(String(r.reason || '非 git 安装')); return; }
+      if (Number(r.behind) > 0) {
+        setInfo(`发现新版本：${String(r.current)} → ${String(r.latest)}（落后 ${String(r.behind)} 个提交）`);
+      } else {
+        setInfo(`已是最新（${String(r.current)}${Number(r.ahead) > 0 ? `，本地领先 ${String(r.ahead)}` : ''}）。`);
+      }
+    } catch (e) {
+      setInfo(`检查失败：${String((e as Error)?.message || e).slice(0, 200)}`);
+    } finally { setBusy(false); }
+  };
+  const doUpdate = async () => {
+    if (!window.confirm('确认拉取最新代码、重新编译并重启？')) return;
+    setBusy(true); setInfo('正在更新并重编译（约 1 分钟）…');
+    const r = await window.desktopApi?.updateNow?.();
+    if (r && !r.ok) { setInfo(`更新失败：${String(r.error || '未知')}`); setBusy(false); }
+    // ok：主进程稍后自动重启
+  };
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button className="btn primary" style={{ padding: '4px 14px' }} onClick={() => void check()} disabled={busy}>
+        检查更新
+      </button>{' '}
+      {info && (info.includes('发现新版本') ? (
+        <button className="btn" style={{ padding: '4px 14px', marginLeft: 8 }} onClick={() => void doUpdate()} disabled={busy}>
+          立即更新并重启
+        </button>
+      ) : <span className="settings-hint" style={{ marginLeft: 10 }}>{info}</span>)}
+    </div>
+  );
+}
+
 /* ---------------- 桌面宠物开关（挂在通用页） ---------------- */
 
 function PetToggleRow() {
@@ -527,6 +568,7 @@ function AboutTab() {
       <p className="settings-hint">
         命令行同源：<code>my-agent --doctor</code> 环境自检 · <code>my-agent --dashboard</code> Web 面板。
       </p>
+      <UpdateRow />
     </div>
   );
 }
