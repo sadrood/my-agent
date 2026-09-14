@@ -44,18 +44,36 @@ if errorlevel 1 (
 echo      Python deps installed.
 
 echo [4/5] Installing Playwright chromium (for CLI browser tool) ...
-"%VPY%" -m playwright install chromium >nul 2>&1
-if errorlevel 1 echo      NOTE: chromium download failed. Retry later with: .venv\Scripts\python -m playwright install chromium
+rem Direct CDN is very slow behind CN networks: prefer npmmirror host.
+rem Override by presetting PLAYWRIGHT_DOWNLOAD_HOST before running.
+if not defined PLAYWRIGHT_DOWNLOAD_HOST set "PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright"
+echo      Download host: %PLAYWRIGHT_DOWNLOAD_HOST%
+echo      First run downloads about 150 MB - progress shown below.
+echo      (Skip with Ctrl+C if you do not need the browser tool.)
+"%VPY%" -m playwright install chromium
+if errorlevel 1 (
+  echo      NOTE: chromium download failed or was skipped.
+  echo      Retry later with:
+  echo        set PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright
+  echo        .venv\Scripts\python -m playwright install chromium
+)
 
 echo [5/5] Desktop Node deps (npm ci). CLI keeps working without Node.
 where node >nul 2>&1
 if errorlevel 1 (
   echo      Node.js not found. Desktop needs Node 18+. CLI is ready now.
 ) else (
+  rem CN networks: use registry + electron binary mirrors (override by presetting).
+  if not defined NPM_REGISTRY set "NPM_REGISTRY=https://registry.npmmirror.com"
+  if not defined ELECTRON_MIRROR set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
+  if not defined ELECTRON_CUSTOM_DIR set "ELECTRON_CUSTOM_DIR={{ version }}"
   pushd "%~dp0desktop"
   if not exist "node_modules\electron\dist\electron.exe" (
+    echo      Registry: %NPM_REGISTRY%
+    echo      Electron mirror: %ELECTRON_MIRROR%
+    echo      First run downloads ~100 MB (electron) - this can take a while.
     if exist "package-lock.json" (
-      call npm ci --no-audit --no-fund
+      call npm ci --no-audit --no-fund --registry=%NPM_REGISTRY%
       if errorlevel 1 (
         echo [ERROR] npm ci failed
         popd
@@ -63,13 +81,27 @@ if errorlevel 1 (
         exit /b 1
       )
     ) else (
-      call npm install --no-audit --no-fund
+      call npm install --no-audit --no-fund --registry=%NPM_REGISTRY%
       if errorlevel 1 (
         echo [ERROR] npm install failed
         popd
         pause
         exit /b 1
       )
+    )
+    rem npm 11+ may block postinstall scripts (allow-scripts): electron binary
+    rem would be missing. Run its installer manually in that case.
+    if not exist "node_modules\electron\dist\electron.exe" (
+      echo      [WARN] electron binary missing - running its installer...
+      pushd "node_modules\electron"
+      call node install.js
+      popd
+    )
+    if not exist "node_modules\@esbuild\win32-x64\esbuild.exe" (
+      echo      [WARN] esbuild binary missing - running its installer...
+      pushd "node_modules\esbuild"
+      call node install.js
+      popd
     )
   )
   popd
