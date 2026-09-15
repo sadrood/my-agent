@@ -86,14 +86,99 @@ class TestImageGenModel:
         make_model(tmp_path, watermark=True).generate_b64("猫")
         assert fake_post["payload"]["watermark"] is True
 
-    def test_url_response_passthrough(self, tmp_path, monkeypatch):
+    def test_url_response_auto_downloaded(self, tmp_path, monkeypatch):
+        """URL 形式（如 Agnes）应**自动下载落盘**，而不是只回一个链接。
+
+        旧行为是原样返回 URL，导致换到 url 型提供方后图片不在本地
+        （与 b64 型提供方体验不一致）。
+        """
         import models.image_gen as ig
         monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
                             timeout=None: FakeResponse(
                                 {"data": [{"url": "https://cdn.example.com/a.png"}]}))
+
+        class DlResp:
+            status_code = 200
+            content = PNG_1PX_BYTES
+
+        monkeypatch.setattr(ig.httpx, "get",
+                            lambda url, timeout=None, follow_redirects=None: DlResp())
         m = make_model(tmp_path)
         r = m.generate("猫")
+        p = r["images"][0]
+        assert p.startswith(str(tmp_path)) and p.endswith(".png")
+        assert open(p, "rb").read() == PNG_1PX_BYTES
+
+    def test_url_download_failure_falls_back_to_url(self, tmp_path, monkeypatch):
+        """下载失败时回退给出 URL，不因网络问题丢掉整次生成结果。"""
+        import models.image_gen as ig
+        monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
+                            timeout=None: FakeResponse(
+                                {"data": [{"url": "https://cdn.example.com/a.png"}]}))
+
+        def _boom(*a, **kw):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(ig.httpx, "get", _boom)
+        r = make_model(tmp_path).generate("猫")
         assert r["images"] == ["https://cdn.example.com/a.png"]
+
+    def test_url_not_downloaded_when_save_false(self, tmp_path, monkeypatch):
+        """save=False 时保持原样返回 URL（调用方自行处理）。"""
+        import models.image_gen as ig
+        monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
+                            timeout=None: FakeResponse(
+                                {"data": [{"url": "https://cdn.example.com/a.png"}]}))
+        r = make_model(tmp_path).generate("猫", save=False)
+        assert r["images"] == ["https://cdn.example.com/a.png"]
+
+
+class TestOptionalFieldDowngrade:
+    """提供方专有字段不认时自动剔除重试（换提供方不用改代码）。
+
+    实例：商汤认 `watermark`，Agnes 报 400
+    "watermark 不是文生图队列支持的字段"。
+    """
+
+    def test_watermark_rejected_then_retried_without_it(self, tmp_path, monkeypatch):
+        import models.image_gen as ig
+        seen = []
+
+        class R400:
+            status_code = 400
+            text = ("{\"error\":{\"message\":\"watermark 不是文生图队列支持的字段\"}}")
+
+        class R200:
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"b64_json": PNG_1PX_B64}]}
+
+        def _post(url, json=None, headers=None, timeout=None):
+            seen.append(dict(json))
+            return R400() if "watermark" in (json or {}) else R200()
+
+        monkeypatch.setattr(ig.httpx, "post", _post)
+        r = make_model(tmp_path).generate("猫")
+        assert len(seen) == 2, "应重试一次"
+        assert "watermark" in seen[0] and "watermark" not in seen[1]
+        assert r["images"][0].endswith(".png")
+
+    def test_unrelated_400_still_raises(self, tmp_path, monkeypatch):
+        """不是字段问题（如 401 鉴权）时不应吞掉错误反复重试。"""
+        import models.image_gen as ig
+
+        class Err:
+            status_code = 401
+            text = "unauthorized"
+
+        calls = []
+        monkeypatch.setattr(ig.httpx, "post",
+                            lambda url, json=None, headers=None, timeout=None:
+                            (calls.append(1), Err())[1])
+        with pytest.raises(RuntimeError, match="401"):
+            make_model(tmp_path).generate_b64("猫")
+        assert len(calls) == 1, "无关错误不应重试"
 
     def test_http_error_raises(self, tmp_path, monkeypatch):
         import models.image_gen as ig
