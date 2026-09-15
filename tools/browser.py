@@ -385,8 +385,16 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
                     ),
                 )
-            page = self._context.new_page()
-            self._pages = [page]
+            # launch_persistent_context 会自带一个初始 about:blank 页面，
+            # 直接复用而不是再 new_page()——否则浏览器里会出现两个空白
+            # 标签页，且第一个成为未被 self._pages 管理的『孤儿 tab』
+            # （用户看到的现象：两个 blank，后续操作全发生在第二个上）。
+            # 非持久模式 context 无自带页面，自然走 new_page，逻辑统一。
+            existing = list(self._context.pages)
+            if existing:
+                self._pages = existing
+            else:
+                self._pages = [self._context.new_page()]
             self._current_page_idx = 0
 
             mode = "无头" if self._headless else "可视化"

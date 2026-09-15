@@ -248,19 +248,24 @@ class TestQuota429Variants:
         )
 
     def test_429_variant_retries_then_success(self):
+        from unittest.mock import patch
         llm = make_llm([self._make_make_429_invalid_request(), FakeResponse(content="ok")])
-        resp = llm.chat([{"role": "user", "content": "hi"}])
+        # tpm 配额会触发"等到下一分钟边界"（生产行为），测试里 patch 掉真实等待
+        with patch("models.llm.time.sleep"):
+            resp = llm.chat([{"role": "user", "content": "hi"}])
         assert resp == "ok"
         assert len(llm.client.chat.completions.calls) == 2  # 失败一次后重试成功
 
     def test_429_variant_exhausts_retries(self):
+        from unittest.mock import patch
         llm = make_llm([
             self._make_make_429_invalid_request(),
             self._make_make_429_invalid_request(),
             self._make_make_429_invalid_request(),
         ])
-        with pytest.raises(BadRequestError):
-            llm.chat([{"role": "user", "content": "hi"}])
+        with patch("models.llm.time.sleep"):
+            with pytest.raises(BadRequestError):
+                llm.chat([{"role": "user", "content": "hi"}])
         assert len(llm.client.chat.completions.calls) == 3  # 初试 + 2 次重试
 
     def test_quota_delay_longer_than_normal(self):
@@ -279,3 +284,75 @@ class TestQuota429Variants:
         quota = llm._retry_delay(0, quota=True)
         assert quota == normal * 3
         assert llm._retry_delay(1, quota=True) == quota * 2  # 指数退避
+
+
+class TestMinuteQuotaAlignment:
+    """TPM/RPM 是**每分钟**窗口重置的配额：供应商不给 retry-after 时，
+    单纯指数退避（几秒）会一直在同一分钟窗口内硬怼。
+
+    实测日志：6s/12s 退避的两次重试全部撞在同一分钟内失败、任务中断。
+    修复：识别分钟级配额错误 → 等待对齐到下一个分钟边界。
+    """
+
+    def _tpm_err(self):
+        return BadRequestError(
+            "Error code: 429 - {'error': {'message': 'inference tpm exhausted',"
+            " 'type': 'invalid_request_error'}}",
+            response=_FakeResponse(400), body=None,
+        )
+
+    def test_aligns_to_next_minute_boundary(self):
+        from unittest.mock import patch
+        llm = make_llm([])
+        base = 1_700_000_000 - (1_700_000_000 % 60)   # 对齐到某分钟起点
+        # 分钟内第 5 秒 → 应等 ~56s（跨窗口），远大于 0.03s 的退避
+        with patch("models.llm.time.time", return_value=base + 5):
+            w_early = llm._quota_wait(self._tpm_err(), 0)
+        # 分钟内第 58 秒 → 距边界仅 3s，短于退避时取退避（不小于 0.03）
+        with patch("models.llm.time.time", return_value=base + 58):
+            w_late = llm._quota_wait(self._tpm_err(), 0)
+        assert w_early >= 50, f"分钟初段应等到窗口结束，实际 {w_early}"
+        assert w_late >= 0.03
+
+    def test_rpm_also_aligned(self):
+        from unittest.mock import patch
+        llm = make_llm([])
+        base = 1_700_000_000 - (1_700_000_000 % 60)
+        err = BadRequestError(
+            "Error code: 429 - {'error': {'message': 'rpm exhausted'}}",
+            response=_FakeResponse(400), body=None,
+        )
+        with patch("models.llm.time.time", return_value=base + 10):
+            assert llm._quota_wait(err, 0) >= 45
+
+    def test_retry_after_header_takes_precedence(self):
+        """供应商明确给了 retry-after 时以它为准（上限 65s），不做分钟对齐。"""
+        llm = make_llm([])
+        err = self._tpm_err()
+        err.response.headers = {"retry-after": "30"}
+        assert llm._quota_wait(err, 0) == 30.0
+
+        err2 = self._tpm_err()
+        err2.response.headers = {"retry-after": "120"}
+        assert llm._quota_wait(err2, 0) == 65.0   # 上限
+
+        err3 = self._tpm_err()
+        err3.response.headers = {"retry-after": "0.001"}
+        assert llm._quota_wait(err3, 0) >= 0.03   # 不小于退避
+
+    def test_non_minute_quota_uses_plain_backoff(self):
+        """普通限流（非分钟级关键词）不触发分钟对齐，避免无谓长等待。"""
+        from unittest.mock import patch
+        llm = make_llm([])
+        base = 1_700_000_000 - (1_700_000_000 % 60)
+        with patch("models.llm.time.time", return_value=base + 5):
+            w = llm._quota_wait(Exception("Error code: 429 - too many requests"), 0)
+        assert w < 5, f"普通限流不应等分钟边界，实际 {w}"
+
+    def test_is_minute_quota_error_detection(self):
+        from models.llm import _is_minute_quota_error
+        assert _is_minute_quota_error(Exception("inference tpm exhausted"))
+        assert _is_minute_quota_error(Exception("rpm exhausted"))
+        assert _is_minute_quota_error(Exception("inference exceeds tpm/rpm limit"))
+        assert not _is_minute_quota_error(Exception("too many requests"))
+        assert not _is_minute_quota_error(Exception("internal server error"))

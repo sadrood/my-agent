@@ -86,6 +86,19 @@ def unwrap_raw_arguments(arguments: dict, max_depth: int = 5) -> dict:
 RETRYABLE_ERRORS = ()
 
 
+def _is_minute_quota_error(e: Exception) -> bool:
+    """是否为**按分钟窗口**重置的配额耗尽（TPM/RPM）。
+
+    这类错误重试必须跨过分钟边界才有意义；否则退避几秒后仍在同一窗口内
+    （实测日志：6s/12s 退避的两次重试全部撞在同一分钟窗口内失败）。
+    """
+    msg = str(e).lower()
+    return any(k in msg for k in (
+        "tpm", "rpm", "tokens per minute", "requests per minute",
+        "per minute", "rate limit exceeded", "quota_exceeded",
+    ))
+
+
 def _is_quota_error(e: Exception) -> bool:
     """是否为配额/限流类错误（429）。
 
@@ -388,8 +401,12 @@ class LLM:
         return base * (2 ** attempt)
 
     def _quota_wait(self, err, attempt: int) -> float:
-        """429 限流等待：优先读 retry-after；无则退避延迟；单次上限 60s，
-        避免在 rpm 配额窗口内硬怼。"""
+        """429 限流等待：优先读 retry-after；无则退避延迟；单次上限 65s。
+
+        TPM/RPM 等**分钟窗口**配额：供应商不给 retry-after 时，单纯指数退避
+        （6s/12s）会一直在同一分钟窗口内硬怼——实测三次重试全失败、任务中断。
+        因此对齐到**下一个分钟边界**再试，保证跨过配额重置点。
+        """
         delay = self._retry_delay(attempt, quota=True)
         try:
             headers = getattr(getattr(err, "response", None), "headers", None) or {}
@@ -397,9 +414,27 @@ class LLM:
             if ra:
                 val = float(str(ra))
                 if val > 0:
-                    delay = max(delay, min(val, 60.0))
+                    # 供应商明确告知了等待时长：以它为准（上限 65s）
+                    return max(delay, min(val, 65.0))
         except Exception:
             pass
+        if _is_minute_quota_error(err):
+            # 无 retry-after 的分钟级配额：等到下一个分钟边界（+1s 余量）
+            now = time.time()
+            to_next_minute = 60.0 - (now % 60.0) + 1.0
+            delay = max(delay, min(to_next_minute, 65.0))
+        # 长等待（分钟级窗口）给出可见提示：否则 CLI 静默等 1 分钟，
+        # 看起来像卡死。走 stderr，不干扰富文本 stdout 渲染。
+        if delay >= 5:
+            try:
+                import sys as _sys
+                _sys.stderr.write(
+                    "\n[限流] 上游配额已满，等待 %.0f 秒后重试（第 %d 次）…\n"
+                    % (delay, attempt + 1)
+                )
+                _sys.stderr.flush()
+            except Exception:
+                pass
         return delay
 
     def chat(
