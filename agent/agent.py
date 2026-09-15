@@ -305,12 +305,46 @@ class Agent:
         name = (getattr(self.config, "agent_name", "") or "").strip()
         return name or str(PERSONALITY.get("name", "小悟"))
 
+    def _browser_session_note(self) -> str:
+        """当前浏览器会话摘要（供交接清单 / 续跑指令使用）。
+
+        为什么需要：达到轮数上限或中断后再续跑时，若不告知模型"浏览器仍在
+        运行、标签页还在"，模型可能为了"干净开始"而 close + launch 重开，
+        已打开的页面（乃至未持久化的站点状态）就丢了。
+        """
+        try:
+            b = self.tool_manager.get_tool("browser")
+            if b is None:
+                return ""
+            pages = list(getattr(b, "_pages", None) or [])
+            if not pages:
+                return ""
+            note = f"浏览器会话仍在运行（{len(pages)} 个标签页"
+            # 取当前 URL：走 worker 线程（Playwright 线程绑定），失败就只报标签数
+            try:
+                r = b.execute("url")
+                if getattr(r, "success", False) and r.output:
+                    url = str(r.output).replace("当前页面 URL: ", "").strip()
+                    if url:
+                        note += f"，当前: {url[:120]}"
+            except Exception:
+                pass
+            return note + "）"
+        except Exception:
+            return ""
+
     def _handoff_for_incomplete(self, goal: str, reason: str, final: str) -> str:
         """未完成任务 → 结构化交接清单（LLM 总结；失败时兜底模板）。
 
         产出同时成为用户看到的最终文案与持久化摘要，供下一轮"继续"使用。
         """
         rule = "要求：后续继续本任务时只执行未完成部分并沿用既有成果，不要重新执行已完成的操作。"
+        browser_note = self._browser_session_note()
+        if browser_note:
+            rule += (
+                f"\n浏览器：{browser_note}——继续时**直接接着操作**，"
+                "不要 close、不要重新 launch（会丢失已打开的页面与会话）。"
+            )
         try:
             recent = self.memory.get_recent_messages(40)
             lines = []
@@ -323,8 +357,10 @@ class Agent:
                 "输出精炼中文交接清单（正文≤600字，只输出清单）：\n"
                 "✅ 已完成：明确写出成果（文件/操作/验证状态），没有就写'无'\n"
                 "❌ 未完成：剩余工作逐项列出\n"
-                "📍 断点：下一步从哪继续（具体文件/命令/位置）\n\n"
-                f"目标：{goal[:300]}\n\n近期执行记录：\n{transcript[-6000:]}"
+                "📍 断点：下一步从哪继续（具体文件/命令/位置/网页）\n"
+                + ("🌐 浏览器会话：当前页面与后续要操作的页面（会话仍开着，勿关闭）\n"
+                   if browser_note else "")
+                + f"\n目标：{goal[:300]}\n\n近期执行记录：\n{transcript[-6000:]}"
             )
             resp = self.llm.chat(
                 [{"role": "user", "content": prompt}],
@@ -335,7 +371,8 @@ class Agent:
                 return f"【任务进度交接｜未完成（{reason}）】\n{text}\n\n{rule}"
         except Exception:
             pass
-        return compose_handoff(goal, reason, final)
+        text = compose_handoff(goal, reason, final)
+        return f"{text}\n\n{rule}" if browser_note else text
 
     def _build_llm(self):
         """按临时覆盖配置构建主 LLM（无覆盖时走 .env 配置）。"""
@@ -1260,6 +1297,13 @@ class Agent:
                     ctx_lines.append(
                         "⚠️ 上一轮任务未完成：你只允许执行「未完成清单」中的事项并继续断点；"
                         "已完成项视为已交付，不得重新执行；若用户新目标与上轮明显不同则以新目标为准。")
+                    # 浏览器会话连续性：续跑时最容易踩的坑是"为了干净开始"
+                    # 而 close + launch 重开，导致已打开页面/会话丢失。
+                    bn = self._browser_session_note()
+                    if bn:
+                        ctx_lines.append(
+                            f"🌐 {bn}。**保持该会话**：直接接着操作（必要时先 browser status 确认），"
+                            "不要 close、不要重新 launch；只有页面明确卡死或用户要求时才重启浏览器。")
                 context_parts.append("\n".join(ctx_lines))
         if experience_context:
             context_parts.append(f"\n## 历史经验（可参考的成功做法）\n{experience_context}")
