@@ -488,7 +488,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return len(pids)
 
     def _ensure_page(self) -> ToolResult:
-        if not self._pages or self._page is None or not self._is_browser_alive():
+        if not self._pages or self._page is None or not self._is_browser_alive() or not self._page_alive():
             result = self._launch()
             if not result.success:
                 return result
