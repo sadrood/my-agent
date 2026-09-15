@@ -182,3 +182,43 @@ class TestNewSubsystemChecks:
     def test_new_checks_in_run_doctor(self):
         names = {r["name"] for r in doc.run_doctor(include_llm=False)}
         assert {"Hooks 钩子", "execpolicy 策略", "Skills 技能", "OS 级沙箱"} <= names
+
+
+class TestEnvSyncCheck:
+    """配置同步检查：.env 含密钥不入库，从模板复制后与仓库脱钩——
+    项目新增的配置项不会自动出现（用户困惑："这个配置怎么找不到"）。"""
+
+    def test_reports_missing_keys(self, tmp_path):
+        env = tmp_path / ".env"
+        example = tmp_path / ".env.example"
+        env.write_text("LLM_API_KEY=k\n", encoding="utf-8")
+        example.write_text(
+            "LLM_API_KEY=\nNEW_FEATURE_FLAG=true\nMAX_LOOP_OPS=80\n",
+            encoding="utf-8",
+        )
+        r = doc._check_env_sync(str(env), str(example))
+        assert r["ok"] is True          # 缺项只是提示，不是错误
+        assert "MAX_LOOP_OPS" in r["message"] or "NEW_FEATURE_FLAG" in r["message"]
+        assert ".env.example" in r["hint"]
+
+    def test_all_covered_reports_ok(self, tmp_path):
+        env = tmp_path / ".env"
+        example = tmp_path / ".env.example"
+        env.write_text("A=1\nB=2\n", encoding="utf-8")
+        example.write_text("A=1\nB=2\n", encoding="utf-8")
+        r = doc._check_env_sync(str(env), str(example))
+        assert r["ok"] is True
+        assert "已覆盖" in r["message"]
+
+    def test_missing_files_skips_gracefully(self, tmp_path):
+        r = doc._check_env_sync(str(tmp_path / "nope.env"), str(tmp_path / "nope.example"))
+        assert r["ok"] is True and "跳过" in r["message"]
+
+    def test_commented_placeholders_not_counted(self, tmp_path):
+        """.env.example 里被注释掉的占位行不算"可用配置"，不应报缺失。"""
+        env = tmp_path / ".env"
+        example = tmp_path / ".env.example"
+        env.write_text("A=1\n", encoding="utf-8")
+        example.write_text("A=1\n# OPTIONAL_THING=xxx\n", encoding="utf-8")
+        r = doc._check_env_sync(str(env), str(example))
+        assert "OPTIONAL_THING" not in r["message"]
