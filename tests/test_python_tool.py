@@ -112,3 +112,46 @@ def test_stdout_captured_and_restored():
 def test_empty_code_rejected():
     r = make_tool().execute("   ")
     assert not r.success
+
+
+class TestExecutionTimeout:
+    """回归：该工具体此前**没有任何超时**（description 却声称 30 秒），
+    模型写下 sleep 轮询/长循环时会一直挂到工具层 300s 硬超时才返回。"""
+
+    def test_sleep_times_out_quickly(self, monkeypatch):
+        import time
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "python_timeout", 0.5)
+        t = make_tool()
+        t0 = time.time()
+        r = t.execute("import time; time.sleep(10)")
+        elapsed = time.time() - t0
+        assert elapsed < 5, "应在自身超时内返回，而不是跑满 sleep"
+        assert not r.success
+        assert "超时" in r.error
+
+    def test_timeout_hint_mentions_background(self, monkeypatch):
+        """超时错误要给出正确出路（用 terminal 后台任务，别轮询）。"""
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "python_timeout", 0.5)
+        r = make_tool().execute("import time; time.sleep(10)")
+        assert "background" in r.error or "后台" in r.error
+
+    def test_partial_output_returned_on_timeout(self, monkeypatch):
+        """超时前已产生的输出要回传，便于判断卡在哪一步。"""
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "python_timeout", 0.5)
+        r = make_tool().execute("print('进度: 第一步完成'); import time; time.sleep(10)")
+        assert "进度" in r.output
+
+    def test_normal_code_unaffected(self):
+        r = make_tool().execute("print(6 * 7)")
+        assert r.success and "42" in r.output
+
+    def test_description_states_real_timeout(self):
+        """description 承诺的超时秒数必须与实际配置一致（避免误导模型）。"""
+        from config import TOOL_CONFIG
+        from tools.python import _timeout_seconds
+        desc = make_tool().description
+        assert str(int(_timeout_seconds())) in desc
+        assert "轮询" in desc   # 明确劝阻 sleep 轮询

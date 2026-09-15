@@ -6,6 +6,7 @@
 import os
 import base64
 import time
+import threading
 from typing import Optional
 
 from tools.base import BaseTool, ToolResult
@@ -55,6 +56,15 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages: list = []        # 所有 page 列表
         self._current_page_idx = 0     # 当前活跃 page 索引
+
+        # 专属 worker 线程：Playwright sync API 把 asyncio 事件循环绑定在
+        # 启动线程上，而 Executor 每次调用工具都在新的 daemon 线程执行；
+        # 跨线程复用 playwright 对象会抛 "cannot switch to a different
+        # thread"。用长生命周期 worker 串行执行所有命令，保证 playwright
+        # 对象始终在同一线程创建与使用。
+        self._worker: Optional[threading.Thread] = None
+        self._worker_queue = None       # queue.Queue（惰性创建）
+        self._worker_broken = False     # 上次执行疑似卡死被废弃，下次命令重建
 
         os.makedirs(self._screenshot_dir, exist_ok=True)
 
@@ -247,11 +257,95 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             )
 
         try:
-            return handler(args)
+            return self._dispatch(handler, args)
         except Exception as e:
             return ToolResult(
                 success=False, output="", error=f"浏览器操作失败: {str(e)}"
             )
+
+    # ================================================================
+    # 专属 worker 线程（Playwright 生命周期绑定单线程）
+    # ================================================================
+
+    def _start_worker(self) -> None:
+        """创建/重建专属 worker 线程。
+
+        Playwright sync API 底层把 asyncio 事件循环绑定到启动它的线程；
+        Executor 每次调用工具都在新的 daemon 线程里执行，跨线程复用
+        playwright 对象会抛 "cannot switch to a different thread (which
+        happens to have exited)"。这里用长生命周期 worker 串行执行所有
+        浏览器命令，playwright 对象始终在同一线程创建和使用。
+        """
+        import queue
+
+        self._worker_queue = queue.Queue()
+        self._worker_broken = False
+
+        def _loop():
+            while True:
+                job = self._worker_queue.get()
+                if job is None:
+                    return
+                try:
+                    job()
+                except Exception:
+                    pass  # job 内部已捕获异常并放入结果 box
+
+        self._worker = threading.Thread(
+            target=_loop, daemon=True, name="browser-worker")
+        self._worker.start()
+
+    def _dispatch(self, fn, *args, wait_timeout: float = None, **kwargs):
+        """把浏览器命令投递到 worker 线程执行并等待结果。
+
+        wait_timeout=None（默认）：无限等待——外层
+        Executor._run_tool_with_timeout 提供硬超时兜底，超时后调用
+        reset() 把 worker 标记废弃、下次命令重建。
+        wait_timeout 指定（如 __del__ 析构场景）：短等待，超时放弃该
+        worker（daemon 线程随进程退出），由 _force_cleanup_residual 兜底。
+        """
+        if (self._worker is None or not self._worker.is_alive()
+                or self._worker_broken):
+            # worker 缺失/已死/上次卡死被废弃 → 重建。
+            # 防御性丢弃旧 playwright 引用（若未被 reset 清空），
+            # 避免新 worker 复用绑定在已死线程上的事件循环。
+            if self._playwright is not None or self._context is not None:
+                self._playwright = None
+                self._browser = None
+                self._context = None
+                self._pages = []
+                self._current_page_idx = 0
+            self._start_worker()
+
+        box: dict = {}
+        done = threading.Event()
+
+        def _job():
+            try:
+                box["result"] = fn(*args, **kwargs)
+            except BaseException as e:   # noqa: BLE001
+                box["error"] = e
+            finally:
+                done.set()
+
+        try:
+            self._worker_queue.put(_job)
+        except Exception as e:
+            self._worker_broken = True
+            self._worker = None
+            raise RuntimeError(f"浏览器 worker 队列异常: {e}") from e
+
+        if wait_timeout is None:
+            done.wait()
+        else:
+            done.wait(wait_timeout)
+            if not done.is_set():
+                # 短等待超时（析构场景）：放弃该 worker，交给兜底清理
+                self._worker_broken = True
+                return None
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
 
     # ================================================================
     # 生命周期管理
@@ -309,7 +403,26 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"启动浏览器失败: {str(e)}")
 
-    def _close(self, _args: str = "") -> ToolResult:
+    def _close(self, _args: str = "", _wait: float = None) -> ToolResult:
+        """优雅关闭浏览器（实际关闭逻辑在 worker 线程执行，避免跨线程）。
+
+        _wait：仅 __del__ 析构场景使用（短等待，超时交给兜底清理）；
+        正常调用无限等待，外层 Executor 有硬超时兜底。
+        """
+        if threading.current_thread() is self._worker:
+            # 已在 worker 线程内（理论上不会发生，防御处理）
+            return self._close_impl()
+        result = self._dispatch(self._close_impl, wait_timeout=_wait)
+        if result is None:
+            # 短等待超时（析构场景）：兜底清理残留进程
+            killed = self._force_cleanup_residual()
+            return ToolResult(
+                success=True,
+                output=f"浏览器已关闭（兜底清理 {killed} 个残留进程）。",
+            )
+        return result
+
+    def _close_impl(self) -> ToolResult:
         graceful = True
         try:
             if self._context:
@@ -1051,8 +1164,18 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         """强制重置浏览器状态（工具超时后由 ToolManager.reset_tool 调用）。
 
         丢弃 Playwright 引用与页面列表，下次任何命令都会重新 launch。
-        不尝试优雅关闭（CDP 可能已挂死，关闭调用同样会阻塞）。
+        不尝试优雅关闭（CDP 可能已挂死，关闭调用同样会阻塞）；worker
+        线程标记废弃并通知退出（若未卡死），下次命令自动重建。
         """
+        self._worker_broken = True
+        wq = self._worker_queue
+        self._worker_queue = None
+        if wq is not None:
+            try:
+                wq.put(None)   # 通知旧 worker 退出（卡死则忽略，daemon 随进程退出）
+            except Exception:
+                pass
+        self._worker = None
         self._playwright = None
         self._browser = None
         self._context = None
@@ -1064,6 +1187,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def __del__(self):
         try:
-            self._close()
+            # 析构场景短等待：worker 卡死时不被拖住，交给兜底清理
+            self._close(_wait=5)
         except Exception:
             pass

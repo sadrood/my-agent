@@ -94,9 +94,42 @@ def _win_unix_shim(command: str) -> str:
     if m:
         pat, path = m.group(2), m.group(3)
         return "powershell -NoProfile -Command \"Select-String -Path '%s' -Pattern '%s'\"" % (path.replace("'", "''"), pat.replace("'", "''"))
-    return cmd
 
-    return command
+    # ---- 管道形式的 tail/head（此前未处理，是最高频的失败来源）----
+    # 例：pytest tests -q 2>&1 | tail -15
+    # cmd.exe 没有 tail/head，必须以管道结尾的形式识别。
+    # 做法：内层仍用 `cmd /c` 执行原命令（保留 && / cd /d / 2>&1 等 cmd 语法），
+    # 外层 PowerShell 只负责取尾部/头部若干行，避免改写原命令语义。
+    m = re.search(r"\|\s*tail\s+(?:-n\s*|-)?(\d+)\s*$", cmd, re.IGNORECASE)
+    if m:
+        inner = cmd[:m.start()].rstrip()
+        return ("powershell -NoProfile -Command \"cmd /c '%s' 2>&1 | Select-Object -Last %s\""
+                % (inner.replace("'", "''"), m.group(1)))
+    m = re.search(r"\|\s*head\s+(?:-n\s*|-)?(\d+)\s*$", cmd, re.IGNORECASE)
+    if m:
+        inner = cmd[:m.start()].rstrip()
+        return ("powershell -NoProfile -Command \"cmd /c '%s' 2>&1 | Select-Object -First %s\""
+                % (inner.replace("'", "''"), m.group(1)))
+    # `... | tail`（无行数）默认 10 行
+    m = re.search(r"\|\s*tail\s*$", cmd, re.IGNORECASE)
+    if m:
+        inner = cmd[:m.start()].rstrip()
+        return ("powershell -NoProfile -Command \"cmd /c '%s' 2>&1 | Select-Object -Last 10\""
+                % inner.replace("'", "''"))
+    m = re.search(r"\|\s*head\s*$", cmd, re.IGNORECASE)
+    if m:
+        inner = cmd[:m.start()].rstrip()
+        return ("powershell -NoProfile -Command \"cmd /c '%s' 2>&1 | Select-Object -First 10\""
+                % inner.replace("'", "''"))
+
+    # `... | more [±N]`：cmd 内建分页在非交互管道里会让上游进程提前收到断管
+    # （pytest 因此报错退出、命令整体 ok=False，日志只剩前若干行）。
+    # 非交互执行不需要分页，直接去掉该管道，输出由工具层截断展示。
+    m = re.search(r"\|\s*more\b[^|]*$", cmd, re.IGNORECASE)
+    if m:
+        return cmd[:m.start()].rstrip()
+
+    return cmd
 
 
 class TerminalTool(BaseTool):
@@ -234,6 +267,12 @@ class TerminalTool(BaseTool):
             return self._session_op(session_op)
         if session:
             return self._session_run(command)
+        # bg 子命令（list/output/kill）：function calling 路径此前缺少这条分支，
+        # 导致 `bg output job-xxx` 被当 shell 命令执行（"'output' 不是内部或
+        # 外部命令"），而 _start_background 的提示文本却在教模型这么用。
+        # 与字符串入口 execute() 保持一致。
+        if command.lower().startswith("bg "):
+            return self._bg_dispatch(command[3:].strip())
         return self._run_command(command, background=background)
 
     def build_approval_request(self, arguments: Dict[str, Any]):
@@ -524,8 +563,11 @@ class TerminalTool(BaseTool):
         }
         return ToolResult(
             success=True,
-            output=(f"已启动后台任务 {job_id}（PID {proc.pid}）。\n"
-                    f"查看输出: bg output {job_id} · 结束: bg kill {job_id}"),
+            output=(
+                f"已启动后台任务 {job_id}（PID {proc.pid}）。\n"
+                f'查看输出: 再调用 terminal 工具，command="bg output {job_id} 30"\n'
+                f'结束任务: command="bg kill {job_id}"'
+            ),
         )
 
     def _bg_dispatch(self, args: str) -> ToolResult:
