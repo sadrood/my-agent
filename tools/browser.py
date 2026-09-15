@@ -380,6 +380,26 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         if self._persistent and self._context is not None and self._is_context_alive() and self._page_alive():
             return ToolResult(success=True, output="浏览器已在运行中（持久 profile）。")
 
+        # context 仍活着但页面已死/缺失（如外部关闭了标签页、CDP 会话
+        # 中断后页面失效）：只重建页面列表，不要重启 Playwright——
+        # 旧 worker 线程的 asyncio loop 已被绑定，再次 start() 会抛
+        # "Sync API inside the asyncio loop"。重建页面既绕过该坑，
+        # 又能完整保留持久 profile 的登录态。
+        if self._persistent and self._context is not None and self._is_context_alive():
+            try:
+                existing = [p for p in self._context.pages if not p.is_closed()]
+                if not existing:
+                    existing = [self._context.new_page()]
+                self._pages = existing
+                self._current_page_idx = 0
+                return ToolResult(
+                    success=True,
+                    output="浏览器已在运行中（持久 profile，已重建失效页面）。",
+                )
+            except Exception:
+                # 重建失败则按全新启动流程处理（下方会重建 worker）
+                pass
+
         try:
             from playwright.sync_api import sync_playwright
 
