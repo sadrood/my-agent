@@ -1164,8 +1164,18 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         """强制重置浏览器状态（工具超时后由 ToolManager.reset_tool 调用）。
 
         丢弃 Playwright 引用与页面列表，下次任何命令都会重新 launch。
-        不尝试优雅关闭（CDP 可能已挂死，关闭调用同样会阻塞）。
+        不尝试优雅关闭（CDP 可能已挂死，关闭调用同样会阻塞）；worker
+        线程标记废弃并通知退出（若未卡死），下次命令自动重建。
         """
+        self._worker_broken = True
+        wq = self._worker_queue
+        self._worker_queue = None
+        if wq is not None:
+            try:
+                wq.put(None)   # 通知旧 worker 退出（卡死则忽略，daemon 随进程退出）
+            except Exception:
+                pass
+        self._worker = None
         self._playwright = None
         self._browser = None
         self._context = None
