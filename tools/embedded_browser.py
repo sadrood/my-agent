@@ -20,21 +20,40 @@ from config import BROWSER_CONFIG
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8091/browser"
 
+# 探测结果缓存：桥离线时每次探测都要等连接超时(~0.8s)，而 ToolManager 会被
+# 反复创建（每个测试、每次工具管理器重建）→ 累积拖慢启动与测试套件。
+# TTL 内直接复用上次结果。桌面端场景不依赖探测（运行时注入
+# MY_AGENT_EMBEDDED_BROWSER_URL 直接走内嵌分支），故 TTL 取较长值。
+_PROBE_CACHE = {"at": 0.0, "ok": False}
+_PROBE_TTL = 60.0
 
-def probe_bridge(timeout: float = 0.8) -> bool:
+
+def probe_bridge(timeout: float = 0.8, use_cache: bool = True) -> bool:
     """探测桌面端内嵌浏览器桥是否在线（健康检查，快速失败）。
 
     ToolManager 建浏览器工具时调用：桥在线 → 一律用内嵌浏览器，
     外部 Playwright 浏览器被禁用；离线（纯 CLI）→ 才允许外部浏览器。
+
+    use_cache=True 时在 TTL 内复用上次结果（避免反复等待连接超时）；
+    显式探测请传 use_cache=False。
     """
+    import time as _time
+    now = _time.time()
+    if use_cache and (now - _PROBE_CACHE["at"]) < _PROBE_TTL:
+        return _PROBE_CACHE["ok"]
+
     base = (BROWSER_CONFIG.get("embedded_url") or DEFAULT_BRIDGE_URL).rstrip("/")
     health = base.rsplit("/", 1)[0] + "/health"
+    ok = False
     try:
         import urllib.error  # noqa: F401
         with urllib.request.urlopen(health, timeout=timeout) as resp:
-            return bool(_json.loads(resp.read().decode("utf-8")).get("ok"))
+            ok = bool(_json.loads(resp.read().decode("utf-8")).get("ok"))
     except Exception:
-        return False
+        ok = False
+    _PROBE_CACHE["at"] = now
+    _PROBE_CACHE["ok"] = ok
+    return ok
 
 
 class EmbeddedBrowserTool(BrowserTool):

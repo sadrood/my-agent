@@ -119,10 +119,17 @@ class ToolManager:
         except Exception:
             pass
 
-        # 文生图工具（SenseNova Token Plan，OpenAI 兼容 images 端点）
+        # 文生图工具（OpenAI 兼容 images 端点；b64 与 url 两种返回都落盘）
         try:
             from tools.image_gen import ImageGenTool
             self.register(ImageGenTool())
+        except Exception:
+            pass
+
+        # 文生视频工具（OpenAI Videos 兼容异步任务：创建 → 轮询 → 下载 mp4）
+        try:
+            from tools.video_gen import VideoGenTool
+            self.register(VideoGenTool())
         except Exception:
             pass
 

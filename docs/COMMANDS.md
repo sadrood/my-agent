@@ -88,7 +88,9 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
   如要输入字面反斜杠请写两个 `\\`。
 - 管道/重定向（非 TTY）模式保持逐行一条消息，不自动合并。
 
-## 三·六、文生图（SenseNova Token Plan）
+## 三·六、文生图 / 文生视频
+
+### 文生图（OpenAI 兼容 `/images/generations`）
 
 - 交互命令：`/image <图片描述>`，例如：
   ```
@@ -96,17 +98,56 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
   ```
 - Agent 任务中：直接让它"生成一张 XX 的图片"即可，会自动调用 `image_gen` 工具。
 - 生成结果保存到 `./generated_images/`（已在 .gitignore），返回本地文件路径。
-- 配置（.env，OpenAI 兼容 `/images/generations` 端点）：
+- **两种返回形式都会落盘**：提供方给 `b64_json`（商汤）→ 解码保存；
+  给 `url`（Agnes）→ **自动下载**后保存（下载失败则回退给出 URL）。
+- 配置（.env）：
   ```
   IMAGE_GEN_API_KEY=sk-...                 # 留空回退主 LLM key
-  IMAGE_GEN_BASE_URL=https://token.sensenova.cn/v1
-  IMAGE_GEN_MODEL=sensenova-u1.5-lite      # 或 sensenova-u1-fast（信息图加速）
+  IMAGE_GEN_BASE_URL=https://api.agnes-ai.cn/v1
+  IMAGE_GEN_MODEL=agnes-image-2.5-flash    # 或 agnes-image-2.1-flash
   IMAGE_GEN_SIZE=1024x1024                 # 1024x1024 / 768x1024 / 1280x720 ...
   IMAGE_GEN_SAVE_DIR=./generated_images
-  IMAGE_GEN_WATERMARK=false                # 公测期免费开放去水印：false = 不带水印
+  IMAGE_GEN_WATERMARK=false                # 商汤专有字段；不支持的提供方会自动跳过
   ```
-- 模型选择：`sensenova-u1.5-lite`（构图/光影/文字渲染增强）、
-  `sensenova-u1-fast`（信息图加速版）。
+- 实测可用的模型：`agnes-image-2.5-flash`、`agnes-image-2.1-flash`（Agnes，返回 url）、
+  `sensenova-u1.5-lite`、`sensenova-u1-fast`（商汤，返回 b64）。
+  注意 `agnes-image-2.0-flash` 已下线（503 无可用渠道）。
+
+### 文生视频（OpenAI Videos 兼容，**异步任务**）
+
+- Agent 任务中：让它"生成一段 XX 的视频"即会调用 `video_gen` 工具。
+- 两步式契约（实测 Agnes）：
+  ```
+  创建: POST {BASE_URL}/videos
+        {"model": "agnes-video-2.5-flash", "prompt": "...", "seconds": "5",
+         "mode": "text", "size": "720P", "aspect_ratio": "16:9"}
+        → {"video_id": "task_xxx", "status": "queued"}
+  查询: GET {HOST}/agnesapi?video_id=<ID>&model_name=<模型>
+        ⚠️ 查询端点在 **HOST 根路径**（不在 /v1 下）
+        → {"status": "queued|in_progress|completed|failed", "progress": 0-100,
+           "url": "<mp4>" | null, "error": null}
+  ```
+- 工具命令：
+  ```
+  video_gen(command="generate", prompt="...", seconds="5", size="720P")
+  video_gen(command="status", task_id="task_xxx")     # 超时后取结果
+  ```
+- **超时不丢任务**：5 秒/720P 实测约 40-70 秒；等待上限 `VIDEO_GEN_MAX_WAIT`（默认 240s，
+  须小于工具级 `TOOL_TIMEOUT` 300s）。超时返回 `task_id` 并提示稍后用 `status` 取回
+  ——**不要重新生成**。
+- 完成后自动下载 mp4 到 `./generated_videos/`。
+- 配置（.env）：
+  ```
+  VIDEO_GEN_API_KEY=sk-...                 # 留空回退主 LLM key
+  VIDEO_GEN_BASE_URL=https://api.agnes-ai.cn/v1
+  VIDEO_GEN_QUERY_BASE=                    # 留空由 BASE_URL 去掉 /v1 推导
+  VIDEO_GEN_MODEL=agnes-video-2.5-flash    # 或 agnes-video-2.5 / agnes-video-v2.0
+  VIDEO_GEN_SECONDS=5
+  VIDEO_GEN_SIZE=720P                      # Flash 仅支持 720P
+  VIDEO_GEN_ASPECT_RATIO=16:9
+  VIDEO_GEN_SAVE_DIR=./generated_videos
+  VIDEO_GEN_MAX_WAIT=240
+  ```
 
 ## 三·七、运行中卡住的排查
 
