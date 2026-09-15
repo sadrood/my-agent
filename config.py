@@ -418,6 +418,9 @@ TOOL_CONFIG = {
     # 默认 300s；browser 因 CDP 挂起高发单独设短值。
     "tool_timeout": float(os.getenv("TOOL_TIMEOUT", "300")),
     "browser_timeout": float(os.getenv("BROWSER_TIMEOUT", "60")),
+    # python 代码工具执行超时（秒）：exec 无法中断，超时后工具立即返回明确错误
+    # （此前该工具体没有任何超时，sleep 轮询/长循环会挂到 tool_timeout 才返回）
+    "python_timeout": float(os.getenv("PYTHON_TOOL_TIMEOUT", "30")),
     # 终端前台命令超时（秒）：实战发现 60s 会掐断负载下的全量测试，
     # 默认 120s。后台命令（background=true）不受此限。
     "terminal_fg_timeout": float(os.getenv("TERMINAL_FOREGROUND_TIMEOUT", "120")),

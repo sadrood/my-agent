@@ -251,6 +251,83 @@ class TestTerminalBackground:
         assert s["required"] == ["command"]
 
 
+class TestBgSubcommandViaExecuteJson:
+    """回归：function calling 路径（execute_json）此前缺少 bg 子命令分支，
+    导致 `bg output job-xxx` 被当 shell 命令执行（"'output' 不是内部或外部
+    命令"），而工具的提示文本却在教模型这么用。"""
+
+    def test_bg_list_via_execute_json(self):
+        t = TerminalTool()
+        r = t.execute_json({"command": "bg list"})
+        assert r.success is True
+        assert "后台" in r.output or "任务" in r.output
+
+    def test_bg_unknown_job_via_execute_json(self):
+        t = TerminalTool()
+        r = t.execute_json({"command": "bg output nosuch-job"})
+        assert r.success is False and "不存在" in r.error
+
+    def test_bg_start_hint_uses_explicit_command_form(self):
+        """启动提示要明确"再调用 terminal 工具 + command=..."，
+        不能只写 `bg output xxx`（会被误当成独立 shell 命令）。"""
+        t = TerminalTool()
+        r = t.execute_json({"command": "echo hi", "background": True})
+        assert r.success is True
+        assert 'command="bg output' in r.output
+        # 清理
+        try:
+            job_id = r.output.split("后台任务 ")[1].split("（")[0].strip()
+            t.execute_json({"command": f"bg kill {job_id}"})
+        except Exception:
+            pass
+
+
+class TestWinUnixShim:
+    """Windows 下 unix 命令翻译（含**管道形式** tail/head/more）。"""
+
+    def test_pipe_tail_translated(self):
+        from tools.terminal import _win_unix_shim, _IS_WINDOWS
+        if not _IS_WINDOWS:
+            import pytest
+            pytest.skip("仅 Windows")
+        out = _win_unix_shim(r"pytest tests -q 2>&1 | tail -15")
+        # 应转为 PowerShell 取尾部，且原命令交由 cmd /c 执行（保留 cmd 语法）
+        assert "Select-Object -Last 15" in out
+        assert "cmd /c" in out
+
+    def test_pipe_head_translated(self):
+        from tools.terminal import _win_unix_shim, _IS_WINDOWS
+        if not _IS_WINDOWS:
+            import pytest
+            pytest.skip("仅 Windows")
+        out = _win_unix_shim("dir | head -3")
+        assert "Select-Object -First 3" in out
+
+    def test_pipe_more_stripped(self):
+        """`| more` 分页会让上游进程收到断管（pytest 报错），应直接剥掉。"""
+        from tools.terminal import _win_unix_shim, _IS_WINDOWS
+        if not _IS_WINDOWS:
+            import pytest
+            pytest.skip("仅 Windows")
+        out = _win_unix_shim("pytest tests -q 2>&1 | more +1")
+        assert "more" not in out
+        assert out.endswith("-q 2>&1")
+
+    def test_plain_command_untouched(self):
+        from tools.terminal import _win_unix_shim
+        assert _win_unix_shim("git status") == "git status"
+        assert _win_unix_shim("python main.py") == "python main.py"
+
+    def test_leading_tail_still_works(self):
+        """原有的"命令开头 tail/head"能力不能回归。"""
+        from tools.terminal import _win_unix_shim, _IS_WINDOWS
+        if not _IS_WINDOWS:
+            import pytest
+            pytest.skip("仅 Windows")
+        out = _win_unix_shim("tail -n 20 app.log")
+        assert "Get-Content" in out and "-Tail 20" in out
+
+
 class TestToolManager:
     def test_registered_tools(self):
         tm = ToolManager()

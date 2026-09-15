@@ -10,6 +10,7 @@ v2 变化：
 """
 import sys
 import io
+import threading
 import builtins as _builtins
 import traceback
 from typing import Any, Dict
@@ -30,6 +31,19 @@ _UNSAFE_BUILTINS = {
     "eval", "exec", "compile", "input", "breakpoint", "exit", "quit",
     "help", "copyright", "credits", "license", "globals", "locals",
 }
+
+
+def _timeout_seconds() -> float:
+    """python 工具执行超时（秒）。默认 30，可用 PYTHON_TOOL_TIMEOUT 调整。
+
+    此前该工具体**没有**任何超时（description 却声称 30 秒），模型一旦写下
+    sleep 轮询/长循环就会挂到工具层 300s 硬超时才返回。这里兑现承诺。
+    """
+    try:
+        from config import TOOL_CONFIG
+        return float(TOOL_CONFIG.get("python_timeout", 30))
+    except Exception:
+        return 30.0
 
 
 def _safe_import(name, *args, **kwargs):
@@ -86,7 +100,10 @@ class PythonTool(BaseTool):
             "适合数据处理、计算、生成文件（Excel/CSV/文档）等场景。"
             "注意：受限环境不提供 subprocess（不能执行系统命令，请用 terminal 工具），"
             "可用 os/pathlib 读写文件、json/math/re/datetime 等常用模块；"
-            "执行超时时间为 30 秒。"
+            "执行超时时间为 %d 秒（超时会直接失败）。"
+            "**不要在本工具里用 sleep 轮询等待外部任务**——长任务（测试/构建/下载）"
+            "请改用 terminal 的 background=true 启动，再用 bg output 查看输出。"
+            % int(_timeout_seconds())
         )
 
     @property
@@ -148,7 +165,37 @@ class PythonTool(BaseTool):
         }
 
         try:
-            exec(code, safe_globals)
+            # 超时保护：exec 无法被中断（sleep/死循环会一直挂），因此放到
+            # 守护线程执行 + join 超时。超时后线程仍在后台（Python 无法强杀
+            # 线程），但工具立即返回明确错误，不再拖到工具层 300s 硬超时。
+            _timeout = _timeout_seconds()
+            box: dict = {}
+
+            def _run() -> None:
+                try:
+                    exec(code, safe_globals)
+                    box["ok"] = True
+                except BaseException as e:   # noqa: BLE001
+                    box["err"] = e
+
+            t = threading.Thread(target=_run, daemon=True, name="py-tool")
+            t.start()
+            t.join(_timeout)
+
+            if t.is_alive():
+                # 超时：尽力回传已产生的输出，便于判断卡在哪一步
+                partial = captured.getvalue()
+                return ToolResult(
+                    success=False,
+                    output=partial.strip()[:1000],
+                    error=(f"python 代码执行超时（>{_timeout:.0f}s）。"
+                           "不要在本工具里轮询等待外部任务；长任务请用 terminal 的 "
+                           "background=true 启动、再用 bg output 查看输出。"),
+                )
+
+            if "err" in box:
+                raise box["err"]
+
             output = captured.getvalue()
             return ToolResult(
                 success=True,

@@ -320,13 +320,22 @@ PLATFORM_NOTICE_TEMPLATE = """
 ## 运行环境
 - 操作系统: {system}，终端是 {shell}（Windows cmd）
 - Windows cmd 没有 ls/head/tail/grep/pwd/sleep/bg 等 Unix 命令，
-  直接使用会报「不是内部或外部命令」导致工具失败：
-  · 睡眠等待：没有 sleep —— 用 python 工具执行 `import time; time.sleep(N)`，
-    或 `powershell -NoProfile -Command "Start-Sleep -Seconds N"`
-  · 查看文件尾部：没有 tail —— 用 python 读文件最后 N 行，或
+  **也不要写 `命令 | tail -N`、`| head -N`、`| more` 这类管道**（cmd 无这些命令；
+  管道分页还会让上游进程提前收到断管而报错，测试整体变红）：
+  · 查看文件尾部：用 python 读文件最后 N 行，或
     `powershell -NoProfile -Command "Get-Content 文件 -Tail N"`
-  · 后台任务：没有 bg/& —— terminal 工具请用 background=true 参数
+  · 查看命令输出尾部：直接运行命令（工具层会自动截断展示）；长命令改用后台任务（见下）
+  · 后台任务：**不要把 `bg ...` 当 shell 命令直接写**。bg 是 terminal 工具的子命令，
+    通过 command 参数传入：command="bg list" / "bg output job-xxx 30" / "bg kill job-xxx"；
+    启动后台任务用 background=true 参数（会立即返回任务 ID）
+  · 睡眠等待：没有 sleep —— 用 `powershell -NoProfile -Command "Start-Sleep -Seconds N"`；
+    **不要在 python 工具里写 sleep 轮询等外部任务**（python 工具 30 秒即超时失败）
   · 文本搜索：用 findstr 或 python；列目录用 dir；看文件用 type
+- **长任务（全量测试 / 构建 / 大文件下载）的正确姿势**：
+  1) terminal(command="...", background=true) 启动 → 立即拿到任务 ID
+  2) terminal(command="bg output job-xxx 30") 取最近 30 行看进展/结果
+  3) terminal(command="bg kill job-xxx") 结束
+  不要把长任务放在前台阻塞，也不要写脚本轮询等它完成。
 - 能读能写的文件操作优先用 file 工具，避免 shell 转义坑；
   复杂处理（解析/统计/循环）一律用 python 工具，不要在 cmd 里拼 shell。"""
 
