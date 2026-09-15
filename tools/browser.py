@@ -57,6 +57,15 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._pages: list = []        # 所有 page 列表
         self._current_page_idx = 0     # 当前活跃 page 索引
 
+        # 专属 worker 线程：Playwright sync API 把 asyncio 事件循环绑定在
+        # 启动线程上，而 Executor 每次调用工具都在新的 daemon 线程执行；
+        # 跨线程复用 playwright 对象会抛 "cannot switch to a different
+        # thread"。用长生命周期 worker 串行执行所有命令，保证 playwright
+        # 对象始终在同一线程创建与使用。
+        self._worker: Optional[threading.Thread] = None
+        self._worker_queue = None       # queue.Queue（惰性创建）
+        self._worker_broken = False     # 上次执行疑似卡死被废弃，下次命令重建
+
         os.makedirs(self._screenshot_dir, exist_ok=True)
 
     # ================================================================
