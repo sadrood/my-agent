@@ -324,9 +324,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 browser_alive = False
             try:
                 context_alive = bool(
-                    self._context is not None
-                    and not self._is_context_alive() is False
-                    and self._is_context_alive())
+                    self._context is not None and self._is_context_alive())
             except Exception:
                 context_alive = False
             if not browser_alive and not context_alive:
