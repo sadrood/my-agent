@@ -169,7 +169,9 @@ class TestParallelMode:
         assert result.success is True
         assert all(st.status == "completed" for st in result.subtasks)
         assert llm.max_concurrent == 2                     # 真并发
-        assert elapsed < 8                                 # 没有卡到 Barrier 超时
+        # 用 barrier 是否被打破判断"有没有等到超时"：比 elapsed 阈值精确，
+        # 且不因整套测试时的机器负载而假失败（真串行时 barrier 会超时置 broken）
+        assert not barrier.broken, "未真并发：barrier 等待超时（时序被串行化）"
 
     def test_dependent_subtask_inherits_wave_results(self):
         """独立子任务先跑完（map），依赖型子任务随后继承其结果（reduce）。"""
@@ -393,7 +395,8 @@ class TestDAGScheduling:
         assert result.success is True
         assert [st.status for st in result.subtasks] == ["completed"] * 4
         assert llm.max_concurrent == 2                     # B/C 真并发
-        assert elapsed < 8                                 # 没卡到 Barrier 超时
+        # 同 test_independent_subtasks_run_concurrently：用 barrier 状态而非耗时阈值
+        assert not barrier.broken, "B/C 未真并发：barrier 等待超时"
         # 调度顺序：A 第一批、D 最后执行
         assert "任务A" in llm.worker_chats[0][1]["content"]
         assert "任务D" in llm.worker_chats[-1][1]["content"]
