@@ -37,7 +37,9 @@ class TestTerminalTool:
 class TestFileTool:
     def test_schema_enum(self):
         s = FileTool().schema
-        assert s["properties"]["operation"]["enum"] == ["read", "write", "list", "exists", "info"]
+        assert s["properties"]["operation"]["enum"] == [
+            "read", "write", "append", "copy", "move", "list", "exists", "info",
+        ]
 
     def test_write_read_roundtrip(self, tmp_path):
         t = FileTool()

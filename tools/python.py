@@ -25,6 +25,39 @@ BLOCKED_IMPORTS = {
     "importlib", "inspect", "sys", "gc", "traceback", "code", "compileall",
 }
 
+# 被禁模块的"出路"提示：模型撞上黑名单时最需要知道的是「那我该用什么」。
+# 实测（2026-09-15 漫剧任务）：模型想复制 5 张图 → shutil 被拦 → 报错只说
+# "代码执行出错" → 连续 3 轮瞎猜（换绝对路径、换相对路径、查 cwd）。
+_BLOCKED_HINTS = {
+    "shutil": "复制/移动文件请用 file 工具的 copy/move 操作，删除请用 terminal 工具",
+    "subprocess": "执行系统命令请用 terminal 工具（走审批门）",
+    "os.system": "执行系统命令请用 terminal 工具（走审批门）",
+    "socket": "网络请求请用 terminal 工具或对应的 web/浏览器工具",
+    "ctypes": "底层系统调用不受支持，请用 terminal 工具",
+    "winreg": "注册表操作请用 terminal 工具（走审批门）",
+    "win32api": "Windows API 调用不受支持，请用 terminal 工具",
+    "win32con": "Windows API 调用不受支持，请用 terminal 工具",
+    "multiprocessing": "本工具已带超时保护，长任务请用 terminal 的 background=true",
+    "pty": "伪终端不受支持，请用 terminal 工具",
+    "importlib": "动态导入不受支持，请直接 import 目标模块",
+    "pickle": "序列化请改用 json",
+    "marshal": "序列化请改用 json",
+    "inspect": "源码反射不受支持",
+    "sys": "sys 不可用；文件操作请用 os/pathlib，系统命令请用 terminal 工具",
+    "gc": "gc 不可用",
+    "traceback": "traceback 不可用；出错信息会自动回传",
+    "code": "交互式解释器不受支持",
+    "compileall": "批量编译不受支持",
+}
+
+
+class BlockedImportError(ImportError):
+    """黑名单模块导入被拒。
+
+    用独立异常类型而不是靠字符串匹配，让 execute() 能把它和其他 ImportError
+    （比如用户写错模块名 ModuleNotFoundError）区分开，分别给出精准提示。
+    """
+
 # 服务器进程里禁用/无意义的内置项：input 会阻塞后端、eval/exec/compile 与
 # globals/locals 会破坏受限命名空间（沙箱逃逸面）
 _UNSAFE_BUILTINS = {
@@ -50,11 +83,37 @@ def _safe_import(name, *args, **kwargs):
     """受限 __import__：黑名单模块直接拒绝。"""
     root = name.split(".")[0]
     if root in BLOCKED_IMPORTS or name in BLOCKED_IMPORTS:
-        raise ImportError(
-            f"安全限制：Python 工具不允许导入模块 '{name}'。"
-            "如确需执行系统命令，请使用 terminal 工具（受审批策略管理）。"
+        hint = _BLOCKED_HINTS.get(name) or _BLOCKED_HINTS.get(root, "")
+        msg = (
+            f"安全限制：python 工具不允许导入模块 '{name}'"
+            "（该模块可绕过 terminal 工具的审批门执行系统级操作）。"
         )
+        if hint:
+            msg += f"替代方案：{hint}。"
+        raise BlockedImportError(msg)
     return __import__(name, *args, **kwargs)
+
+
+def _format_user_traceback(exc: BaseException, max_frames: int = 6) -> str:
+    """只保留用户代码帧的 traceback。
+
+    此前把 tools/python.py 的内部帧（raise box["err"] / exec(code, ...)）一起
+    回传，模型看到的是本工具的实现细节，真正有用的「用户代码第几行出错」被埋在
+    中间；日志里表现为模型抱怨「报错没有详情」。
+    """
+    frames = []
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename != __file__:
+            frames.append(tb)
+        tb = tb.tb_next
+
+    lines = ["Traceback (most recent call last):"]
+    for tb in frames[-max_frames:]:
+        code = tb.tb_frame.f_code
+        lines.append(f'  File "{code.co_filename}", line {tb.tb_lineno}, in {code.co_name}')
+    lines.extend(s.rstrip("\n") for s in traceback.format_exception_only(type(exc), exc))
+    return "\n".join(lines)
 
 
 def build_safe_builtins() -> dict:
@@ -103,6 +162,9 @@ class PythonTool(BaseTool):
             "执行超时时间为 %d 秒（超时会直接失败）。"
             "**不要在本工具里用 sleep 轮询等待外部任务**——长任务（测试/构建/下载）"
             "请改用 terminal 的 background=true 启动，再用 bg output 查看输出。"
+            "安全黑名单（导入即报错，别试）：subprocess/socket/shutil/sys/ctypes/"
+            "winreg/multiprocessing/pickle/inspect；"
+            "**复制/移动文件请直接用 file 工具的 copy/move，不要用 shutil**。"
             % int(_timeout_seconds())
         )
 
@@ -201,10 +263,26 @@ class PythonTool(BaseTool):
                 success=True,
                 output=output.strip() if output.strip() else "代码执行完成（无输出）。",
             )
-        except Exception:
-            error_msg = traceback.format_exc()
+        except BlockedImportError as e:
+            # 黑名单命中：把「为什么 + 改用哪个工具」同时放进 output 和 error，
+            # 模型无论读哪个字段都能立刻换路，不必反复试探。
+            partial = captured.getvalue().strip()
+            msg = str(e)
+            return ToolResult(
+                success=False,
+                output=f"{partial}\n{msg}".strip() if partial else msg,
+                error=msg,
+            )
+        except Exception as e:  # noqa: BLE001
+            error_msg = _format_user_traceback(e)
             output = captured.getvalue()
             full_output = output + "\n" + error_msg if output else error_msg
-            return ToolResult(success=False, output=full_output.strip(), error="代码执行出错。")
+            return ToolResult(
+                success=False,
+                output=full_output.strip(),
+                # error 字段此前恒为「代码执行出错。」——模型据此认为报错无详情。
+                # 现在带上异常类型与消息，一眼可见根因。
+                error=f"{type(e).__name__}: {e}"[:400],
+            )
         finally:
             sys.stdout = old_stdout
