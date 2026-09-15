@@ -1187,6 +1187,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def __del__(self):
         try:
-            self._close()
+            # 析构场景短等待：worker 卡死时不被拖住，交给兜底清理
+            self._close(_wait=5)
         except Exception:
             pass
