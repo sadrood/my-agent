@@ -63,9 +63,12 @@ class _Box:
 
 @pytest.fixture
 def fake_win32(monkeypatch):
-    """模拟 Windows 控制台：env 开启 + os.name=nt + 假 ctypes。"""
+    """模拟**旧版 conhost**：env 开启 + os.name=nt + 假 ctypes + 无现代终端标记。"""
     monkeypatch.setenv("MY_AGENT_DISABLE_QUICKEDIT", "true")
     monkeypatch.setattr(console_guard.os, "name", "nt")
+    # 关键：清除现代终端标记，否则会被跳过（见 TestModernTerminalSkip）
+    for k in ("WT_SESSION", "TERM_PROGRAM", "ConEmuANSI"):
+        monkeypatch.delenv(k, raising=False)
     fake = _FakeKernel32()
     monkeypatch.setattr(console_guard, "ctypes", _FakeCtypes(fake))
     return fake
@@ -99,3 +102,45 @@ def test_noop_when_quickedit_already_off(fake_win32):
 def test_false_when_setconsolemode_fails(fake_win32):
     fake_win32.set_result = False
     assert console_guard.disable_quickedit_if_enabled() is False
+
+
+class TestModernTerminalSkip:
+    """现代终端（Windows Terminal 等）用独立渲染器，选区不会阻塞 stdout，
+    因此不应禁用 QuickEdit——禁用只会让用户失去鼠标选择/复制粘贴能力。"""
+
+    @pytest.mark.parametrize("env_key,env_val", [
+        ("WT_SESSION", "22c162a7-0000-0000-0000-000000000000"),
+        ("TERM_PROGRAM", "vscode"),
+        ("ConEmuANSI", "ON"),
+    ])
+    def test_skips_in_modern_terminal(self, monkeypatch, env_key, env_val):
+        monkeypatch.setenv("MY_AGENT_DISABLE_QUICKEDIT", "true")
+        monkeypatch.setattr(console_guard.os, "name", "nt")
+        for k in ("WT_SESSION", "TERM_PROGRAM", "ConEmuANSI"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv(env_key, env_val)
+        fake = _FakeKernel32()
+        monkeypatch.setattr(console_guard, "ctypes", _FakeCtypes(fake))
+
+        assert console_guard.disable_quickedit_if_enabled() is False
+        # 完全没触碰控制台模式（保留用户的鼠标选择能力）
+        assert not [c for c in fake.calls if c[0] == "SetConsoleMode"]
+
+    def test_is_modern_terminal_detection(self, monkeypatch):
+        for k in ("WT_SESSION", "TERM_PROGRAM", "ConEmuANSI"):
+            monkeypatch.delenv(k, raising=False)
+        assert console_guard.is_modern_terminal() is False
+
+        monkeypatch.setenv("WT_SESSION", "x")
+        assert console_guard.is_modern_terminal() is True
+
+        monkeypatch.delenv("WT_SESSION")
+        monkeypatch.setenv("TERM_PROGRAM", "vscode")
+        assert console_guard.is_modern_terminal() is True
+
+        monkeypatch.delenv("TERM_PROGRAM")
+        monkeypatch.setenv("ConEmuANSI", "ON")
+        assert console_guard.is_modern_terminal() is True
+
+        monkeypatch.setenv("ConEmuANSI", "OFF")
+        assert console_guard.is_modern_terminal() is False
