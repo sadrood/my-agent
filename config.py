@@ -153,6 +153,35 @@ IMAGE_GEN_CONFIG = {
 }
 
 # ============================================================
+# 视频生成配置（OpenAI Videos 兼容：异步任务，实测 Agnes）
+# ============================================================
+# 契约（agnes-video-2.5-flash / 2.5 实测）：
+#   创建: POST {base_url}/videos  → {"video_id": "task_xxx", "status": "queued"}
+#   查询: GET  {query_base}/agnesapi?video_id=<ID>&model_name=<模型>
+#         ⚠️ 查询端点在 HOST 根路径（不在 /v1 下），因此单独配 query_base
+#   完成: status=completed 且 url 非空（mp4）
+# 生成耗时：5 秒 / 720P 实测约 41 秒；更长/更高分辨率更久 →
+#   工具默认等待 max_wait 秒，超时返回 task_id 供稍后查询（不丢任务）。
+VIDEO_GEN_CONFIG = {
+    "enabled": os.getenv("VIDEO_GEN_ENABLED", "true").lower() == "true",
+    "api_key": os.getenv("VIDEO_GEN_API_KEY", "") or LLM_CONFIG["api_key"],
+    "base_url": os.getenv("VIDEO_GEN_BASE_URL", "https://api.agnes-ai.cn/v1"),
+    # 任务查询端点所在主机（默认由 base_url 去掉 /v1 推导）
+    "query_base": os.getenv("VIDEO_GEN_QUERY_BASE", ""),
+    "model": os.getenv("VIDEO_GEN_MODEL", "agnes-video-2.5-flash"),
+    "seconds": os.getenv("VIDEO_GEN_SECONDS", "5"),        # 视频时长（秒，字符串）
+    "size": os.getenv("VIDEO_GEN_SIZE", "720P"),           # Flash 仅支持 720P
+    "aspect_ratio": os.getenv("VIDEO_GEN_ASPECT_RATIO", "16:9"),
+    "save_dir": os.getenv("VIDEO_GEN_SAVE_DIR", "./generated_videos"),
+    # 单次 HTTP 请求超时（创建/查询）
+    "timeout": float(os.getenv("VIDEO_GEN_TIMEOUT", "120")),
+    # 工具内等待上限（秒）：超过则返回 task_id 让模型稍后用 status 查询。
+    # 需小于 TOOL_TIMEOUT(300)，避免撞上工具级硬超时被判定"挂起"。
+    "max_wait": float(os.getenv("VIDEO_GEN_MAX_WAIT", "240")),
+    "poll_interval": float(os.getenv("VIDEO_GEN_POLL_INTERVAL", "6")),
+}
+
+# ============================================================
 # MCP 服务器配置
 # ============================================================
 # 示例 .env 配置:
