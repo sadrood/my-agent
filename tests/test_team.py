@@ -72,7 +72,8 @@ class FakeTeamLLM:
         try:
             self.worker_chats.append(messages)
             if self.barrier is not None:
-                self.barrier.wait(timeout=10)
+                # 30s：全套并发压力下线程调度滞后；并行正常时立即通过，不额外耗时
+                self.barrier.wait(timeout=30)
             if self.worker_sleep:
                 time.sleep(self.worker_sleep)
         finally:
@@ -249,7 +250,9 @@ class TestParallelMode:
                     else:
                         reply = "完成"
                     if reply.startswith("{"):
-                        self.barrier.wait(timeout=10)
+                        # 30s：全套测试并发压力下线程调度可能滞后，
+                        # 10s 会在慢环境下 BrokenBarrierError 造成假失败
+                        self.barrier.wait(timeout=30)
                 finally:
                     with self._lock:
                         self._active -= 1
@@ -367,7 +370,8 @@ class TestDAGScheduling:
                 try:
                     self.worker_chats.append(messages)
                     if ("任务B" in user or "任务C" in user) and self.barrier is not None:
-                        self.barrier.wait(timeout=10)
+                        # 30s：同第 75 行，慢环境下 10s 会假失败
+                        self.barrier.wait(timeout=30)
                     if "任务A" in user:
                         return "结果A内容"
                     if "任务B" in user:

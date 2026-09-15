@@ -155,11 +155,11 @@ class TestGoalLoop:
             description = "挂起测试工具（模拟 CDP 半死）"
 
             def execute(self, input_str):
-                time.sleep(30)
+                time.sleep(5)
                 return ToolResult(success=True, output="不该到达")
 
             def execute_json(self, arguments):
-                time.sleep(30)   # 模拟永久挂起
+                time.sleep(5)   # 模拟挂起（取 5s：即便超时失效也只慢 5s，且断言仍可检出）
                 return ToolResult(success=True, output="不该到达")
 
         monkeypatch.setitem(TOOL_CONFIG, "tool_timeout", 0.4)
@@ -179,8 +179,8 @@ class TestGoalLoop:
         result = ex.execute_goal_loop(**_loop_args(), event_sink=lambda t, d: events.append((t, d)))
         elapsed = time.time() - t0
 
-        # 1) 没有冻结：远小于挂起工具的 30s
-        assert elapsed < 10
+        # 1) 没有冻结：远小于挂起工具的 5s（超时应在 0.4s 生效）
+        assert elapsed < 3
         # 2) 超时以工具失败形式回喂给模型，循环继续并成功收尾
         assert result["success"] is True
         assert "超时" in result["output"]
@@ -200,11 +200,11 @@ class TestGoalLoop:
             description = "挂起测试工具"
 
             def execute(self, input_str):
-                time.sleep(30)
+                time.sleep(5)
                 return ToolResult(success=True, output="不该到达")
 
             def execute_json(self, arguments):
-                time.sleep(30)
+                time.sleep(5)   # 取 5s：即便超时失效也只慢 5s，断言仍可检出问题
                 return ToolResult(success=True, output="不该到达")
 
             def is_parallel_safe(self, arguments):
@@ -228,7 +228,7 @@ class TestGoalLoop:
         t0 = time.time()
         result = ex.execute_goal_loop(**_loop_args())
         elapsed = time.time() - t0
-        assert elapsed < 10
+        assert elapsed < 3
         assert result["success"] is True
         assert "超时" in result["output"]
 
