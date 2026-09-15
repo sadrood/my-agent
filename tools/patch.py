@@ -209,6 +209,67 @@ class EditTool(BaseTool):
     # 验证式应用（preflight）
     # ================================================================
 
+    def _related_test_command(self, file_path: str, test_cmd: str) -> str:
+        """按被改文件推断**相关**测试目标，避免每次 edit 都跑全套测试。
+
+        背景：全套测试（600+ 个）耗时可达 3 分钟以上，超过 preflight 与
+        工具级超时，导致 edit 被误判失败（文件已改却报错）。改为只跑与
+        被改模块相关的测试文件，通常几秒到几十秒完成。
+
+        选择顺序（命中即用）：
+        1. tests/test_<模块名>.py      精确同名   如 agent/memory.py → test_memory.py
+        2. tests/test_<模块名>_*.py    同名前缀   如 models/llm.py    → test_llm_retry.py
+        3. tests/test_<所属目录>.py    同目录     如 tools/browser.py → test_tools.py
+        4. tests/test_<所属目录>_*.py  同目录前缀
+        5. tests/*_<模块名>.py         词级包含（最后手段）
+        6. 无匹配 → 返回原命令（保守：跑全套）
+
+        注：优先"同目录测试文件"而非宽泛子串匹配——后者易错配到无关模块
+        （如 tools/browser.py 曾被匹配到 dashboard 的 test_embedded_browser.py）。
+
+        配置 EDIT_PREFLIGHT_SCOPE=full 可强制始终跑全套。
+        """
+        from config import TOOL_CONFIG
+        if str(TOOL_CONFIG.get("edit_preflight_scope", "related")).lower() == "full":
+            return test_cmd
+
+        norm = file_path.replace("\\", "/")
+        stem = os.path.splitext(os.path.basename(norm))[0]
+        parent = os.path.basename(os.path.dirname(norm))
+
+        tests_dir = os.path.join(os.getcwd(), "tests")
+        if not os.path.isdir(tests_dir):
+            return test_cmd
+
+        def _pick(pred) -> list:
+            try:
+                names = sorted(os.listdir(tests_dir))
+            except OSError:
+                return []
+            return [f for f in names
+                    if f.startswith("test_") and f.endswith(".py") and pred(f)]
+
+        candidates = (
+            _pick(lambda f: f == f"test_{stem}.py")
+            or _pick(lambda f: f.startswith(f"test_{stem}_"))
+            or (_pick(lambda f: f == f"test_{parent}.py") if parent else [])
+            or (_pick(lambda f: f.startswith(f"test_{parent}_")) if parent else [])
+            or _pick(lambda f: f.endswith(f"_{stem}.py"))
+        )
+        # 兜底：匹配过宽（超过 8 个）说明规则失效，退回全套更稳妥
+        if not candidates or len(candidates) > 8:
+            return test_cmd
+
+        targets = " ".join(os.path.join("tests", c) for c in candidates)
+        # 保留原命令的解释器前缀，只替换测试目标（兼容自定义 TEST_COMMAND）
+        base = test_cmd
+        for token in ("tests", "./tests", "tests/"):
+            idx = base.find(token)
+            if idx > 0:
+                base = base[:idx].rstrip()
+                break
+        return f"{base} {targets} -q" if base else f"pytest {targets} -q"
+
     def _run_preflight(self, file_path: str, backup_path: str):
         """edit 成功后验证：EDIT_PREFLIGHT=true 且目标为 .py 代码时跑测试命令。
 
@@ -232,10 +293,21 @@ class EditTool(BaseTool):
         if "PYTEST_CURRENT_TEST" in os.environ and "pytest" in test_cmd.lower():
             return None
 
+        # 智能缩小测试范围：只跑与被改模块相关的测试（全套 600+ 个会超过
+        # preflight/工具超时，导致"文件已改却报失败"）
+        scoped_cmd = self._related_test_command(file_path, test_cmd)
+        scope_note = ""
+        if scoped_cmd != test_cmd:
+            # 提取目标文件名用于回喂提示（让模型知道验证覆盖到哪）
+            names = [t for t in scoped_cmd.split() if t.endswith(".py")]
+            if names:
+                scope_note = "（相关测试: " + ", ".join(
+                    os.path.basename(n) for n in names) + "）"
+
         import subprocess
         try:
             proc = subprocess.run(
-                test_cmd, shell=True, capture_output=True, text=True,
+                scoped_cmd, shell=True, capture_output=True, text=True,
                 timeout=int(TOOL_CONFIG.get("edit_preflight_timeout", 180)),
                 encoding="utf-8", errors="replace",
                 stdin=subprocess.DEVNULL,   # 防止命令意外读取 stdin 而永久阻塞
@@ -258,7 +330,7 @@ class EditTool(BaseTool):
             )
 
         if proc.returncode == 0:
-            return ToolResult(success=True, output="preflight 测试通过")
+            return ToolResult(success=True, output=f"preflight 测试通过{scope_note}")
 
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
         tail_lines = int(TOOL_CONFIG.get("edit_preflight_tail", 40))
