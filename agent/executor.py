@@ -863,7 +863,7 @@ class Executor:
             return (
                 f"参数不完整：模型输出被截断（finish_reason=length，写入内容过长）。"
                 f"请把 '{tc.name}' 操作拆小：如需写大文件，先写入较短的部分、"
-                f"再用多次 append 追加；一次调用的内容控制在 4K 字符以内。"
+                f"再用 file 工具的 append 操作逐段追加；一次调用的内容控制在 4K 字符以内。"
                 f"（收到 {len(raw)} 字符的残缺参数）"
             )
         return (

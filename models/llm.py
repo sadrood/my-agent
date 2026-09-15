@@ -601,6 +601,12 @@ class LLM:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
+                # 计时必须从**发起请求前**开始。此前 t0 取在 create() 返回之后，
+                # 而部分网关（实测 Agnes）即使 stream=True 也会先把整段回复缓冲好、
+                # 等生成结束才返回流对象：于是 elapsed 只量到本地排空缓冲的 0.1s、
+                # 首 token 记成 0.02s，状态行的「LLM 耗时 / 首 token」双双失真。
+                # 放在循环内 → 连接重试的退避等待不计入（那是空等，不是模型耗时）。
+                t0 = time.time()
                 stream = self.client.chat.completions.create(**kwargs)
                 break
             except _openai_errors() as e:
@@ -637,7 +643,6 @@ class LLM:
         if stream is None:
             raise last_error
 
-        t0 = time.time()
         first_token_ts = None
         final_usage = None
 

@@ -385,6 +385,9 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
     是漫剧类需求的首选；只有"必须有真实动态"的镜头才用 video_gen。
   · 用 `video_edit(command="probe", video=...)` 读片长/分辨率，用于对齐画面与配音时长。
 - 需要执行系统命令时才用 terminal；普通文件读写用 file 工具。
+- **复制/移动文件用 `file` 工具的 copy/move 操作**（如把生成的图集中到 output 目录）；
+  `file append` 用于分段写大文件。注意：python 工具出于安全**禁止 import shutil**，
+  别在那里试复制文件——直接用 file copy。
 - 系统提示中可能包含中文网站名 → 网址的映射，直接 goto 对应网址。
 - 如果输入中包含【警告：已知失败模式】信息，请避开对应的错误操作方式。
 
