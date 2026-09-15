@@ -226,6 +226,93 @@ class TestExecutorStreamLoop:
         assert len(metrics.first_token_seconds) == 1
         assert metrics.llm_seconds > 0
 
+    def test_llm_seconds_covers_blocked_create_call(self):
+        """回归：计时必须从**发起请求前**开始。
+
+        实测 Agnes 网关即使 stream=True 也会先把整段回复缓冲好再返回流对象：
+        此前 t0 取在 create() 返回之后，于是「LLM 耗时」只量到本地排空缓冲的
+        0.1s（真实 wall 8.18s），「首 token」记成 0.02s —— 状态行双双失真。
+        """
+        import time
+
+        from agent.metrics import RunMetrics
+
+        class SlowCompletions:
+            """模拟"create() 本身阻塞到生成结束"的网关。"""
+
+            def __init__(self, chunks, block: float):
+                self.chunks = list(chunks)
+                self.block = block
+
+            def create(self, **kwargs):
+                time.sleep(self.block)
+                return self.chunks
+
+        block = 0.4
+        chunks = [
+            FakeChunk(FakeChoice(FakeDelta(content="答"), None)),
+            FakeChunk(FakeChoice(FakeDelta(), "stop")),
+        ]
+        llm = LLM()
+        llm.client = FakeClient(SlowCompletions(chunks, block))
+        llm.max_retries = 0
+        metrics = RunMetrics()
+        llm.metrics = metrics
+
+        list(llm.chat_with_tools_stream(
+            [{"role": "user", "content": "hi"}],
+            [{"type": "function", "function": {"name": "x", "parameters": {"type": "object"}}}],
+        ))
+
+        assert metrics.llm_seconds >= block * 0.9, (
+            f"LLM 耗时应覆盖阻塞的 create()，实际仅 {metrics.llm_seconds:.3f}s"
+        )
+        assert metrics.first_token_seconds[0] >= block * 0.9, (
+            f"首 token 应反映创建流的等待，实际仅 {metrics.first_token_seconds[0]:.3f}s"
+        )
+
+    def test_llm_seconds_excludes_retry_backoff(self):
+        """连接重试的退避等待是空等，不该算进模型耗时（t0 在循环内重置）。"""
+        import time
+
+        from agent.metrics import RunMetrics
+
+        from models.llm import _openai_errors
+
+        # 取一个真实可重试异常类做基类（直接实例化需要 response/body 等参数，
+        # 这里用无参子类，仍满足 isinstance 判断）
+        _RetryableBase = _openai_errors()[1]   # APIConnectionError
+
+        class Boom(_RetryableBase):
+            def __init__(self):
+                pass
+
+        class FlakyCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise Boom()
+                return [FakeChunk(FakeChoice(FakeDelta(content="好"), None))]
+
+        llm = LLM()
+        llm.client = FakeClient(FlakyCompletions())
+        llm.max_retries = 1
+        llm.retry_base_delay = 0.3
+        metrics = RunMetrics()
+        llm.metrics = metrics
+
+        events = list(llm.chat_with_tools_stream(
+            [{"role": "user", "content": "hi"}],
+            [{"type": "function", "function": {"name": "x", "parameters": {"type": "object"}}}],
+        ))
+        assert any(e.type == "text_delta" for e in events)
+        assert metrics.llm_seconds < 0.3, (
+            f"重试退避不应计入 LLM 耗时，实际 {metrics.llm_seconds:.3f}s"
+        )
+
     def test_reasoning_roundtrip_in_message_thread(self):
         """思考模式：reasoning 必须在下一轮消息中原样回传（否则服务器 400）。"""
         llm = FakeStreamLLM([

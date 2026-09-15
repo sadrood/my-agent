@@ -304,9 +304,32 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         wait_timeout 指定（如 __del__ 析构场景）：短等待，超时放弃该
         worker（daemon 线程随进程退出），由 _force_cleanup_residual 兜底。
         """
-        if (self._worker is None or not self._worker.is_alive()
-                or self._worker_broken):
-            # worker 缺失/已死/上次卡死被废弃 → 重建。
+        # worker 缺失/已死/上次卡死被废弃 → 重建。
+        # 附加情况：worker 线程虽然还活着，但绑定的浏览器/上下文引用
+        # 已经死掉（浏览器进程被杀、CDP 会话关闭等）。旧 worker 线程
+        # 内 Playwright 的 asyncio loop 已被创建且无法复用——继续把
+        # launch 投递给它会在『已有 loop 的线程』再次 start()，抛
+        # "Sync API inside asyncio loop"。此时同样必须重建全新 worker
+        # （新线程无 loop 绑定）。
+        needs_rebuild = (
+            self._worker is None
+            or not self._worker.is_alive()
+            or self._worker_broken
+        )
+        if not needs_rebuild:
+            try:
+                browser_alive = bool(
+                    self._browser is not None and self._browser.is_connected)
+            except Exception:
+                browser_alive = False
+            try:
+                context_alive = bool(
+                    self._context is not None and self._is_context_alive())
+            except Exception:
+                context_alive = False
+            if not browser_alive and not context_alive:
+                needs_rebuild = True
+        if needs_rebuild:
             # 防御性丢弃旧 playwright 引用（若未被 reset 清空），
             # 避免新 worker 复用绑定在已死线程上的事件循环。
             if self._playwright is not None or self._context is not None:
