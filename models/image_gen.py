@@ -178,7 +178,7 @@ class ImageGenModel:
 
         directory = save_dir or self.save_dir
         os.makedirs(directory, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:17]
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:21]
         path = os.path.join(directory, f"img-{ts}-{index}{ext}")
         with open(path, "wb") as f:
             f.write(raw)
@@ -196,7 +196,7 @@ class ImageGenModel:
 
         directory = save_dir or self.save_dir
         os.makedirs(directory, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:17]
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:21]
         path = os.path.join(directory, f"img-{ts}-{index}{ext}")
         with open(path, "wb") as f:
             f.write(raw)

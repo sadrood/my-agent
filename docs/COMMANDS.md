@@ -149,7 +149,66 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
   VIDEO_GEN_MAX_WAIT=240
   ```
 
-## 三·七、运行中卡住的排查
+## 三·七、语音合成（配音）
+
+- 工具：`tts`（底层 edge-tts，微软在线语音，**免费**）
+  ```
+  tts(command="speak", text="从前有座山", voice="yunxi", rate="+10%")
+  tts(command="voices")            # 列出可用中文音色
+  ```
+- 音色别名：`xiaoxiao`(女·温柔) `xiaoyi`(女·活泼) `yunxi`(男·年轻)
+  `yunjian`(男·沉稳解说) `yunyang`(男·新闻) `yunxia`(男·少年)
+  `liaoning`(东北话) `shaanxi`(陕西话)；也可传完整名 `zh-CN-YunxiNeural`
+- 产物落在 `./generated_audio/`（mp3），返回路径与时长，供 `video_edit` 合成。
+- 配置：
+  ```
+  TTS_ENABLED=true
+  TTS_VOICE=xiaoxiao
+  TTS_RATE=+0%
+  TTS_SAVE_DIR=./generated_audio
+  ```
+
+## 三·八、视频剪辑与合成（漫剧路线）
+
+工具：`video_edit`（底层 ffmpeg）。**"图 + 运镜 + 配音"**是漫剧/图文视频的推荐路线
+——不消耗 `video_gen` 的视频生成配额（免费额度有严格 RPM 限制），画面完全由图像模型控制。
+
+| 命令 | 作用 |
+|---|---|
+| `kenburns` | 静态图 → 带推拉摇移的镜头（`zoom_in`/`zoom_out`/`pan_*`/`static`） |
+| `concat` | 按顺序拼接多段（先试无损 copy，规格不一致自动回退重编码） |
+| `add_audio` | 给视频叠配音/BGM（音轨短于画面时**自动补静音**，不截断画面） |
+| `trim` | 裁剪片段 |
+| `probe` | 读时长/分辨率/有无音轨（用于对齐画面与配音） |
+| `subtitle` | 烧录 SRT 字幕 |
+
+**完整漫剧流程**（实测 2 镜样片耗时 27.5 秒）：
+```
+1. image_gen              逐镜出图（同角色在 prompt 里固定外观描述保持一致）
+2. video_edit kenburns    图片 → 运镜镜头（可传 images 批量，运镜自动轮换）
+3. tts                    逐镜台词配音
+4. video_edit add_audio   视频 + 配音 合成
+5. video_edit concat      拼接成完整视频
+```
+
+- **统一输出规格** `1280x720 @ 25fps`（保证片段可无损拼接，无需重编码）。
+- 依赖 **ffmpeg/ffprobe**：自动探测顺序为 `FFMPEG_PATH` → PATH → `static-ffmpeg`(pip) → winget 目录。
+  安装方式（任选）：
+  ```
+  .venv\Scripts\python -m pip install static-ffmpeg      # 推荐：自带二进制，国内可下
+  winget install --id Gyan.FFmpeg -e --source winget     # 备选（受限网络可能卡住）
+  ```
+- 配置：
+  ```
+  VIDEO_EDIT_ENABLED=true
+  VIDEO_EDIT_WIDTH=1280
+  VIDEO_EDIT_HEIGHT=720
+  VIDEO_EDIT_FPS=25
+  VIDEO_EDIT_SAVE_DIR=./generated_videos
+  FFMPEG_PATH=                    # 留空自动探测
+  ```
+
+## 三·九、运行中卡住的排查
 
 **症状**：程序跑着跑着不动了，但进程还在（CPU 为 0）。
 

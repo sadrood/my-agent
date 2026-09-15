@@ -182,6 +182,38 @@ VIDEO_GEN_CONFIG = {
 }
 
 # ============================================================
+# 语音合成配置（edge-tts：微软在线语音，免费、中文多音色）
+# ============================================================
+# 用于漫剧/短视频配音：文字 → mp3，再由 video_edit 的 add_audio 合到画面。
+TTS_CONFIG = {
+    "enabled": os.getenv("TTS_ENABLED", "true").lower() == "true",
+    # 默认音色（简短别名，见 models/tts.py ZH_VOICES）：
+    #   xiaoxiao 女声温柔 / yunxi 男声年轻 / yunjian 男声沉稳解说
+    "voice": os.getenv("TTS_VOICE", "xiaoxiao"),
+    "rate": os.getenv("TTS_RATE", "+0%"),      # 语速，如 +20%
+    "volume": os.getenv("TTS_VOLUME", "+0%"),  # 音量，如 +20%
+    "save_dir": os.getenv("TTS_SAVE_DIR", "./generated_audio"),
+    "timeout": float(os.getenv("TTS_TIMEOUT", "60")),
+}
+
+# ============================================================
+# 视频剪辑配置（ffmpeg：图→运镜、拼接、配音合成、字幕）
+# ============================================================
+# "图 + 运镜 + 配音"路线：不消耗视频生成配额，画面可控（漫剧/图文视频）。
+# 统一输出规格，保证 kenburns 产出的片段可直接无损拼接。
+VIDEO_EDIT_CONFIG = {
+    "enabled": os.getenv("VIDEO_EDIT_ENABLED", "true").lower() == "true",
+    "width": int(os.getenv("VIDEO_EDIT_WIDTH", "1280")),
+    "height": int(os.getenv("VIDEO_EDIT_HEIGHT", "720")),
+    "fps": int(os.getenv("VIDEO_EDIT_FPS", "25")),
+    "save_dir": os.getenv("VIDEO_EDIT_SAVE_DIR", "./generated_videos"),
+    # ffmpeg 可执行文件所在目录（留空则用 PATH / winget 常见位置自动探测）
+    "ffmpeg_path": os.getenv("FFMPEG_PATH", ""),
+    # 单次 ffmpeg 处理超时（秒）：拼接/重编码可能较久
+    "timeout": float(os.getenv("VIDEO_EDIT_TIMEOUT", "600")),
+}
+
+# ============================================================
 # MCP 服务器配置
 # ============================================================
 # 示例 .env 配置:
