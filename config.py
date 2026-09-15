@@ -410,6 +410,9 @@ TOOL_CONFIG = {
     "edit_preflight": os.getenv("EDIT_PREFLIGHT", "false").lower() == "true",
     "edit_preflight_timeout": int(os.getenv("EDIT_PREFLIGHT_TIMEOUT", "180")),
     "edit_preflight_tail": int(os.getenv("EDIT_PREFLIGHT_TAIL", "40")),   # 回喂的失败日志行数
+    # preflight 测试范围：related=只跑与被改模块相关的测试（默认；全套 600+
+    # 个测试会超过超时，导致文件已改却报失败）；full=始终跑全套
+    "edit_preflight_scope": os.getenv("EDIT_PREFLIGHT_SCOPE", "related"),
     # 工具执行硬超时（秒）：任何工具调用超过该时间即视为挂起，返回超时错误并
     # 重置该工具实例（丢弃卡死的 playwright/子进程引用），防止整个 Agent 冻结。
     # 默认 300s；browser 因 CDP 挂起高发单独设短值。
