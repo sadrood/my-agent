@@ -140,6 +140,58 @@ def _check_env() -> dict:
     }
 
 
+def _check_env_sync(env_path: str = None, example_path: str = None) -> dict:
+    """对比 .env 与 .env.example，报告 .env 里缺失的可调项。
+
+    为什么需要：`.env` 含密钥不入库，从模板复制后就与仓库脱钩——项目后续
+    新增的配置项不会自动出现在用户的 .env 里（典型困惑："这个配置我在
+    .env 里怎么找不到"）。缺失项本身不影响运行（代码有默认值），但用户
+    不知道它们可调。
+
+    返回 ok=True（缺项只是提示，不是错误），message 里给出数量与示例。
+    env_path / example_path 可注入（便于测试）。
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_path = env_path or os.path.join(root, ".env")
+    example_path = example_path or os.path.join(root, ".env.example")
+    if not os.path.exists(env_path) or not os.path.exists(example_path):
+        return {"name": "配置同步", "ok": True, "message": "跳过（.env / .env.example 不完整）", "hint": ""}
+
+    import re as _re
+
+    def _parse(path: str) -> dict:
+        out: dict = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for raw in f:
+                    line = raw.rstrip("\n")
+                    commented = line.lstrip().startswith("#")
+                    s = line.lstrip("#").strip() if commented else line.strip()
+                    m = _re.match(r"^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$", s)
+                    if m:
+                        key, val = m.group(1), m.group(2).strip()
+                        if key not in out or (out[key][1] and not commented):
+                            out[key] = (val, commented)
+        except OSError:
+            pass
+        return out
+
+    env, example = _parse(env_path), _parse(example_path)
+    # 只关心"模板里有真实赋值、而 .env 里完全没有"的项
+    missing = sorted(k for k, (v, c) in example.items() if not c and k not in env)
+    if not missing:
+        return {"name": "配置同步", "ok": True,
+                "message": f".env 已覆盖模板全部 {len(example)} 项", "hint": ""}
+    shown = ", ".join(missing[:6])
+    more = f" 等 {len(missing)} 项" if len(missing) > 6 else ""
+    return {
+        "name": "配置同步",
+        "ok": True,   # 缺项不影响运行（都有代码默认值），仅提示可调项
+        "message": f".env 未包含模板中的 {len(missing)} 项（用默认值）：{shown}{more}",
+        "hint": "想调整某项时，把对应行从 .env.example 复制进 .env 即可（例如 MAX_LOOP_OPS=120）",
+    }
+
+
 def _check_llm(llm=None, timeout: int = 20) -> dict:
     """真实调用一次主模型（1 token）验证连通性。"""
     try:
@@ -352,8 +404,8 @@ def run_doctor(include_llm: bool = True) -> List[dict]:
     """执行全部自检，返回结果列表。"""
     checks: List[Callable[[], dict]] = [
         _check_python, _check_deps, _check_playwright_browser,
-        _check_git, _check_env, _check_tools, _check_ws_support, _check_policy,
-        _check_hooks, _check_exec_policy, _check_skills, _check_sandbox,
+        _check_git, _check_env, _check_env_sync, _check_tools, _check_ws_support,
+        _check_policy, _check_hooks, _check_exec_policy, _check_skills, _check_sandbox,
     ]
     if include_llm:
         checks.insert(5, _check_llm)
