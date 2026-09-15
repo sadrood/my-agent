@@ -354,7 +354,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
     def _launch(self, _args: str = "") -> ToolResult:
         if self._browser is not None and self._is_browser_alive():
             return ToolResult(success=True, output="浏览器已在运行中。")
-        if self._persistent and self._context is not None and self._is_context_alive():
+        if self._persistent and self._context is not None and self._is_context_alive() and self._page_alive():
             return ToolResult(success=True, output="浏览器已在运行中（持久 profile）。")
 
         try:
@@ -488,7 +488,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return len(pids)
 
     def _ensure_page(self) -> ToolResult:
-        if not self._pages or self._page is None or not self._is_browser_alive():
+        if not self._pages or self._page is None or not self._is_browser_alive() or not self._page_alive():
             result = self._launch()
             if not result.success:
                 return result

@@ -361,6 +361,11 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
   禁止用 file write 整文件覆盖大文件；每次修改后立即运行测试验证：
   terminal 执行 `{test_command}`。
 - 网页任务：先 browser launch，再 goto；需要理解页面时用 see 工具做视觉分析。
+  **浏览器会话必须跨轮次保持**（持久 profile：登录态、cookie、已打开标签页都在）：
+  · 动手前先用 `browser status` 确认是否已在运行——**已在运行就直接继续操作**
+  · 除非页面真的卡死或用户明确要求，**绝不要 `close`、也不要重新 `launch`**：
+    重开会得到全新浏览器，已打开的页面、未提交的表单、站点会话全部丢失
+  · 轮数上限 / 中断 / 用户说"继续"时：默认承接上一个浏览器会话，不要重启浏览器
 - 生成文件（Excel/CSV/文档）优先用 python 工具（openpyxl/pandas/csv），不要尝试 GUI 操作桌面软件。
 - 需要执行系统命令时才用 terminal；普通文件读写用 file 工具。
 - 系统提示中可能包含中文网站名 → 网址的映射，直接 goto 对应网址。
