@@ -1168,6 +1168,16 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         except Exception:
             return False
 
+    def _page_alive(self) -> bool:
+        """当前活跃 page 探活（关闭后 is_closed() 为 True 即视为死亡）。"""
+        page = self._page
+        if page is None:
+            return False
+        try:
+            return not page.is_closed()
+        except Exception:
+            return False
+
     def reset(self):
         """强制重置浏览器状态（工具超时后由 ToolManager.reset_tool 调用）。
 
