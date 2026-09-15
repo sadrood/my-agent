@@ -133,6 +133,20 @@ class ToolManager:
         except Exception:
             pass
 
+        # 视频剪辑工具（ffmpeg：图→运镜、拼接、配音合成、字幕）
+        try:
+            from tools.video_edit import VideoEditTool
+            self.register(VideoEditTool())
+        except Exception:
+            pass
+
+        # 语音合成工具（edge-tts 配音）
+        try:
+            from tools.tts import TTSTool
+            self.register(TTSTool())
+        except Exception:
+            pass
+
     def register(self, tool: BaseTool):
         """
         注册一个工具。

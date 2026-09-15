@@ -169,7 +169,8 @@ class VideoGenModel:
             raise RuntimeError(f"视频下载失败 HTTP {resp.status_code}")
         directory = self.save_dir
         os.makedirs(directory, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:17]
+        # 毫秒精度：旧实现用 [:17] 只保留微秒第 1 位，同秒内会生成同名文件
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:21]
         tag = (video_id or "video")[-8:]
         path = os.path.join(directory, f"vid-{ts}-{tag}.mp4")
         with open(path, "wb") as f:
