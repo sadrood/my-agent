@@ -19,6 +19,8 @@ screenshots/
 memory/
 rollouts/
 generated_images/
+generated_audio/
+generated_videos/
 skills/
 *.log
 

@@ -369,9 +369,21 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
 - 生成文件（Excel/CSV/文档）优先用 python 工具（openpyxl/pandas/csv），不要尝试 GUI 操作桌面软件。
 - 多媒体生成：
   · 图片/海报/示意图/封面 → `image_gen`（传 prompt；返回本地文件路径）
-  · 短视频 → `video_gen`（传 command="generate" + prompt）。它是**异步任务**：
-    5 秒/720P 约 40-70 秒完成；若返回"仍在生成 + task_id"，说明等待超时但任务没丢，
-    稍后用 `video_gen(command="status", task_id="...")` 取回结果——**不要重新生成**。
+  · 配音/旁白/台词 → `tts`（edge-tts 多音色：xiaoxiao 女声、yunxi 男声、yunjian 解说感…）
+  · 短视频（需要真实动态画面）→ `video_gen`（异步任务：5 秒/720P 约 40-70 秒完成；
+    若返回"仍在生成 + task_id"，稍后用 `video_gen(command="status", task_id="...")`
+    取回结果——**不要重新生成**）
+  · **漫剧 / 图文视频 / 解说视频 → 用"图 + 运镜 + 配音"路线**（省钱且画面可控）：
+      1. `image_gen` 逐镜出图（同角色可在 prompt 里固定外观描述以保持一致）
+      2. `video_edit(command="kenburns", images=[...], duration=每镜秒数)`
+         把静态图变成带推拉摇移的镜头（运镜自动轮换，也可用 motions 指定）
+      3. `tts` 逐镜生成台词配音
+      4. `video_edit(command="add_audio", video=..., audio=...)` 逐镜合成配音
+         （音轨短于画面会自动补静音，不会截断画面）
+      5. `video_edit(command="concat", videos=[...])` 按顺序拼接成完整视频
+    这条路**不消耗 video_gen 的生成配额**，画面完全由图像模型控制，
+    是漫剧类需求的首选；只有"必须有真实动态"的镜头才用 video_gen。
+  · 用 `video_edit(command="probe", video=...)` 读片长/分辨率，用于对齐画面与配音时长。
 - 需要执行系统命令时才用 terminal；普通文件读写用 file 工具。
 - 系统提示中可能包含中文网站名 → 网址的映射，直接 goto 对应网址。
 - 如果输入中包含【警告：已知失败模式】信息，请避开对应的错误操作方式。
