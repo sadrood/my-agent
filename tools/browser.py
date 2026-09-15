@@ -310,6 +310,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return ToolResult(success=False, output="", error=f"启动浏览器失败: {str(e)}")
 
     def _close(self, _args: str = "") -> ToolResult:
+        graceful = True
         try:
             if self._context:
                 self._context.close()
@@ -318,14 +319,52 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             if self._playwright:
                 self._playwright.stop()
         except Exception:
-            pass
+            # CDP 连接异常（如管理线程已退出）时优雅关闭会抛错，
+            # 此时浏览器进程可能仍驻留并占着 profile_dir 锁——兜底清理。
+            graceful = False
         finally:
             self._context = None
             self._browser = None
             self._pages = []
             self._current_page_idx = 0
             self._playwright = None
-        return ToolResult(success=True, output="浏览器已关闭。")
+        killed = self._force_cleanup_residual()
+        if graceful and killed == 0:
+            return ToolResult(success=True, output="浏览器已关闭。")
+        note = f"（优雅关闭失败，已兜底清理 {killed} 个残留进程）" if not graceful else ""
+        return ToolResult(success=True, output=f"浏览器已关闭。{note}")
+
+    def _force_cleanup_residual(self) -> int:
+        """兜底：清理仍占用 profile_dir 的残留浏览器进程（关闭被中断后）。
+
+        仅匹配『进程名为 chrome.exe』且『命令行包含 --user-data-dir=<profile_dir>』
+        的进程——这是本工具自己拉起的持久实例（Chrome 单例目录锁的持有者），
+        绝不触碰用户日常浏览器或其他临时 profile 实例。返回清理掉的进程数。
+        """
+        import subprocess
+        profile = self._profile_dir.replace("'", "''")  # PowerShell 单引号转义
+        ps_cmd = (
+            "powershell -NoProfile -Command "
+            f"\"Get-CimInstance Win32_Process -Filter \\\"Name='chrome.exe'\\\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
+            f"Select-Object -ExpandProperty ProcessId\""
+        )
+        try:
+            out = subprocess.run(
+                ps_cmd, capture_output=True, text=True, timeout=30, shell=True
+            ).stdout
+        except Exception:
+            return 0
+        pids = [p.strip() for p in out.split() if p.strip().isdigit()]
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", pid, "/T", "/F"],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except Exception:
+                continue
+        return len(pids)
 
     def _ensure_page(self) -> ToolResult:
         if not self._pages or self._page is None or not self._is_browser_alive():
