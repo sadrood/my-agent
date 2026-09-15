@@ -403,7 +403,26 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"启动浏览器失败: {str(e)}")
 
-    def _close(self, _args: str = "") -> ToolResult:
+    def _close(self, _args: str = "", _wait: float = None) -> ToolResult:
+        """优雅关闭浏览器（实际关闭逻辑在 worker 线程执行，避免跨线程）。
+
+        _wait：仅 __del__ 析构场景使用（短等待，超时交给兜底清理）；
+        正常调用无限等待，外层 Executor 有硬超时兜底。
+        """
+        if threading.current_thread() is self._worker:
+            # 已在 worker 线程内（理论上不会发生，防御处理）
+            return self._close_impl()
+        result = self._dispatch(self._close_impl, wait_timeout=_wait)
+        if result is None:
+            # 短等待超时（析构场景）：兜底清理残留进程
+            killed = self._force_cleanup_residual()
+            return ToolResult(
+                success=True,
+                output=f"浏览器已关闭（兜底清理 {killed} 个残留进程）。",
+            )
+        return result
+
+    def _close_impl(self) -> ToolResult:
         graceful = True
         try:
             if self._context:
