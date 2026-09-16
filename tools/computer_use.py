@@ -378,10 +378,30 @@ def _os_click(x: int, y: int, button: str = "left", double: bool = False) -> boo
     down, up = _MOUSE_DOWN_UP.get(button, _MOUSE_DOWN_UP["left"])
     for _ in range(2 if double else 1):
         u.mouse_event(down, 0, 0, 0, 0)
-        time.sleep(0.02)
-        u.mouse_event(up, 0, 0, 0, 0)
+        try:
+            time.sleep(0.02)
+        finally:
+            # 无论中途被中断/异常，都必须补 up，绝不留"按住不放"的鼠标
+            u.mouse_event(up, 0, 0, 0, 0)
         time.sleep(0.02)
     return True
+
+
+def _release_all_inputs() -> None:
+    """兜底释放：左右中键抬起 + 修饰键抬起。
+
+    Agent 操作被中断（用户停止/取消/异常）时，OS 里可能残留按下的鼠标键或
+    Ctrl/Alt/Shift，表现为"鼠标失灵/一直在拖拽"。每个动作前后各调一次即可自愈。
+    """
+    try:
+        u = _user32()
+        for flag in (0x0004, 0x0010, 0x0040):       # LEFTUP / RIGHTUP / MIDDLEUP
+            u.mouse_event(flag, 0, 0, 0, 0)
+        for vk in (0x10, 0x11, 0x12, 0x5B, 0x5C, 0x5D,   # Shift/Ctrl/Alt/Win/Win/RWin
+                   0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5):  # 左右修饰键
+            u.keybd_event(vk, 0, 0x0002, 0)             # KEYEVENTF_KEYUP
+    except Exception:
+        pass
 
 
 def _os_type_text(text: str) -> bool:
@@ -634,13 +654,17 @@ class DesktopTool(BaseTool):
         try:
             # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，
             # 让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。
+            _release_all_inputs()          # 动作前清掉可能残留的按键状态
             ov = get_overlay()
             if ov is not None and action in ("click", "type", "key", "scroll"):
                 ov.touch()
-            result = handler(arguments)
-            if ov is not None and action == "click":
-                ov.ripple()
-            return result
+            try:
+                result = handler(arguments)
+                if ov is not None and action == "click":
+                    ov.ripple()
+                return result
+            finally:
+                _release_all_inputs()      # 动作后再清一次：异常/中断也不留卡键
         except Exception as e:
             return ToolResult(success=False, output="", error=f"computer {action} 失败: {str(e)[:200]}")
 

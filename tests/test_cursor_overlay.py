@@ -39,3 +39,9 @@ def test_computer_tool_uses_overlay_silently(monkeypatch):
     r = t.execute_json({"action": "不存在的动作"})
     assert r.success is False
     assert "未知 action" in (r.error or "")
+
+def test_overlay_default_off(monkeypatch):
+    """默认必须关闭：全屏浮层穿透失效会吞鼠标事件，改为按需开启。"""
+    monkeypatch.delenv("COMPUTER_CURSOR_OVERLAY", raising=False)
+    assert overlay_enabled() is False
+    assert get_overlay() is None
