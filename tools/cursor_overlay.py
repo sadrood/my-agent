@@ -27,9 +27,14 @@ _RIPPLE_COLOR = "#ffd08a"
 
 
 def overlay_enabled() -> bool:
-    """是否启用光标可视化（默认开；COMPUTER_CURSOR_OVERLAY=0 关闭）。"""
-    return str(os.getenv("COMPUTER_CURSOR_OVERLAY", "1")).strip().lower() not in (
-        "0", "false", "off", "no")
+    """是否启用光标可视化。
+
+    默认**关闭**（必须显式 COMPUTER_CURSOR_OVERLAY=1 才开）：
+    全屏置顶浮层一旦穿透失效会吞掉整屏鼠标事件并抢焦点，
+    风险高于收益，改为按需开启。
+    """
+    return str(os.getenv("COMPUTER_CURSOR_OVERLAY", "0")).strip().lower() in (
+        "1", "true", "on", "yes")
 
 
 class CursorOverlay:
@@ -106,21 +111,52 @@ class CursorOverlay:
             canvas = tk.Canvas(root, width=sw, height=sh, bg=_TRANSPARENT_KEY,
                                highlightthickness=0, bd=0)
             canvas.pack()
-            # 点击穿透 + 不抢焦点 + 不进任务栏
+            # 点击穿透 + 不抢焦点 + 不进任务栏。
+            # 关键教训：只给顶层窗口设 WS_EX_TRANSPARENT 不够——Tk 的 Canvas 是
+            # **子窗口**，会自己吞掉整屏鼠标事件（曾导致鼠标"失灵"、焦点被抢）。
+            # 这里对顶层 + 所有子窗口都设置，并在设置后**读回校验**，任一失败即销毁禁用。
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED, WS_EX_TRANSPARENT = 0x00080000, 0x00000020
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
+            WANT = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+            LWA_COLORKEY = 0x1
+            key_rgb = 0x00030201            # COLORREF(1,2,3)
+            u32 = ctypes.windll.user32
+            HWND_PARENT = u32.GetParent(root.winfo_id()) or root.winfo_id()
+            self._hwnd = HWND_PARENT
+
+            handles = [HWND_PARENT]
             try:
-                GWL_EXSTYLE = -20
-                WS_EX_LAYERED, WS_EX_TRANSPARENT = 0x00080000, 0x00000020
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
-                hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
-                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                ctypes.windll.user32.SetWindowLongW(
-                    hwnd, GWL_EXSTYLE,
-                    style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
-                # 键色透明（比 tk 的 -transparentcolor 可靠）：LWA_COLORKEY
-                LWA_COLORKEY = 0x1
-                key_rgb = 0x00030201        # COLORREF(1,2,3) = 0x00BBGGRR
-                ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, key_rgb, 0, LWA_COLORKEY)
-                self._hwnd = hwnd
+                CB = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                def _collect(h, _l):
+                    handles.append(int(h))
+                    return True
+                u32.EnumChildWindows(HWND_PARENT, CB(_collect), 0)
+            except Exception:
+                pass
+
+            ok = True
+            for h in handles:
+                try:
+                    st = u32.GetWindowLongW(h, GWL_EXSTYLE)
+                    u32.SetWindowLongW(h, GWL_EXSTYLE, st | WANT)
+                    if h == HWND_PARENT:
+                        u32.SetLayeredWindowAttributes(h, key_rgb, 0, LWA_COLORKEY)
+                    back = u32.GetWindowLongW(h, GWL_EXSTYLE)
+                    if (back & WS_EX_TRANSPARENT) == 0 or (back & WS_EX_NOACTIVATE) == 0:
+                        ok = False
+                except Exception:
+                    ok = False
+            if not ok:
+                print("[cursor_overlay] 点击穿透校验失败，已放弃显示（避免吞掉鼠标事件）", file=sys.stderr)
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+                self._ready.set()
+                return
+            try:
+                u32.ShowWindow(HWND_PARENT, 4)      # SW_SHOWNOACTIVATE：显示但不激活
             except Exception:
                 pass
             # 不用 withdraw/deiconify（overrideredirect + transparentcolor 下重映射不可靠）：
