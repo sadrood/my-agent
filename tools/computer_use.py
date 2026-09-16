@@ -11,6 +11,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.base import BaseTool, ToolResult
+from tools.cursor_overlay import get_overlay
 
 
 class ComputerUseMixin:
@@ -631,7 +632,15 @@ class DesktopTool(BaseTool):
             return ToolResult(success=False, output="",
                               error=f"未知 action: {action}。可用: {', '.join(handlers)}")
         try:
-            return handler(arguments)
+            # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，
+            # 让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。
+            ov = get_overlay()
+            if ov is not None and action in ("click", "type", "key", "scroll"):
+                ov.touch()
+            result = handler(arguments)
+            if ov is not None and action == "click":
+                ov.ripple()
+            return result
         except Exception as e:
             return ToolResult(success=False, output="", error=f"computer {action} 失败: {str(e)[:200]}")
 
