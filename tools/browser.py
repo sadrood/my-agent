@@ -257,11 +257,20 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             )
 
         try:
-            return self._dispatch(handler, args)
+            result = self._dispatch(handler, args)
         except Exception as e:
-            return ToolResult(
+            result = ToolResult(
                 success=False, output="", error=f"浏览器操作失败: {str(e)}"
             )
+        # 会话失效（浏览器被杀/CDP 断开/worker 线程 loop 不可复用）→ 自动重建重试一次，
+        # 不再要求用户重启整个项目。
+        if not getattr(result, "success", False) and self._looks_dead(
+            f"{getattr(result, 'error', '') or ''} {getattr(result, 'output', '') or ''}"
+        ):
+            recovered = self._recover_and_retry(command, handler, args)
+            if recovered is not None:
+                return recovered
+        return result
 
     # ================================================================
     # 专属 worker 线程（Playwright 生命周期绑定单线程）
@@ -294,6 +303,60 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._worker = threading.Thread(
             target=_loop, daemon=True, name="browser-worker")
         self._worker.start()
+
+    # 浏览器会话"已死"的特征串：命中即作废旧 worker/引用并自动重建重试
+    _DEAD_SIGNALS = (
+        "has been closed",
+        "Target closed",
+        "Target page, context or browser",
+        "Browser closed",
+        "Connection closed",
+        "Sync API inside the asyncio loop",
+        "cannot switch to a different thread",
+        "browser has been closed",
+    )
+
+    @classmethod
+    def _looks_dead(cls, text: str) -> bool:
+        t = str(text or "")
+        return any(sig.lower() in t.lower() for sig in cls._DEAD_SIGNALS)
+
+    def _invalidate(self) -> None:
+        """作废当前 worker 与 Playwright 引用：下一个命令会重建全新 worker。"""
+        self._worker_broken = True
+        self._worker = None
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._pages = []
+        self._current_page_idx = 0
+
+    def _recover_and_retry(self, command: str, handler, args: str):
+        """会话失效后的自愈：重建 worker（+必要时重开浏览器）并重试一次原命令。
+
+        这是"必须重启项目才能恢复"的根治点：浏览器进程被杀 / CDP 断开 /
+        旧 worker 线程的 asyncio loop 无法复用时，不再把错误直接抛给模型。
+        """
+        try:
+            self._invalidate()
+            if command not in ("launch", "close"):
+                try:
+                    self._dispatch(self._launch, "")     # 重建后重开浏览器
+                except Exception:
+                    pass
+            res = self._dispatch(handler, args)
+            if res is not None and res.success:
+                out = (res.output or "").strip()
+                note = "(检测到浏览器会话已失效，已自动重建浏览器并重试成功)"
+                return ToolResult(
+                    success=True,
+                    output=((out + chr(10)) if out else "") + note,
+                    metadata=getattr(res, "metadata", None),
+                )
+            return res
+        except Exception as e:
+            return ToolResult(success=False, output="",
+                              error=f"浏览器会话失效，且自动恢复失败: {str(e)[:200]}")
 
     def _dispatch(self, fn, *args, wait_timeout: float = None, **kwargs):
         """把浏览器命令投递到 worker 线程执行并等待结果。
