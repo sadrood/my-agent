@@ -369,6 +369,78 @@ def _user32():
     return ctypes.windll.user32
 
 
+# ================================================================
+# 用户优先（yield to user）：Agent 控制键鼠时，用户随时可以"抢回"操作权
+# ----------------------------------------------------------------
+# 原理：GetLastInputInfo 报告系统最后一次输入时间（含我们自己注入的）。
+# 我们在每次合成输入后记录时间戳；若"最后一次输入"明显晚于我们的时间戳，
+# 说明是**用户**在动鼠标/敲键盘 → 让路（等待或放弃本次动作），避免抢光标。
+# 环境变量：COMPUTER_YIELD_TO_USER=0 关闭；COMPUTER_YIELD_WAIT_MS 调整等待上限。
+# ================================================================
+_LAST_SYNTHETIC_MS = 0.0
+
+
+def _now_ms() -> int:
+    """与 GetLastInputInfo 同基准的毫秒时钟（GetTickCount，开机起算）。
+
+    注意：不能用 time.time()（纪元毫秒）——两者基准不同会让"多久没输入"
+    永远算错（实测踩过：用户明明在动鼠标，却判定为无人操作）。
+    """
+    try:
+        import ctypes
+        return int(ctypes.windll.kernel32.GetTickCount()) & 0xFFFFFFFF
+    except Exception:
+        return int(time.time() * 1000) & 0xFFFFFFFF
+
+
+def _mark_synthetic() -> None:
+    global _LAST_SYNTHETIC_MS
+    _LAST_SYNTHETIC_MS = _now_ms()
+
+
+def _get_last_input_ms() -> int:
+    """系统最后一次输入时间（GetTickCount 基准，毫秒）。"""
+    try:
+        import ctypes
+
+        class _LII(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        li = _LII()
+        li.cbSize = ctypes.sizeof(li)
+        if _user32().GetLastInputInfo(ctypes.byref(li)):
+            return int(li.dwTime) & 0xFFFFFFFF
+        return 0
+    except Exception:
+        return 0
+
+
+def should_yield_to_user(last_synthetic_ms: float, last_input_ms: int,
+                         now_ms: int, threshold_ms: int = 700) -> bool:
+    """是否应让路给用户（纯函数，便于单测）。
+
+    - 最近 threshold 内有输入，且该输入**不是**我们刚注入的 → 用户在操作 → 让路
+    - 处理 32 位 tick 回绕
+    """
+    if not last_input_ms:
+        return False
+    age = (now_ms - last_input_ms) & 0xFFFFFFFF
+    if age >= threshold_ms:
+        return False
+    ours_age = now_ms - (last_synthetic_ms or 0)
+    return ours_age >= threshold_ms
+
+
+def _yield_enabled() -> bool:
+    return str(os.getenv("COMPUTER_YIELD_TO_USER", "1")).strip().lower() not in (
+        "0", "false", "off", "no")
+
+
+def _user_is_active(threshold_ms: int = 700) -> bool:
+    return should_yield_to_user(_LAST_SYNTHETIC_MS, _get_last_input_ms(),
+                                _now_ms(), threshold_ms)
+
+
 def _os_click(x: int, y: int, button: str = "left", double: bool = False) -> bool:
     """OS 级鼠标点击：SetCursorPos + mouse_event down/up。"""
     u = _user32()
@@ -384,6 +456,7 @@ def _os_click(x: int, y: int, button: str = "left", double: bool = False) -> boo
             # 无论中途被中断/异常，都必须补 up，绝不留"按住不放"的鼠标
             u.mouse_event(up, 0, 0, 0, 0)
         time.sleep(0.02)
+    _mark_synthetic()
     return True
 
 
@@ -400,6 +473,7 @@ def _release_all_inputs() -> None:
         for vk in (0x10, 0x11, 0x12, 0x5B, 0x5C, 0x5D,   # Shift/Ctrl/Alt/Win/Win/RWin
                    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5):  # 左右修饰键
             u.keybd_event(vk, 0, 0x0002, 0)             # KEYEVENTF_KEYUP
+        _mark_synthetic()
     except Exception:
         pass
 
@@ -654,6 +728,18 @@ class DesktopTool(BaseTool):
         try:
             # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，
             # 让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。
+            # 用户优先：检测到用户正在动鼠标/敲键盘 → 等待其停下；仍不停则放弃本次动作
+            if _yield_enabled() and action in ("click", "type", "key", "scroll"):
+                wait_ms = int(os.getenv("COMPUTER_YIELD_WAIT_MS", "5000"))
+                waited = 0
+                while _user_is_active() and waited < wait_ms:
+                    time.sleep(0.15)
+                    waited += 150
+                if _user_is_active():
+                    return ToolResult(
+                        success=False, output="",
+                        error="检测到你正在操作鼠标/键盘，本次动作已让出（避免和你抢光标）。"
+                              "稍后再让我继续即可。")
             _release_all_inputs()          # 动作前清掉可能残留的按键状态
             ov = get_overlay()
             if ov is not None and action in ("click", "type", "key", "scroll"):
