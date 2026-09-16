@@ -526,9 +526,11 @@ class Agent:
             ctx_count = int(SESSION_CONFIG.get("context_messages", 12))
             ctx_chars = int(SESSION_CONFIG.get("context_message_chars", 400))
             recent = self.memory.get_recent_messages(ctx_count)
-            if len(recent) > 1:  # 有历史对话
+            # 排除刚加入的当前消息（用统一助手，避免与单循环路径逻辑分叉）
+            recent = self._history_without_current_goal(recent, goal)
+            if recent:  # 有历史对话
                 ctx_lines = ["\n## 之前的对话记录\n"]
-                for m in recent[:-1]:  # 排除刚加入的当前消息
+                for m in recent:
                     role_label = "用户" if m["role"] == "user" else self._agent_name()
                     ctx_lines.append(f"- {role_label}: {m['content'][:ctx_chars]}")
                 # 追加上一轮的操作摘要（工具使用、浏览器等）
@@ -1200,6 +1202,28 @@ class Agent:
         except Exception:
             return ""
 
+    @staticmethod
+    def _history_without_current_goal(recent: list, goal: str) -> list:
+        """从历史窗口里剔除「本轮 goal 本身」（仅当它已被写进 memory）。
+
+        计划模式在 run() 开头就 add_message(goal)，因此历史窗口的最后一条
+        是本轮消息，需要剔除。
+
+        但**默认的单循环模式不是这样**：run() 在 482 行就直接 return
+        _run_loop()，goal 要到本次 run 结束才 add_message 进 memory。此时
+        最后一条是**真实历史**，无脑 recent[:-1] 会把它删掉。实测后果：
+        历史恰好以「上一轮没人回应的用户请求」结尾，模型于是回去答那个旧
+        问题，完全无视用户刚发的新目标——用户侧表现为"粘贴一大堆文字它
+        根本看不见"。所以这里只在最后一条确实等于本轮 goal 时才剔除。
+        """
+        if not recent:
+            return recent
+        last = recent[-1]
+        if last.get("role") == "user" and \
+                str(last.get("content") or "").strip() == (goal or "").strip():
+            return recent[:-1]
+        return recent
+
     def _run_loop(self, goal: str, keep_session: bool = False,
                   event_sink=None, stop_event=None) -> str:
         """
@@ -1286,9 +1310,11 @@ class Agent:
                 ctx_count = max(ctx_count, int(SESSION_CONFIG.get("resume_context_messages", 30)))
                 ctx_chars = max(ctx_chars, int(SESSION_CONFIG.get("resume_context_chars", 600)))
             recent = self.memory.get_recent_messages(ctx_count)
-            if len(recent) > 1:
+            # 只在最后一条确实是本轮 goal 时才排除它（见 _history_without_current_goal）
+            recent = self._history_without_current_goal(recent, goal)
+            if recent:
                 ctx_lines = ["\n## 之前的对话记录"]
-                for m in recent[:-1]:
+                for m in recent:
                     role_label = "用户" if m["role"] == "user" else self._agent_name()
                     ctx_lines.append(f"- {role_label}: {m['content'][:ctx_chars]}")
                 if self.last_execution_summary:
