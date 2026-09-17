@@ -351,3 +351,156 @@ class TestChapterSplit:
         ch = _split_chapters("第一章 长\n" + "字" * 9000, max_chars=4000)
         assert len(ch) >= 3
         assert all(len(c["body"]) <= 4000 for c in ch)
+
+
+
+# ----------------------------------------------------------------------
+# 1.1.8 路由表（方法不能靠猜：159/169 是 POST，读接口也是 POST）
+# ----------------------------------------------------------------------
+
+class TestRouteTable:
+    def test_table_size_and_shape(self):
+        from models.toonflow import ROUTE_METHODS
+        assert len(ROUTE_METHODS) == 169
+        for path, method in ROUTE_METHODS.items():
+            assert path.startswith("/api/")
+            assert method in ("GET", "POST", "PUT", "DELETE", "PATCH")
+
+    def test_spot_check_methods(self):
+        from models.toonflow import ROUTE_METHODS, method_for
+        assert ROUTE_METHODS["/api/other/getVersion"] == "GET"
+        assert method_for("/api/project/getProject") == "POST"
+        assert method_for("/api/modelSelect/getModelList") == "POST"
+        assert method_for("/api/setting/vendorConfig/getVendorList") == "POST"
+        assert method_for("/api/production/workbench/batchGenerateVideo") == "POST"
+        # 表外路径按 POST 试（上游读接口也多是 POST）
+        assert method_for("/api/unknown/whatever") == "POST"
+        # 容忍缺前导斜杠
+        assert method_for("api/project/getProject") == "POST"
+
+    def test_client_exposes_method_for(self):
+        assert ToonflowClient.method_for("/api/other/getVersion") == "GET"
+
+
+class TestCallCommand:
+    def test_call_posts_empty_object_when_body_missing(self, fake_http):
+        """上游 zod 要求 body 是 object：call 不传 body 时必须补 {}（否则 400）。"""
+        def handler(method, url, params, body, headers):
+            if url.endswith("/api/login/login"):
+                return FakeResponse({"data": {"token": "Bearer t"}})
+            return FakeResponse({"code": 200, "data": "ok"})
+
+        fake = fake_http(handler)
+        tool = ToonflowTool()
+        r = tool.execute_json({"command": "call", "path": "/api/general/generalStatistics"})
+        assert r.success is True
+        last = fake.calls[-1]
+        assert last["method"] == "POST"
+        assert last["json"] == {}
+
+    def test_call_auto_picks_get_for_getversion(self, fake_http):
+        def handler(method, url, params, body, headers):
+            if url.endswith("/api/login/login"):
+                return FakeResponse({"data": {"token": "Bearer t"}})
+            return FakeResponse({"code": 200, "data": "1.1.8"})
+
+        fake = fake_http(handler)
+        ToonflowTool().execute_json({"command": "call", "path": "/api/other/getVersion"})
+        assert fake.calls[-1]["method"] == "GET"
+
+    def test_call_respects_explicit_method(self, fake_http):
+        def handler(method, url, params, body, headers):
+            if url.endswith("/api/login/login"):
+                return FakeResponse({"data": {"token": "Bearer t"}})
+            return FakeResponse({"code": 200})
+
+        fake = fake_http(handler)
+        ToonflowTool().execute_json({"command": "call", "path": "/api/project/getProject",
+                                     "method": "GET"})
+        assert fake.calls[-1]["method"] == "GET"
+
+
+class TestWorkbenchFlow:
+    def _tool_with(self, fake_http, reply=None):
+        def handler(method, url, params, body, headers):
+            if url.endswith("/api/login/login"):
+                return FakeResponse({"data": {"token": "Bearer t"}})
+            return FakeResponse(reply if reply is not None else {"code": 200, "data": 123})
+
+        fake = fake_http(handler)
+        return ToonflowTool(), fake
+
+    def test_add_track_returns_track_id(self, fake_http):
+        tool, fake = self._tool_with(fake_http, {"code": 200, "data": 1789640999})
+        r = tool.execute_json({"command": "add_track", "project_id": 7, "script_id": 1})
+        assert r.success is True and r.metadata["track_id"] == 1789640999
+        assert fake.calls[-1]["url"].endswith("/api/production/workbench/addTrack")
+        assert fake.calls[-1]["json"] == {"projectId": 7, "scriptId": 1}
+
+    def test_gen_prompts_passes_track_data(self, fake_http):
+        tool, fake = self._tool_with(fake_http)
+        td = [{"trackId": 1, "info": [{"id": 1, "sources": "storyboard"}]}]
+        r = tool.execute_json({"command": "gen_prompts", "project_id": 7, "track_data": td})
+        assert r.success is True
+        body = fake.calls[-1]["json"]
+        assert fake.calls[-1]["url"].endswith(
+            "/api/production/workbench/batchGeneratePrompt")
+        assert body["trackData"] == td
+        assert body["model"] == "agnes:agnes-video-2.5-flash" and body["mode"] == "text"
+
+    def test_generate_video_full_body(self, fake_http):
+        tool, fake = self._tool_with(fake_http)
+        td = [{"uploadData": [{"id": 1, "sources": "storyboard"}], "trackId": 1,
+               "prompt": "镜头推近", "duration": 5}]
+        r = tool.execute_json({"command": "generate_video", "project_id": 7,
+                               "script_id": 1, "track_data": td})
+        assert r.success is True
+        body = fake.calls[-1]["json"]
+        assert fake.calls[-1]["url"].endswith(
+            "/api/production/workbench/batchGenerateVideo")
+        assert body["model"] == "agnes:agnes-video-2.5-flash"
+        assert body["mode"] == "text" and body["resolution"] == "720P"
+        assert body["audio"] is False and body["trackData"] == td
+
+    def test_generate_video_requires_fields(self, fake_http):
+        tool, _ = self._tool_with(fake_http)
+        r = tool.execute_json({"command": "generate_video", "project_id": 7})
+        assert r.success is False and "track_data" in r.error
+
+    def test_workbench_and_file_url_paths(self, fake_http):
+        tool, fake = self._tool_with(fake_http, {"code": 200, "data": []})
+        tool.execute_json({"command": "workbench", "project_id": 7, "script_id": 1})
+        assert fake.calls[-1]["url"].endswith(
+            "/api/production/workbench/getGenerateData")
+        tool.execute_json({"command": "file_url",
+                           "items": [{"id": 1, "sources": "storyboard"}]})
+        assert fake.calls[-1]["url"].endswith("/api/production/workbench/getFileUrl")
+
+
+class TestVendorMasking:
+    def test_vendor_list_masks_api_keys(self, fake_http):
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+        def handler(method, url, params, body, headers):
+            if url.endswith("/api/login/login"):
+                return FakeResponse({"data": {"token": "Bearer t"}})
+            return FakeResponse({"code": 200, "data": [
+                {"id": "agnes", "inputValues": {"apiKey": secret,
+                                                "baseUrl": "https://api.agnes-ai.cn/v1"}},
+            ]})
+
+        fake_http(handler)
+        r = ToonflowTool().execute_json({"command": "vendor"})
+        assert r.success is True
+        assert secret not in r.output            # 明文密钥绝不能回给模型
+        assert "sk-a***" in r.output and r.metadata["masked"] is True
+
+
+def test_mask_secrets_helper():
+    from tools.toonflow import _mask_secrets
+    out = _mask_secrets({"apiKey": "sk-1234567890abcdef", "nested": {"token": "abcdefghijklmnop"},
+                         "list": [{"ak": "verylongaccesskeyvalue"}], "normal": "keep"})
+    assert out["normal"] == "keep"
+    assert out["apiKey"].startswith("sk-1") and "***" in out["apiKey"]
+    assert "***" in out["nested"]["token"]
+    assert "***" in out["list"][0]["ak"]
