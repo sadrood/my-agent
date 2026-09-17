@@ -1130,7 +1130,12 @@ class Executor:
                 "output": msg[:300],
                 "truncated": False,
             })
-            return ToolResult(success=False, output="", error=msg), msg
+            # 注意：第二个返回值是 blocked_reason，**必须留空**。
+            # 调用方把"非空 blocked_reason"一律理解为"被安全策略拦截"：
+            # 超时冒充拦截会导致它不计入 errors、不推进 last_failure_idx，
+            # 最终 success = last_success_idx >= last_failure_idx 判成 True
+            # —— 一次卡死超时的副作用调用被记成"任务成功"并写进经验库。
+            return ToolResult(success=False, output="", error=msg), ""
 
         # 逐操作式检查点：修改成功后立即 git 提交，
         # 每次操作都有独立提交（git revert HEAD 即可回滚上一步）；
@@ -1301,7 +1306,7 @@ class Executor:
                     result.update(screenshot_result)
                     return result
 
-            tool_result = self.tool_manager.execute(tool_name, tool_input)
+            tool_result = self.call_tool_guarded(tool_name, tool_input)
             result["tool"] = tool_name
             result["tool_input"] = tool_input
             result["success"] = tool_result.success
@@ -1341,8 +1346,8 @@ class Executor:
         return result
 
     def execute_tool_directly(self, tool_name: str, tool_input: str) -> dict:
-        """直接调用工具（绕过 LLM）。"""
-        tool_result = self.tool_manager.execute(tool_name, tool_input)
+        """直接调用工具（绕过 LLM），同样走硬超时兜底。"""
+        tool_result = self.call_tool_guarded(tool_name, tool_input)
         return {
             "step": f"自动操作: {tool_name} {tool_input}",
             "action": "use_tool",
@@ -1355,6 +1360,30 @@ class Executor:
             "reasoning": "自动执行",
         }
 
+    def call_tool_guarded(self, tool_name: str, tool_input: str) -> ToolResult:
+        """带**硬超时**的工具调用（所有分发路径都必须走这里）。
+
+        为什么必须统一：`_run_tool_with_timeout` 此前只在 `_dispatch_tool_call`
+        一处使用，而 legacy 步骤、`execute_tool_directly`（启动/清理浏览器）、
+        视觉截图这三条路径都是裸调 `tool_manager.execute()`。一旦 CDP 半死，
+        `browser` 的 `done.wait()` 是**无限等待**（它自己注释写明"靠外层
+        Executor 提供硬超时兜底"），主线程就永久冻结、无法恢复。
+        """
+        timeout = float(TOOL_CONFIG.get("tool_timeout", 300))
+        result = self._run_tool_with_timeout(
+            lambda: self.tool_manager.execute(tool_name, tool_input), timeout)
+        if result is None:
+            try:
+                self.tool_manager.reset_tool(tool_name)
+            except Exception:
+                pass
+            return ToolResult(
+                success=False, output="",
+                error=(f"工具执行超时（>{timeout:.0f}s）：{tool_name} 无响应，"
+                       "已重置该工具状态。请重试或改用其他方式。"),
+            )
+        return result
+
     # ================================================================
     # 视觉分析
     # ================================================================
@@ -1365,7 +1394,7 @@ class Executor:
         if browser is None:
             return None
         try:
-            result = browser.execute("screenshot_base64")
+            result = self.call_tool_guarded("browser", "screenshot_base64")
             if not result.success:
                 return {
                     "step": "截图失败",

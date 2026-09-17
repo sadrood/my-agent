@@ -47,6 +47,9 @@ def test_click_requires_coords(tool, monkeypatch):
     monkeypatch.setattr(
         "tools.computer_use._os_click",
         lambda x, y, button="left", double=False: calls.append((x, y, button, double)) or True)
+    # 密封性：computer 工具有"用户优先"保护——检测到真人正在动鼠标/键盘就让出本次
+    # 动作。测试若依赖真实输入状态，跑测试时用户恰好碰一下鼠标就会失败（实测过）。
+    monkeypatch.setattr("tools.computer_use._user_is_active", lambda *a, **kw: False)
 
     r = tool.execute_json({"action": "click"})
     assert not r.success and "坐标" in r.error
@@ -55,6 +58,15 @@ def test_click_requires_coords(tool, monkeypatch):
     r2 = tool.execute_json({"action": "click", "x": 100, "y": 200, "double": True})
     assert r2.success
     assert calls == [(100, 200, "left", True)]
+
+
+def test_yield_to_active_user(tool, monkeypatch):
+    """反向保证：真人正在操作时确实让出（这条保护本身不能被测试改坏）。"""
+    monkeypatch.setattr("tools.computer_use._user_is_active", lambda *a, **kw: True)
+    monkeypatch.setattr("tools.computer_use._yield_enabled", lambda: True)
+    monkeypatch.setenv("COMPUTER_YIELD_WAIT_MS", "0")
+    r = tool.execute_json({"action": "click", "x": 1, "y": 1})
+    assert not r.success and "让出" in r.error
 
 
 def test_type_dispatch(tool, monkeypatch):

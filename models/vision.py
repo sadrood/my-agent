@@ -50,9 +50,16 @@ class VisionModel:
         """
         # 视觉模型可走独立端点（VISION_API_KEY / VISION_BASE_URL），
         # 留空时回退到主 LLM 端点（如主模型用 OpenRouter、视觉用商汤）
+        #
+        # timeout/max_retries 必须显式给：OpenAI SDK 默认读超时 600s、自动重试
+        # 2 次，一次挂死的视觉调用能拖到 ~1800s；而调用方预算只有 300s，
+        # browser 的 visionclick 更是 60s。超时后执行器早已放弃，孤儿线程还在
+        # 重试，白烧 3 次付费调用。重试交给上层（执行器/工具）统一管理。
         self.client = OpenAI(
             api_key=api_key or VISION_CONFIG.get("api_key") or LLM_CONFIG["api_key"],
             base_url=base_url or VISION_CONFIG.get("base_url") or LLM_CONFIG["base_url"],
+            timeout=float(VISION_CONFIG.get("timeout", 30)),
+            max_retries=0,
         )
         self.vision_model = vision_model or VISION_CONFIG.get("vision_model") or self._auto_detect_model()
         self.screenshot_dir = VISION_CONFIG.get("screenshot_path", "./screenshots")
