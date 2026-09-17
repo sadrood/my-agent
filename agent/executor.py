@@ -107,6 +107,9 @@ class Executor:
         self._vision_model = None                # 延迟加载
         self._fc_supported: Optional[bool] = None  # None=未探测, True/False=已知
         self.metrics = None                      # RunMetrics（由 Agent 注入）
+        # 在飞工具调用计数（按工具名）：并行批里决定超时后能否安全 reset_tool
+        self._inflight: dict = {}
+        self._inflight_lock = threading.Lock()
         self._hooks = None                       # HookManager（首次工具调用时延迟获取）
 
     @property
@@ -484,15 +487,30 @@ class Executor:
                 messages = self._maybe_compact(messages)
 
             # 流式优先；供应商不支持时回退一次性调用。
-            # 轮级重试：普通临时错误最多 3 次；429 限流最多 6 次 + 指数退避（借鉴同类实现）。
+            # 轮级重试：普通临时错误最多 3 次；429 限流最多 6 次（借鉴同类实现）。
+            #
+            # 但**必须给整轮封顶**：llm.py 内部还会各自重试 max_retries 次并按
+            # 分钟边界等待（单次上限 65s），两层叠乘下最坏 6×3×65s+退避 ≈ 13.5
+            # 分钟纯等待一个回合；按 max_loop_ops 上限可拖成十几小时。而且旧循环
+            # 里 `time.sleep(delay)` 是整段睡的，期间 stop_event 完全不响应——
+            # 用户按"停止"要等几分钟才生效。现在：总预算 + 分片睡眠（可中断）。
             response = None
             llm_error = None
             rate_limited = False
+            turn_budget = float(TOOL_CONFIG.get("llm_turn_retry_budget", 180))
+            turn_deadline = time.time() + turn_budget
             for attempt in range(6):
                 # 非限流错误最多重试 3 次（0/1/2）即放弃；限流走满 6 次
                 if llm_error is not None and not rate_limited and attempt >= 3:
                     break
                 if attempt > 0:
+                    if time.time() >= turn_deadline:
+                        self._emit("llm_retry", {
+                            "turn": turn + 1, "attempt": attempt,
+                            "reason": "budget_exhausted",
+                            "error": f"重试总时长超过 {turn_budget:.0f}s，放弃本轮重试",
+                        })
+                        break
                     if rate_limited:
                         delay = min(2 ** (attempt - 1), 30)   # 2/4/8/16/30 指数退避
                     else:
@@ -502,7 +520,9 @@ class Executor:
                         "reason": "rate_limit" if rate_limited else "retry",
                         "error": str(llm_error)[:200],
                     })
-                    time.sleep(delay)
+                    # 分片睡眠：stop_event 置位立即退出，不再"睡满再响应"
+                    if self._sleep_interruptible(delay, stop_event):
+                        raise KeyboardInterrupt("用户停止")
                 try:
                     if on_turn_start is not None:
                         try:
@@ -1116,10 +1136,16 @@ class Executor:
         if result is None:
             # 超时：重置该工具实例（丢弃卡死的 playwright 连接/子进程引用），
             # 让后续调用从干净状态重新开始，避免"一次卡死、次次卡死"。
-            try:
-                self.tool_manager.reset_tool(tool_name)
-            except Exception:
-                pass
+            #
+            # 但必须确认**同批次里没有同工具的兄弟调用还在跑**：并行批里若有两个
+            # browser 只读调用（都声明了 parallel_safe），其中一个超时就去 reset，
+            # 会把 worker 线程/队列置空并塞入 None 哨兵，兄弟调用排到队里的任务
+            # 直接被跳过 → 它自己的 done.wait() 永不返回 → 被拖到超时、线程永久泄漏。
+            if not self._sibling_calls_in_flight(tool_name):
+                try:
+                    self.tool_manager.reset_tool(tool_name)
+                except Exception:
+                    pass
             msg = (
                 f"工具执行超时（>{timeout:.0f}s）：{tool_name} 无响应，"
                 f"已重置该工具状态。请重试或改用其他方式。"
@@ -1226,11 +1252,48 @@ class Executor:
             raise box["error"]
         return box["result"]
 
+    @staticmethod
+    def _sleep_interruptible(seconds: float, stop_event=None, slice_s: float = 0.25) -> bool:
+        """分片睡眠：stop_event 置位立刻返回 True（被打断）。
+
+        旧实现用整段 `time.sleep(delay)`，限流退避最长 30s、内部还有分钟边界
+        等待，期间"停止"完全无响应。
+        """
+        if seconds <= 0:
+            return bool(stop_event is not None and stop_event.is_set())
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return True
+            time.sleep(min(slice_s, max(0.0, deadline - time.time())))
+        return bool(stop_event is not None and stop_event.is_set())
+
+    def _sibling_calls_in_flight(self, tool_name: str) -> bool:
+        """同批次里是否还有该工具的其它调用正在执行（引用计数 > 0）。"""
+        with self._inflight_lock:
+            return self._inflight.get(tool_name, 0) > 0
+
+    def _enter_tool_call(self, tool_name: str) -> None:
+        with self._inflight_lock:
+            self._inflight[tool_name] = self._inflight.get(tool_name, 0) + 1
+
+    def _leave_tool_call(self, tool_name: str) -> None:
+        with self._inflight_lock:
+            left = self._inflight.get(tool_name, 0) - 1
+            if left > 0:
+                self._inflight[tool_name] = left
+            else:
+                self._inflight.pop(tool_name, None)
+
     def _execute_one_tool_call(self, tc, goal: str, checkpoint: bool = True):
         """执行一次工具调用并计时；日志/指标/事件回喂由主线程统一按序处理。"""
         _t0 = time.time()
-        result, blocked_reason = self._dispatch_tool_call(
-            tc.name, tc.arguments, goal, checkpoint=checkpoint)
+        self._enter_tool_call(tc.name)
+        try:
+            result, blocked_reason = self._dispatch_tool_call(
+                tc.name, tc.arguments, goal, checkpoint=checkpoint)
+        finally:
+            self._leave_tool_call(tc.name)
         return result, blocked_reason, time.time() - _t0
 
     def _run_tool_calls_parallel(self, tcs: list, goal: str):
@@ -1240,16 +1303,24 @@ class Executor:
         用 daemon 线程并行（不用 ThreadPoolExecutor：其 with 退出会等待
         卡死的 worker，导致 Agent 冻结）；每个工具调用内部已有
         _run_tool_with_timeout 硬超时兜底，join 最多等待超时上限。
+
+        并发上限：模型一轮可以发 N 个并行安全调用，而每个调用都可能再拉起
+        子进程/HTTP 连接。旧实现"每个调用起一个线程、无上限"，模型一次发
+        10+ 个就能把线程/句柄/上游限流同时打满（Agnes 免费档尤其敏感）。
+        超过上限的部分排队执行，语义不变（仍然是这一批内完成）。
         """
         import threading
 
         results: dict = {}
+        cap = max(1, int(TOOL_CONFIG.get("max_parallel_tools", 4)))
+        sem = threading.Semaphore(cap)
 
         def _run(idx, tc):
-            try:
-                results[idx] = self._execute_one_tool_call(tc, goal, False)
-            except BaseException as e:   # noqa: BLE001
-                results[idx] = (ToolResult(success=False, output="", error=str(e)), str(e), 0.0)
+            with sem:
+                try:
+                    results[idx] = self._execute_one_tool_call(tc, goal, False)
+                except BaseException as e:   # noqa: BLE001
+                    results[idx] = (ToolResult(success=False, output="", error=str(e)), str(e), 0.0)
 
         threads = []
         for i, tc in enumerate(tcs):
