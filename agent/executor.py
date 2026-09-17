@@ -925,23 +925,34 @@ class Executor:
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """粗略估算消息 token 数（CJK 混合：字符数 / 3）。
+        """估算消息列表 token 数（复用 rollout 的 CJK 感知算法）。
 
-        必须把 assistant 的 tool_calls 参数也算进去：写文件/长参数的工具调用
-        把内容全放在 arguments 里（content 为空），只数 content 会严重低估，
-        导致压缩触发太晚、上下文先把上游窗口撑爆。
+        两个坑都不能踩：
+        1. **必须算上 tool_calls 的 arguments**：写文件类调用把长内容全放在
+           arguments 里（content 为空），只数 content 会严重低估。
+        2. **不能简单按"字符数 / 3"**：中文一字≈1 token，而 `/3` 把中文低估
+           3~4 倍（实测"你好世界"→1 vs 实际 4）。压缩阈值是窗口的 0.75，
+           低估会让压缩**迟迟不触发**，等真触发时早就超过上游窗口 → 直接 400，
+           长中文会话必踩。这里直接复用 agent/rollout.py 里已验证的实现。
         """
+        from agent.rollout import estimate_tokens as _est
         total = 0
         for m in messages:
-            total += len(str(m.get("content", "")) or "")
+            content = m.get("content", "")
+            if isinstance(content, list):          # 多模态内容
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        total += _est(part.get("text", ""))
+            else:
+                total += _est(str(content or ""))
             tc = m.get("tool_calls")
             if tc:
                 import json as _json
                 try:
-                    total += len(_json.dumps(tc, ensure_ascii=False))
+                    total += _est(_json.dumps(tc, ensure_ascii=False))
                 except Exception:
-                    total += len(str(tc))
-        return int(total / 3)
+                    total += _est(str(tc))
+        return total
 
     def _compact_threshold(self) -> int:
         """压缩触发阈值：模块级 COMPACT_CONFIG.token_threshold 显式 >0 优先
