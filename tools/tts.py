@@ -31,12 +31,26 @@ class TTSTool(BaseTool):
     @property
     def description(self) -> str:
         from config import TTS_CONFIG
-        from models.tts import ZH_VOICES
+        from models.tts import ZH_VOICES, provider_summary
         default = TTS_CONFIG.get("voice", "xiaoxiao")
-        return (
-            "语音合成（配音）工具。把文字转成 mp3 语音，保存到本地并返回路径与时长。"
+        provider = str(TTS_CONFIG.get("provider") or "edge").strip().lower()
+        head = (
+            "语音合成（配音）工具。把文字转成音频文件，保存到本地并返回路径与时长。"
             "适合给漫剧/短视频配旁白与角色台词。\n"
-            f"常用中文音色：{', '.join(ZH_VOICES.keys())}"
+            f"当前供应商：{provider_summary()}\n"
+        )
+        if provider == "openrouter":
+            return (
+                head
+                + "用法：tts(command=\"speak\", text=\"台词\")"
+                "（可传 voice 覆盖；模型不支持时该参数会被忽略）。\n"
+                "tts(command=\"voices\") 查看当前供应商与音色说明。\n"
+                "提示：合成后用 video_edit 的 add_audio 把配音合到画面上；"
+                "若配音比画面长，用 video_edit 的 probe 读出两者时长再调整。"
+            )
+        return (
+            head
+            + f"常用中文音色：{', '.join(ZH_VOICES.keys())}"
             f"（默认 {default}）；也可传完整音色名如 zh-CN-YunxiNeural。\n"
             "用法：tts(command=\"speak\", text=\"台词\", voice=\"yunxi\", rate=\"+0%\")；"
             "tts(command=\"voices\") 查看全部音色。\n"
@@ -118,8 +132,20 @@ class TTSTool(BaseTool):
     # ------------------------------------------------------------
 
     def _list_voices(self) -> ToolResult:
-        from models.tts import ZH_VOICES
-        lines = ["可用中文音色（传简称或完整名均可）:"]
+        from config import TTS_CONFIG
+        from models.tts import ZH_VOICES, provider_summary
+        provider = str(TTS_CONFIG.get("provider") or "edge").strip().lower()
+        lines = [f"当前供应商: {provider_summary()}"]
+        if provider == "openrouter":
+            model = TTS_CONFIG.get("model", "")
+            lines.append(f"  模型: {model}")
+            lines.append("  可用音色: 由模型决定（fish-audio 无预设音色目录，"
+                         "默认音色即内置）")
+            ref = TTS_CONFIG.get("reference_audio", "")
+            lines.append(f"  声音克隆参考样本: {ref or '未配置（TTS_REFERENCE_AUDIO 可开启）'}")
+            lines.append("  提示：若不传 voice，请求会交由模型默认音色合成。")
+            return ToolResult(success=True, output="\n".join(lines))
+        lines.append("可用中文音色（传简称或完整名均可）:")
         for k, v in ZH_VOICES.items():
             lines.append(f"  {k:<10} {v}")
         return ToolResult(success=True, output="\n".join(lines))
@@ -150,8 +176,15 @@ class TTSTool(BaseTool):
         except Exception:
             pass
         lines = [f"✅ 配音已生成: {path}",
-                 f"音色: {r.get('voice')} · 字数: {r.get('chars')}"
+                 f"供应商: {r.get('provider')} · 音色/模型: {r.get('voice')}"
+                 f" · 字数: {r.get('chars')}"
                  + (f" · 时长: {dur:.2f}s" if dur else "")]
+        if r.get("fallback_from"):
+            # 降级必须可见：免费档不保证可用性，静默兜底会掩盖真实故障
+            lines.append(f"⚠️ 已降级：{r['fallback_from']} 失败，改用 edge-tts 兜底"
+                         f"（原因: {r.get('fallback_reason', '')}）")
         return ToolResult(success=True, output="\n".join(lines),
                           metadata={"audio_path": path, "duration": dur,
-                                    "voice": r.get("voice"), "text": text})
+                                    "voice": r.get("voice"), "text": text,
+                                    "provider": r.get("provider"),
+                                    "fallback_from": r.get("fallback_from")})
