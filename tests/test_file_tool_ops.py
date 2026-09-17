@@ -200,3 +200,86 @@ def test_copy_preserves_mtime(tool, tmp_path):
     dst = tmp_path / "b.bin"
     tool.execute_json({"operation": "copy", "path": str(src), "destination": str(dst)})
     assert abs(os.path.getmtime(dst) - 1000000) < 2
+
+
+# ----------------------------------------------------------------------
+# 回归：JSON 入口不得回落到"按空格切分"的字符串解码
+# ----------------------------------------------------------------------
+
+class TestPathsWithSpaces:
+    """路径含空格时绝不能写错文件。
+
+    实测故障（2026-09-17 审计）：execute_json 曾把结构化参数拼成
+    "write <path> <content>" 再交给字符串解码按空格切分，于是
+    {"path": "...\\My Documents\\notes.txt", "content": "hi"} 实际写出一个
+    名为 `My` 的文件、内容是 "Documents\\notes.txt hi"，**并且返回 success=True**。
+    静默写错文件比直接报错危险得多。
+    """
+
+    def test_write_with_space_in_path(self, tool, tmp_path):
+        d = tmp_path / "My Documents"
+        target = d / "notes.txt"
+        r = tool.execute_json({"operation": "write", "path": str(target),
+                               "content": "hello"})
+        assert r.success, r.error
+        assert target.read_text(encoding="utf-8") == "hello"
+        # 不得产生"被切坏"的杂散文件
+        assert [p.name for p in tmp_path.iterdir()] == ["My Documents"]
+
+    def test_append_with_space_in_path(self, tool, tmp_path):
+        d = tmp_path / "My Documents"
+        d.mkdir()
+        target = d / "log.txt"
+        target.write_text("A", encoding="utf-8")
+        r = tool.execute_json({"operation": "append", "path": str(target),
+                               "content": " B"})
+        assert r.success, r.error
+        assert target.read_text(encoding="utf-8") == "A B"
+        assert [p.name for p in tmp_path.iterdir()] == ["My Documents"]
+
+    def test_copy_with_space_in_source(self, tool, tmp_path):
+        src_dir = tmp_path / "My Docs"
+        src_dir.mkdir()
+        src = src_dir / "a.txt"
+        src.write_text("data", encoding="utf-8")
+        dst = tmp_path / "out.txt"
+        r = tool.execute_json({"operation": "copy", "path": str(src),
+                               "destination": str(dst)})
+        assert r.success, r.error
+        assert dst.read_text(encoding="utf-8") == "data"
+
+    def test_copy_both_sides_with_spaces(self, tool, tmp_path):
+        src = tmp_path / "my file.txt"
+        src.write_text("x", encoding="utf-8")
+        dst = tmp_path / "Out Put" / "copy of file.txt"
+        r = tool.execute_json({"operation": "copy", "path": str(src),
+                               "destination": str(dst)})
+        assert r.success, r.error
+        assert dst.read_text(encoding="utf-8") == "x"
+
+    def test_move_with_space_in_paths(self, tool, tmp_path):
+        src = tmp_path / "old name.txt"
+        src.write_text("m", encoding="utf-8")
+        dst = tmp_path / "new name.txt"
+        r = tool.execute_json({"operation": "move", "path": str(src),
+                               "destination": str(dst)})
+        assert r.success, r.error
+        assert dst.read_text(encoding="utf-8") == "m"
+        assert not src.exists()
+
+    def test_content_spaces_preserved(self, tool, tmp_path):
+        """内容里的连续空格/制表符/换行必须原样落盘（不能被当分隔符吃掉）。"""
+        target = tmp_path / "c.txt"
+        body = "a  b\tc\nd\n"
+        r = tool.execute_json({"operation": "write", "path": str(target),
+                               "content": body})
+        assert r.success, r.error
+        assert target.read_text(encoding="utf-8") == body
+
+    def test_string_entry_still_works(self, tool, tmp_path):
+        """字符串入口保持向后兼容（无空格路径）。"""
+        target = tmp_path / "s.txt"
+        assert tool.execute(f"write {target} hi there").success
+        assert target.read_text(encoding="utf-8") == "hi there"
+        assert tool.execute(f"append {target} !").success
+        assert target.read_text(encoding="utf-8") == "hi there!"
