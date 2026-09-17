@@ -442,8 +442,11 @@ class Executor:
         if stop_event is not None:
             try:
                 self.tool_manager.bind_stop_event(stop_event)
-            except Exception:
-                pass
+            except Exception as e:
+                # 不能静默：绑定失败意味着"停止"按钮对正在跑的子进程无效，
+                # 而用户仍会看到"已按要求停止执行"。至少要说清楚。
+                print(f"[Stop] 警告: 停止信号未能注入工具层（{str(e)[:120]}），"
+                      "正在运行的子进程可能不会被立即终止。")
 
         warned_near_limit = False
         for turn in range(max_ops):
@@ -451,8 +454,9 @@ class Executor:
             if stop_event is not None and stop_event.is_set():
                 try:
                     self.tool_manager.cancel_active_tools()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Stop] 警告: 取消活动工具失败（{str(e)[:120]}），"
+                          "个别子进程可能仍在后台运行。")
                 self._emit("run_loop_end", {"success": False, "stopped": True})
                 return {
                     "success": False,
@@ -1054,13 +1058,18 @@ class Executor:
         return (resp or "").strip() or "(历史已压缩)"
 
     def _dispatch_tool_call(self, tool_name: str, arguments: dict, goal: str,
-                            checkpoint: bool = True):
+                            checkpoint: bool = True, stream_output: bool = True):
         """
         执行一次工具调用（含审批 + Guardian 把关）。
 
         Args:
             checkpoint: 是否在修改成功后做 git checkpoint
                         （并行线程内关闭，防止 index 锁竞争与乱序提交）。
+            stream_output: 是否绑定实时输出回调。工具实例上只有**一个**回调槽
+                        （tools/base.py 的 _output_callback），并行批里两个
+                        terminal 调用会互相覆盖，且先结束的那个在 finally 里
+                        把槽清空 → 另一个的实时输出静默断掉。并行批里直接
+                        不绑定，避免串台。
 
         Returns:
             (ToolResult, blocked_reason: str)  blocked_reason 非空表示被安全机制拦截
@@ -1115,7 +1124,7 @@ class Executor:
 
         # 实时输出流：支持增量回调的工具（terminal）执行期间把输出逐段转发 dashboard
         stream_tool = None
-        if self._event_sink is not None and tool_name == "terminal":
+        if stream_output and self._event_sink is not None and tool_name == "terminal":
             try:
                 stream_tool = self.tool_manager.get_tool(tool_name)
             except Exception:
@@ -1292,13 +1301,15 @@ class Executor:
             else:
                 self._inflight.pop(tool_name, None)
 
-    def _execute_one_tool_call(self, tc, goal: str, checkpoint: bool = True):
+    def _execute_one_tool_call(self, tc, goal: str, checkpoint: bool = True,
+                               stream_output: bool = True):
         """执行一次工具调用并计时；日志/指标/事件回喂由主线程统一按序处理。"""
         _t0 = time.time()
         self._enter_tool_call(tc.name)
         try:
             result, blocked_reason = self._dispatch_tool_call(
-                tc.name, tc.arguments, goal, checkpoint=checkpoint)
+                tc.name, tc.arguments, goal, checkpoint=checkpoint,
+                stream_output=stream_output)
         finally:
             self._leave_tool_call(tc.name)
         return result, blocked_reason, time.time() - _t0
@@ -1325,7 +1336,8 @@ class Executor:
         def _run(idx, tc):
             with sem:
                 try:
-                    results[idx] = self._execute_one_tool_call(tc, goal, False)
+                    results[idx] = self._execute_one_tool_call(
+                        tc, goal, False, stream_output=False)
                 except BaseException as e:   # noqa: BLE001
                     results[idx] = (ToolResult(success=False, output="", error=str(e)), str(e), 0.0)
 
