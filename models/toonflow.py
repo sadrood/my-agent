@@ -53,6 +53,9 @@ class ToonflowClient:
         self.username = username or cfg.get("username", "admin")
         self.password = password or cfg.get("password", "admin123")
         self.timeout = float(timeout or cfg.get("timeout", 60))
+        # 生成类调用要等分钟级：Toonflow 内部会同步轮询到出图/出片才返回
+        # （实测 5 秒视频片段 60s 超时不够，会误报"连不上"）。
+        self.gen_timeout = float(cfg.get("gen_timeout", 900))
         self.max_chars = int(cfg.get("max_chars", 6000))
         self._token: Optional[str] = None
         self._lock = threading.Lock()
@@ -87,13 +90,26 @@ class ToonflowClient:
     # ------------------------------------------------------------
 
     def request(self, method: str, path: str, params: Dict[str, Any] = None,
-                json_body: Any = None) -> Any:
-        """发起一次带鉴权的请求；401 时自动重登并重试一次。"""
+                json_body: Any = None, timeout: float = None) -> Any:
+        """发起一次带鉴权的请求；401 时自动重登并重试一次。
+
+        超时按路径自动选择：命中生成类路由用 gen_timeout，其余用普通 timeout。
+        """
         self.login()
-        return self._request_raw(method, path, params=params, json_body=json_body)
+        return self._request_raw(method, path, params=params, json_body=json_body,
+                                 timeout=timeout if timeout is not None
+                                 else self._timeout_for(path))
+
+    #: 会触发模型生成、需要长时间等待的路由片段
+    _GEN_HINTS = ("generate", "Generate", "batchGenerate", "modelTest", "pollScriptAssets",
+                  "pollingImage", "checkVideoState")
+
+    def _timeout_for(self, path: str) -> float:
+        return self.gen_timeout if any(h in path for h in self._GEN_HINTS) else self.timeout
 
     def _request_raw(self, method: str, path: str, params: Dict[str, Any] = None,
-                     json_body: Any = None, _retry_auth: bool = True) -> Any:
+                     json_body: Any = None, _retry_auth: bool = True,
+                     timeout: float = None) -> Any:
         import httpx
 
         if not path.startswith("/"):
@@ -105,7 +121,7 @@ class ToonflowClient:
         try:
             resp = httpx.request(method.upper(), url, params=params,
                                  json=json_body, headers=headers,
-                                 timeout=self.timeout,
+                                 timeout=timeout if timeout is not None else self.timeout,
                                  # 回环地址**不走环境里的代理**：实测本机没启动
                                  # Toonflow 时，若让 httpx 读环境代理配置，会得到
                                  # 一个莫名其妙的 HTTP 502（本该是"连接被拒绝"），
@@ -122,7 +138,8 @@ class ToonflowClient:
             # token 过期/被重置 → 重新登录一次再试
             self.login(force=True)
             return self._request_raw(method, path, params=params,
-                                     json_body=json_body, _retry_auth=False)
+                                     json_body=json_body, _retry_auth=False,
+                                     timeout=timeout)
 
         body = self._decode(resp)
         if resp.status_code >= 400:
@@ -152,8 +169,13 @@ class ToonflowClient:
             return (f"Toonflow 路径不存在（404，{path}）：{detail}。"
                     "该版本可能没有这个路由，用 tool 的 routes 命令查看已核实可用的路径。")
         if status == 500:
-            return (f"Toonflow 服务端错误（500，{path}）：{detail}。"
-                    "常见原因是它自己的模型供应商没配好（设置中心 → 模型服务）。")
+            # 上游的真实原因通常比状态码有用得多（例如 video_queue_full、无效的令牌）
+            hint = ""
+            if any(k in detail for k in ("令牌", "key", "API Key", "apiKey", "401", "403")):
+                hint = "看提示像是**密钥/供应商没配好**（设置中心 → 模型服务）。"
+            elif "queue" in detail.lower() or "队列" in detail:
+                hint = "上游队列已满，属**瞬时**状态，稍后重试即可。"
+            return f"Toonflow 返回 500（{path}）：{detail}。{hint}"
         return f"Toonflow 调用失败（HTTP {status}，{path}）：{detail}"
 
     # ------------------------------------------------------------

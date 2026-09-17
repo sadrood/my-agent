@@ -173,11 +173,26 @@ class TestErrorMessages:
             c.request("GET", "/api/nope")
         assert "routes" in str(e.value)
 
-    def test_500_mentions_vendor_config(self, fake_http):
+    def test_500_surfaces_upstream_reason(self, fake_http):
+        """500 要把上游真实原因放前面，并给对号入座的提示（密钥 / 队列 / 或都不像）。"""
+        # 密钥类
+        c = self._client_with(fake_http, FakeResponse({"message": "无效的令牌"}, status_code=500))
+        with pytest.raises(ToonflowError) as e:
+            c.request("POST", "/api/project/getProject")
+        assert "无效的令牌" in str(e.value) and "密钥" in str(e.value)
+
+    def test_500_queue_full_is_called_transient(self, fake_http):
+        c = self._client_with(fake_http, FakeResponse(
+            {"message": "video_queue_full 视频队列已满"}, status_code=500))
+        with pytest.raises(ToonflowError) as e:
+            c.request("POST", "/api/production/workbench/generateVideo")
+        assert "瞬时" in str(e.value), "队列满是瞬时状态，应提示重试而不是改配置"
+
+    def test_500_without_hint_still_shows_detail(self, fake_http):
         c = self._client_with(fake_http, FakeResponse({"msg": "boom"}, status_code=500))
         with pytest.raises(ToonflowError) as e:
-            c.request("GET", "/api/project/getProject")
-        assert "供应商" in str(e.value)
+            c.request("POST", "/api/project/getProject")
+        assert "boom" in str(e.value)
 
 
 # ----------------------------------------------------------------------

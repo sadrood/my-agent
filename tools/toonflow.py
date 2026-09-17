@@ -67,14 +67,23 @@ class ToonflowTool(BaseTool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "enum": ["health", "models", "styles", "projects",
+                    "enum": ["health", "models", "styles", "projects", "novels",
                              "create_project", "add_novel", "events",
                              "storyboard", "videos", "call"],
                     "description": "要执行的命令",
                 },
                 "project_id": {
                     "type": "number",
-                    "description": "项目 ID（add_novel / events / storyboard / videos 用）",
+                    "description": "项目 ID（add_novel / novels / events / videos 用）",
+                },
+                "script_id": {
+                    "type": "number",
+                    "description": "剧本 ID（storyboard / videos 用；Storyboard 按剧本取，不是按项目）",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["all", "text", "image", "video"],
+                    "description": "models 命令的筛选：all/text/image/video",
                 },
                 "name": {"type": "string", "description": "项目名（create_project）"},
                 "intro": {"type": "string", "description": "项目简介（create_project）"},
@@ -123,17 +132,27 @@ class ToonflowTool(BaseTool):
         from models.toonflow import ToonflowError
 
         try:
+            # 注意：Toonflow 的读接口**几乎全是 POST + JSON body**（不是 GET+query），
+            # 且 Storyboard 用 scriptId、VideoList 要 projectId+scriptId。
+            # 这些契约是从上游源码逐个核实的（实测 GET 会 404 "API 404 Not Found"）。
             handler = {
                 "health": self._health,
-                "models": lambda c, a: self._get(c, "/api/modelSelect/getModelList"),
-                "styles": lambda c, a: self._get(c, "/api/artStyle/getArtStyle"),
-                "projects": lambda c, a: self._get(c, "/api/project/getProject"),
-                "events": lambda c, a: self._get(c, "/api/novel/event/getEvent",
-                                                  {"projectId": a.get("project_id")}),
-                "storyboard": lambda c, a: self._get(c, "/api/production/storyboard/getStoryboardData",
-                                                     {"projectId": a.get("project_id")}),
-                "videos": lambda c, a: self._get(c, "/api/production/workbench/getVideoList",
-                                                 {"projectId": a.get("project_id")}),
+                "models": lambda c, a: self._read(c, "/api/modelSelect/getModelList",
+                                                  {"type": str(a.get("type") or "all")}),
+                "styles": lambda c, a: self._read(c, "/api/artStyle/getArtStyle", {}),
+                "projects": lambda c, a: self._read(c, "/api/project/getProject", {}),
+                "novels": lambda c, a: self._read(c, "/api/novel/getNovel",
+                                                  {"projectId": a.get("project_id"),
+                                                   "page": 1, "limit": 50}),
+                "events": lambda c, a: self._read(c, "/api/novel/event/getEvent",
+                                                  {"projectId": a.get("project_id"),
+                                                   "page": 1, "limit": 50}),
+                "storyboard": lambda c, a: self._read(
+                    c, "/api/production/storyboard/getStoryboardData",
+                    {"scriptId": a.get("script_id"), "page": 1, "limit": 50}),
+                "videos": lambda c, a: self._read(
+                    c, "/api/production/workbench/getVideoList",
+                    {"projectId": a.get("project_id"), "scriptId": a.get("script_id")}),
                 "create_project": self._create_project,
                 "add_novel": self._add_novel,
                 "call": self._call,
@@ -141,7 +160,7 @@ class ToonflowTool(BaseTool):
             if handler is None:
                 return ToolResult(
                     success=False, output="",
-                    error=f"未知命令: {cmd}（可用: health/models/styles/projects/"
+                    error=f"未知命令: {cmd}（可用: health/models/styles/projects/novels/"
                           "create_project/add_novel/events/storyboard/videos/call）")
             return handler(client, arguments)
         except ToonflowError as e:
@@ -162,6 +181,8 @@ class ToonflowTool(BaseTool):
             # 位置参数：health/projects 之类忽略；其余按名称/id 传入
             if args["command"] in ("create_project",):
                 args["name"] = rest
+            elif args["command"] in ("storyboard",) and rest.isdigit():
+                args["script_id"] = int(rest)
             elif rest.isdigit():
                 args["project_id"] = int(rest)
             else:
@@ -187,9 +208,9 @@ class ToonflowTool(BaseTool):
         return ToolResult(success=True, output="\n".join(lines),
                           metadata={"base_url": info["base_url"]})
 
-    def _get(self, client, path: str, params: dict = None) -> ToolResult:
-        data = client.request("GET", path, params={k: v for k, v in (params or {}).items()
-                                                   if v is not None} or None)
+    def _read(self, client, path: str, body: dict = None) -> ToolResult:
+        """读接口：**POST + JSON body**（Toonflow 的读接口不用 GET/query）。"""
+        data = client.request("POST", path, json_body=body if body is not None else {})
         return ToolResult(success=True, output=client.summarize(data),
                           metadata={"path": path})
 
