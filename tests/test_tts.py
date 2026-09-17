@@ -344,12 +344,26 @@ class TestOpenRouterProvider:
         assert "openrouter" in r.output
         assert r.metadata["provider"] == "openrouter"
 
-    def test_tool_shows_fallback_warning(self, tmp_path, or_model):
+    def test_tool_shows_fallback_warning(self, tmp_path, or_model, monkeypatch):
+        """降级到 edge-tts 时必须在输出里写明。
+
+        注意：这里必须把 edge 合成打桩。旧写法让降级路径**真的跑了一遍
+        edge-tts**（实测唯一的外部网络调用：GETADDRINFO speech.platform.bing.com），
+        而且断言写成 `if r.success:` —— 离线时它会静默变成空操作，
+        既依赖网络又失去检出能力。
+        """
         m, _ = or_model(FakeResponse(500, payload={"error": {"message": "x"}}))
+
+        def fake_edge(text, voice=None, rate=None, volume=None, output=None):
+            p = str(tmp_path / "edge.mp3")
+            open(p, "w").close()
+            return {"path": p, "voice": "zh-CN-XiaoxiaoNeural", "chars": len(text),
+                    "text": text, "provider": "edge"}
+
+        monkeypatch.setattr(m, "_synth_edge", fake_edge)
         r = TTSTool(tts_model=m).execute_json({"command": "speak", "text": "你好"})
-        # 该模型没装 edge-tts 时可能直接失败；装了则应给出可见的降级提示
-        if r.success:
-            assert "降级" in r.output
+        assert r.success is True
+        assert "降级" in r.output, "降级必须对用户可见"
 
     def test_voices_reports_openrouter_provider(self, monkeypatch, tmp_path):
         from config import TTS_CONFIG

@@ -267,14 +267,47 @@ if HAS_FASTAPI:
     )
 
     # 桌面端前端跨域访问后端（dev 用 Vite localhost:5173，打包用 file://）。
-    # 后端默认只监听 127.0.0.1，不对外暴露，故放开本地来源是安全的。
+    #
+    # 注意：**"只监听 127.0.0.1"并不构成安全边界**——浏览器里任何一个网页都能
+    # 向 http://127.0.0.1:8080 发起跨域请求，而 CORS 恰恰是决定放不放行的那道门。
+    # 旧配置 allow_origins=["*"] 等于对全网放行，于是：
+    #   POST /api/run（用用户自己的 approval=never + danger-full-access 跑任意目标）
+    #   POST /api/approve、POST /api/rollback、POST /api/config（可改视觉 base_url）
+    # 都能被恶意页面驱动 = 本地 RCE。这里改为明确白名单：只放行 dev 服务器与
+    # 打包桌面端（file:// 的 Origin 是 "null"），其余一律拒绝。
+    # JSON 请求会先发 preflight，被拒后浏览器**根本不会发出**真正的请求。
+    _default_origins = [
+        "http://localhost:5173", "http://127.0.0.1:5173",   # Vite dev
+        "http://localhost:8080", "http://127.0.0.1:8080",   # 浏览器版面板
+        "null",                                             # 打包后的 file:// 桌面端
+    ]
+    _extra = [o.strip() for o in os.getenv("DASHBOARD_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_default_origins + _extra,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _block_dns_rebinding(request, call_next):
+        """Host 头白名单：挡 DNS rebinding（把恶意域名解析到 127.0.0.1）。
+
+        浏览器发起的跨站请求会带上攻击者的 Host，这里直接拒掉；
+        本机/桌面端用的都是 127.0.0.1 / localhost，不受影响。
+        """
+        host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+        allowed = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
+        allowed |= {h.strip().lower()
+                    for h in os.getenv("DASHBOARD_ALLOWED_HOSTS", "").split(",") if h.strip()}
+        if host not in allowed:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                {"ok": False, "error": "拒绝访问：Host 不在白名单（可能是 DNS rebinding）"},
+                status_code=403,
+            )
+        return await call_next(request)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):

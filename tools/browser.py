@@ -14,6 +14,88 @@ from tools.computer_use import ComputerUseMixin
 from tools.intent_detector import get_intent_detector
 from config import BROWSER_CONFIG
 
+# 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage
+# 在 Default/ 下），但会随每次浏览器启动各长几 MB。实测该目录涨到 250MB：
+# DeferredBrowserMetrics 144MB + BrowserMetrics 48MB + Default/Cache 30MB。
+_PROFILE_JUNK_DIRS = (
+    "DeferredBrowserMetrics",
+    "BrowserMetrics",
+    "Crashpad/reports",
+    "ShaderCache",
+    "GrShaderCache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "Default/DawnWebGPUCache",
+    "Default/DawnGraphiteCache",
+)
+
+
+def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
+                       max_total_mb: float = None) -> int:
+    """清理持久 profile 里的遥测/缓存垃圾，返回释放的字节数。
+
+    sessions/rollouts 都有轮转上限，唯独 web-profile 从无清理策略（grep
+    profile_dir 只有创建点）——每个用过浏览器的任务都会留下约 3×4MB 的
+    DeferredBrowserMetrics。这里在每次启动前按年龄+总量清一遍，**只动上述
+    遥测目录**，绝不碰 Default/Cookies、Login Data、Local Storage 等登录态。
+    """
+    import shutil
+    from datetime import datetime
+
+    max_age_days = float(BROWSER_CONFIG.get("profile_max_age_days", 7)
+                         if max_age_days is None else max_age_days)
+    max_total_mb = float(BROWSER_CONFIG.get("profile_max_mb", 150)
+                         if max_total_mb is None else max_total_mb)
+    root = os.path.abspath(profile_dir)
+    if not os.path.isdir(root):
+        return 0
+    freed = 0
+    cutoff = time.time() - max_age_days * 86400
+
+    def _dir_size(p: str) -> int:
+        total = 0
+        for dp, _, fs in os.walk(p):
+            for f in fs:
+                try:
+                    total += os.path.getsize(os.path.join(dp, f))
+                except OSError:
+                    pass
+        return total
+
+    for rel in _PROFILE_JUNK_DIRS:
+        target = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.isdir(target):
+            continue
+        # Crashpad/reports 与 *Metrics 目录都是"一堆历史文件"，按年龄删；
+        # 缓存目录整体删（浏览器会重建）。
+        if rel in ("Default/Code Cache", "Default/GPUCache",
+                   "Default/DawnWebGPUCache", "Default/DawnGraphiteCache"):
+            freed += _dir_size(target)
+            shutil.rmtree(target, ignore_errors=True)
+            continue
+        for name in os.listdir(target):
+            p = os.path.join(target, name)
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    if os.path.isdir(p):
+                        freed += _dir_size(p)
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        freed += os.path.getsize(p)
+                        os.remove(p)
+            except OSError:
+                pass
+
+    # 总量兜底：仍超限就整体丢掉遥测目录（缓存会重建，登录态不受影响）
+    total = _dir_size(root)
+    if total > max_total_mb * 1024 * 1024:
+        for rel in ("DeferredBrowserMetrics", "BrowserMetrics", "Crashpad/reports"):
+            target = os.path.join(root, rel.replace("/", os.sep))
+            if os.path.isdir(target):
+                freed += _dir_size(target)
+                shutil.rmtree(target, ignore_errors=True)
+    return freed
+
 
 class BrowserTool(BaseTool, ComputerUseMixin):
     """
@@ -472,6 +554,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 # 启动保留——网页型分身先 headed 手动登录一次，之后 agent 复用会话。
                 # 返回值直接是 BrowserContext（没有独立 Browser 对象）。
                 os.makedirs(self._profile_dir, exist_ok=True)
+                _prune_profile_dir(self._profile_dir)
                 self._browser = None
                 self._context = self._playwright.chromium.launch_persistent_context(
                     self._profile_dir,
@@ -887,7 +970,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         try:
             html = self._page.content()
             if len(html) > 8000:
-                html = html[:8000] + f"\n\n... (HTML 过长，已截断。总长度: {len(self._page.content())} 字符)"
+                html = html[:8000] + f"\n\n... (HTML 过长，已截断。总长度: {len(html)} 字符)"
             return ToolResult(success=True, output=html)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
@@ -1150,9 +1233,16 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return ensure
         action = args.strip().lower()
         try:
+            # 弹窗文字：唯一可靠的来源是 dialog 事件回调。旧实现读的是
+            # `window.__dialog_text`——该变量在全仓库只出现在这一行、**从未被赋值**，
+            # 所以 `alert text` 永远返回"无活跃弹窗"。
+            captured = {}
 
             def _dialog_handler(dialog):
-                text = dialog.message
+                captured["text"] = dialog.message
+                if action == "text":
+                    # 只查询不解弹窗：保持弹窗打开，交由后续 accept/dismiss
+                    return
                 if action == "accept":
                     dialog.accept()
                 elif action == "dismiss":
@@ -1160,13 +1250,22 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 elif "prompt" in action or "text" not in action:
                     dialog.accept(action.split(" ", 1)[1] if " " in action else "")
 
-            self._page.on("dialog", _dialog_handler)
+            # 关键：只能注册**一次性**监听器。此前每次 alert 调用都 `page.on(...)`
+            # 且永不摘除：监听器越堆越多，而且一旦注册了 dialog 监听器，
+            # Playwright 就不再自动 dismiss → 弹窗挂着，后续操作全部阻塞到超时；
+            # 残留的旧处理器还会在无关的新弹窗上乱点。
+            self._page.once("dialog", _dialog_handler)
 
             if action == "text":
-                dialog_text = self._page.evaluate(
-                    "() => { const d = window.__dialog_text; return d || '无活跃弹窗'; }"
-                )
-                return ToolResult(success=True, output=f"弹窗文字: {dialog_text}")
+                # 给弹窗事件一点时间到达；没有弹窗就如实说明
+                for _ in range(20):
+                    if captured.get("text") is not None:
+                        break
+                    self._page.wait_for_timeout(50)
+                text = captured.get("text")
+                if text is None:
+                    return ToolResult(success=True, output="当前没有活跃弹窗。")
+                return ToolResult(success=True, output=f"弹窗文字: {text}")
 
             return ToolResult(success=True, output=f"弹窗已处理: {action}")
         except Exception as e:
@@ -1182,7 +1281,10 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         if not ensure.success:
             return ensure
         try:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            # 毫秒精度：旧实现只到秒，同一秒内两次截图会**互相覆盖**，
+            # 而两次调用都返回 success 和同一个路径（与 tts/video_gen/
+            # image_gen/video_edit 里已经修过的同款问题一致）。
+            timestamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
             filename = f"screenshot_{timestamp}.png"
             filepath = os.path.join(self._screenshot_dir, filename)
 
@@ -1305,6 +1407,17 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages = []
         self._current_page_idx = 0
+        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时
+        # 都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node，
+        # 并且 `--user-data-dir=<profile>` 仍被占用，下一次
+        # launch_persistent_context 直接起不来（`_force_cleanup_residual` 存在的
+        # 意义正是收拾这个局面，_close_impl 里会调它，这里此前漏了）。
+        try:
+            killed = self._force_cleanup_residual()
+            if killed:
+                print(f"[Browser] 已清理残留浏览器进程 {killed} 个")
+        except Exception:
+            pass
 
     def get_page(self):
         return self._page

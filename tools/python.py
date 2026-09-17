@@ -1,12 +1,19 @@
 """
-Python 代码执行工具模块（v2：JSON Schema + 受限命名空间收紧）。
-安全地在受限环境中执行 Python 代码片段并返回结果。
+Python 代码执行工具模块（v3：受限命名空间 + 诚实的边界说明）。
 
-v2 变化：
-- schema: {"code": string}
-- 安全收紧（对齐同类实现的沙箱思路）：从受限全局命名空间移除 subprocess/sys，
-  防止模型绕过 terminal 工具的审批门去执行任意系统命令；
-  保留 os/pathlib 用于文件操作（与 Planner 提示词中 os.makedirs 用法兼容）。
+**定位说明（重要）**：这里的受限命名空间是**护栏，不是沙箱**。
+它能挡住"顺手执行一条系统命令"这类无门槛操作，但 Python 层面没有真正的
+隔离——`().__class__.__base__.__subclasses__()` 之类的手法依然能拿到
+subprocess.Popen（实测可达）。真正的隔离依赖 OS 级沙箱
+（SANDBOX_EXECUTION=appcontainer）与审批策略，不要把它当成安全边界。
+
+历史沿革：
+- v2：schema 收紧为 {"code": string}；从受限命名空间移除 subprocess/sys；
+  保留 os/pathlib 用于文件操作。
+- v3（2026-09-17 审计）：实测发现 `os.system('echo ...')` 可**直接执行命令**
+  （属性调用绕过了 import 黑名单），且子进程输出直写真实 fd 1、连 stdout 捕获
+  都绕过。现在 os 换成受限代理，封锁 system/popen/exec*/spawn*/kill 等入口，
+  `import os` 也返回同一个代理。
 """
 import sys
 import io
@@ -65,6 +72,10 @@ _UNSAFE_BUILTINS = {
     "help", "copyright", "credits", "license", "globals", "locals",
 }
 
+#: 单次执行的 stdout 捕获上限（字符）。超时后仍在后台跑的代码写不进更多，
+#: 避免 `while True: print(...)` 之类把内存吃光。
+_CAPTURE_LIMIT = 200_000
+
 
 def _timeout_seconds() -> float:
     """python 工具执行超时（秒）。默认 30，可用 PYTHON_TOOL_TIMEOUT 调整。
@@ -80,7 +91,7 @@ def _timeout_seconds() -> float:
 
 
 def _safe_import(name, *args, **kwargs):
-    """受限 __import__：黑名单模块直接拒绝。"""
+    """受限 __import__：黑名单模块直接拒绝；os 只给受限代理。"""
     root = name.split(".")[0]
     if root in BLOCKED_IMPORTS or name in BLOCKED_IMPORTS:
         hint = _BLOCKED_HINTS.get(name) or _BLOCKED_HINTS.get(root, "")
@@ -91,6 +102,10 @@ def _safe_import(name, *args, **kwargs):
         if hint:
             msg += f"替代方案：{hint}。"
         raise BlockedImportError(msg)
+    if root == "os":
+        # 关键：`import os` 也必须给受限代理，否则用户代码里再 import 一次
+        # 就重新拿到真实的 os，绕过预导入那层的封锁。
+        return _RestrictedOS(__import__(name, *args, **kwargs))
     return __import__(name, *args, **kwargs)
 
 
@@ -114,6 +129,87 @@ def _format_user_traceback(exc: BaseException, max_frames: int = 6) -> str:
         lines.append(f'  File "{code.co_filename}", line {tb.tb_lineno}, in {code.co_name}')
     lines.extend(s.rstrip("\n") for s in traceback.format_exception_only(type(exc), exc))
     return "\n".join(lines)
+
+
+class _CappedBuffer(io.StringIO):
+    """有上限的输出缓冲：超过上限就丢弃后续写入。
+
+    超时后的代码仍在后台跑（Python 不能强杀线程），旧实现用无上限 StringIO，
+    一个刷屏死循环就能把内存吃光；而且它会写进**下一次调用**的缓冲
+    （sys.stdout 是进程级的）。这里截断并记录丢弃量，工具会告知模型。
+    """
+
+    def __init__(self, limit: int):
+        super().__init__()
+        self._limit = max(1000, int(limit))
+        self.dropped = 0
+
+    def write(self, s):
+        if not isinstance(s, str):
+            s = str(s)
+        room = self._limit - self.tell()
+        if room <= 0:
+            self.dropped += len(s)
+            return len(s)
+        if len(s) > room:
+            self.dropped += len(s) - room
+            s = s[:room]
+        return super().write(s)
+
+
+class _RestrictedOS:
+    """os 的受限代理：拦掉"执行系统命令 / 结束进程"这一类入口。
+
+    实测（2026-09-17）：真实 `os` 一旦暴露，`os.system('...')` 与 `os.popen(...)`
+    可直接执行任意命令——它是属性调用而**不是 import**，所以 BLOCKED_IMPORTS
+    那套钩子完全拦不住；终端工具的黑名单（格式化磁盘、del /s、git push -f…）
+    在这里等于不存在。而且子进程的输出直接写到真实 fd 1，连 stdout 捕获都绕过。
+
+    注意定位：这是**护栏，不是沙箱**。``().__class__.__base__.__subclasses__()``
+    仍能拿到 Popen 之类的类（实测可达），任何想要逃逸的代码都逃得掉。真正的隔离
+    要靠 OS 级沙箱（SANDBOX_EXECUTION=appcontainer）与审批策略，这里只是让
+    "顺手跑个命令"不再是一条无门槛的捷径。
+    """
+
+    #: 允许执行外部程序 / 操作进程的入口，一律拒绝
+    _DENIED = frozenset({
+        "system", "popen",
+        "execv", "execve", "execvp", "execvpe",
+        "execl", "execle", "execlp", "execlpe",
+        "spawnv", "spawnve", "spawnvp", "spawnvpe",
+        "spawnl", "spawnle", "spawnlp", "spawnlpe",
+        "posix_spawn", "posix_spawnp",
+        "fork", "forkpty", "startfile",
+        "kill", "killpg", "abort", "_exit",
+        "setuid", "setgid", "setsid", "putenv", "unsetenv",
+    })
+
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+
+    def __getattr__(self, name):
+        if name in _RestrictedOS._DENIED:
+            raise AttributeError(
+                f"安全限制：os.{name} 已被禁用（它可绕过终端的审批门执行系统命令）。"
+                "需要执行命令请用 terminal 工具（受审批策略管理）；"
+                "复制/移动文件请用 file 工具；不需要外部命令的话请改用纯 Python 实现。"
+            )
+        return getattr(object.__getattribute__(self, "_real"), name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("安全限制：受限命名空间里不允许修改 os 模块属性。")
+
+    def __dir__(self):
+        """反射时表现得像真的 os（但隐藏被禁用的入口）。
+
+        否则 `dir(os)` / `hasattr(os, 'makedirs')` 一类正常写法会给出错误答案，
+        让模型以为环境不可用而放弃本来能做的事。
+        """
+        try:
+            names = set(dir(object.__getattribute__(self, "_real")))
+        except Exception:
+            names = set()
+        return sorted(names - _RestrictedOS._DENIED)
 
 
 def build_safe_builtins() -> dict:
@@ -158,6 +254,8 @@ class PythonTool(BaseTool):
             "Python 代码执行工具。可以运行 Python 代码片段并获取输出。"
             "适合数据处理、计算、生成文件（Excel/CSV/文档）等场景。"
             "注意：受限环境不提供 subprocess（不能执行系统命令，请用 terminal 工具），"
+            "os.system/os.popen 等也已禁用（需要跑命令请用 terminal，"
+            "复制文件请用 file 的 copy）；"
             "可用 os/pathlib 读写文件、json/math/re/datetime 等常用模块；"
             "执行超时时间为 %d 秒（超时会直接失败）。"
             "**不要在本工具里用 sleep 轮询等待外部任务**——长任务（测试/构建/下载）"
@@ -205,9 +303,12 @@ class PythonTool(BaseTool):
         if not code:
             return ToolResult(success=False, output="", error="代码为空。")
 
-        # 捕获 stdout
+        # 捕获 stdout：用**有上限**的缓冲。超时的代码不会被杀死（Python 无法强杀
+        # 线程），一个 `while True: print(...)` 会continue往缓冲里写；无上限的
+        # StringIO 会一直涨，而 sys.stdout 是进程级的，下一次调用换了新缓冲后
+        # 孤儿线程还会写进**新**缓冲，污染下一次的输出。
         old_stdout = sys.stdout
-        sys.stdout = captured = io.StringIO()
+        sys.stdout = captured = _CappedBuffer(_CAPTURE_LIMIT)
 
         # 受限的全局命名空间
         # 安全收紧：__import__ 换成黑名单过滤版，禁止导入 subprocess 等系统级模块，
@@ -222,7 +323,7 @@ class PythonTool(BaseTool):
             "random": __import__("random"),
             "itertools": __import__("itertools"),
             "collections": __import__("collections"),
-            "os": __import__("os"),
+            "os": _RestrictedOS(__import__("os")),   # 受限代理，非真实 os
             "pathlib": __import__("pathlib"),
         }
 
@@ -259,9 +360,13 @@ class PythonTool(BaseTool):
                 raise box["err"]
 
             output = captured.getvalue()
+            dropped = getattr(captured, "dropped", 0)
+            text = output.strip()
+            if dropped:
+                text += f"\n[输出过长，已丢弃 {dropped} 字符]"
             return ToolResult(
                 success=True,
-                output=output.strip() if output.strip() else "代码执行完成（无输出）。",
+                output=text if text else "代码执行完成（无输出）。",
             )
         except BlockedImportError as e:
             # 黑名单命中：把「为什么 + 改用哪个工具」同时放进 output 和 error，

@@ -15,7 +15,7 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 # 沙箱等级（与上游宿主框架文件策略命名一致）

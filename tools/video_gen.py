@@ -28,6 +28,11 @@ class VideoGenTool(BaseTool):
     risk_level: str = "low"
     approval: str = "auto"
     min_sandbox_mode: str = "workspace-write"   # 需写入视频文件
+    # 输出文件唯一命名（vid-<时间戳>-<task_id>.mp4），互不冲突，可并行。
+    # 实测意义很大：模型本来就会一轮发 4-5 个镜头，此前被串行成一个个跑，
+    # 26 镜的漫剧有 48/60 分钟都耗在"等视频"。执行器侧已有并发上限
+    # （TOOL_CONFIG.max_parallel_tools，默认 4），不会把上游打爆。
+    parallel_safe: bool = True
 
     def __init__(self, video_model=None):
         """

@@ -544,6 +544,7 @@ class TerminalTool(BaseTool):
             job_id = f"job-{int(time.time() * 1000)}-{len(self._jobs) + 1}"
             out_path = os.path.join(tempfile.gettempdir(), f"my_agent_bg_{job_id}.log")
             f_out = open(out_path, "w", encoding="utf-8", errors="replace")
+            self._prune_jobs()          # 先按上限淘汰老任务（顺带关句柄、删日志）
             if _IS_WINDOWS:
                 proc = subprocess.Popen(
                     command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
@@ -559,7 +560,7 @@ class TerminalTool(BaseTool):
                               error=f"后台启动失败: {str(e)[:200]}")
         self._jobs[job_id] = {
             "proc": proc, "command": command, "out_path": out_path,
-            "started": time.time(),
+            "started": time.time(), "handle": f_out,   # 保存句柄，结束/淘汰时关闭
         }
         return ToolResult(
             success=True,
@@ -597,6 +598,49 @@ class TerminalTool(BaseTool):
             lines.append(f"- {job_id}  [{status}]  {job['command'][:80]}")
         return ToolResult(success=True, output="后台任务:\n" + "\n".join(lines))
 
+    def _prune_jobs(self, max_jobs: int = 20):
+        """淘汰已结束的老任务：关掉日志句柄并删除临时日志。
+
+        旧实现把 Popen（连带打开的日志文件句柄）永久留在 self._jobs 里：
+        每起一个后台任务就泄漏一个文件句柄，%TEMP%\\my_agent_bg_*.log 也永不删除，
+        长会话下句柄和磁盘都会一直涨。只淘汰**已结束**的任务，运行中的不动。
+        """
+        if len(self._jobs) < max_jobs:
+            return
+        finished = [(jid, j) for jid, j in self._jobs.items()
+                    if (j.get("proc") is None or j["proc"].poll() is not None)]
+        finished.sort(key=lambda kv: kv[1].get("started", 0))
+        for jid, job in finished[:max(1, len(self._jobs) - max_jobs + 1)]:
+            self._finish_job(job)
+            self._jobs.pop(jid, None)
+
+    @staticmethod
+    def _release_job(job: dict):
+        """关闭日志句柄（幂等）。"""
+        fh = job.pop("handle", None)
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    @classmethod
+    def _finish_job(cls, job: dict):
+        """任务收尾：关句柄 + 删临时日志（幂等）。
+
+        注意"已经跑完"的任务也必须走这里——`echo` 这类短命令几乎总是
+        在 `bg kill` 之前就结束了，旧实现在"已结束"分支直接 return，
+        于是句柄和日志一直留着（最常见的泄漏路径）。
+        """
+        cls._release_job(job)
+        path = job.get("out_path")
+        if path:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
     def _bg_output(self, job_id: str, tail: int = 20) -> ToolResult:
         job = self._jobs.get(job_id or "")
         if job is None:
@@ -604,9 +648,17 @@ class TerminalTool(BaseTool):
                 success=False, output="",
                 error=f"后台任务不存在: {job_id or '（空）'}（用 bg list 查看）",
             )
+        # 只读末尾：旧实现 f.readlines() 会把整个日志读进内存，
+        # 一个刷屏的后台任务（几万行/上百 MB）足以把内存打满。
         try:
-            with open(job["out_path"], "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+            with open(job["out_path"], "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                block = min(size, 256 * 1024)      # 最多回读 256KB
+                f.seek(size - block)
+                raw = f.read(block)
+            text = raw.decode("utf-8", errors="replace")
+            lines = text.splitlines(keepends=True)
         except Exception as e:
             return ToolResult(success=False, output="",
                               error=f"读取任务输出失败: {str(e)[:200]}")
@@ -628,7 +680,9 @@ class TerminalTool(BaseTool):
             )
         proc = job.get("proc")
         if proc is None or proc.poll() is not None:
-            return ToolResult(success=True, output=f"{job_id} 已结束（无需终止）。")
+            self._release_job(job)     # 幂等：关闭日志句柄（最常见的泄漏点）
+            return ToolResult(success=True, output=(
+                f"{job_id} 已结束（无需终止）。输出仍可查看: bg output {job_id}"))
         try:
             if _IS_WINDOWS:
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -649,6 +703,10 @@ class TerminalTool(BaseTool):
             proc.wait(timeout=10)
         except Exception:
             pass
+        # 关闭日志句柄（修掉"每个后台任务泄漏一个 fd"），但**保留日志文件**：
+        # 杀掉任务后往往还要看输出排查原因。真正占地方的临时日志由
+        # _prune_jobs 在任务表超限时连同文件一起清掉（总量因此有界）。
+        self._release_job(job)
         return ToolResult(
             success=True,
             output=f"{job_id} 已终止。输出仍可查看: bg output {job_id}",

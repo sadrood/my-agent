@@ -10,12 +10,9 @@ from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
-DEFAULT_QUESTION = """请分析这个网页截图的内容，并提供以下信息：
-1. 页面主要内容（标题、核心信息）
-2. 当前页面状态（是否加载完成、是否有错误、是否有弹窗）
-3. 可见的交互元素列表（按钮、输入框、链接、下拉菜单等）
-4. 当前任务可能需要操作的元素的描述和位置
-用中文回答，简洁明了。"""
+# 提示词统一放 models/prompts.py（AGENTS.md 规则 5）。这里此前抄了一份
+# 逐字相同的副本，两边已经开始漂移（多一行空行）——改为单一来源。
+from models.prompts import VISION_PAGE_ANALYSIS_QUESTION as DEFAULT_QUESTION
 
 
 class SeeTool(BaseTool):

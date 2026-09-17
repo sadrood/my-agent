@@ -130,6 +130,9 @@ VISION_CONFIG = {
     "enabled": os.getenv("VISION_ENABLED", "true").lower() == "true",
     "api_key": os.getenv("VISION_API_KEY", "") or LLM_CONFIG["api_key"],
     "base_url": os.getenv("VISION_BASE_URL", "") or LLM_CONFIG["base_url"],
+    # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
+    # browser visionclick 仅 60s），必须显式收紧
+    "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
 }
 
 # ============================================================
@@ -346,6 +349,8 @@ APPROVAL_CONFIG = {
     "interactive": os.getenv("APPROVAL_INTERACTIVE", "true").lower() == "true",
     "default_answer_when_not_interactive": os.getenv("APPROVAL_NONINTERACTIVE_ANSWER", "deny"),
     "workspace_dir": os.getenv("APPROVAL_WORKSPACE_DIR", os.getcwd()),
+    # 审批决策日志最多保留条数（长驻进程里只增不减会越用越慢；只影响报表口径）
+    "decision_log_max": int(os.getenv("APPROVAL_DECISION_LOG_MAX", "200")),
     "dangerous_requires_approval": os.getenv("APPROVAL_DANGEROUS_REQUIRES", "true").lower() == "true",
     # 命令白名单（深度防御）：true = 终端命令只有命中白名单才按原策略放行，
     # 未命中的一律升级为需人工批准（never/无人值守下直接拒绝）。
@@ -428,6 +433,8 @@ SESSION_CONFIG = {
     "enabled": os.getenv("SESSION_ENABLED", "true").lower() == "true",
     "dir": os.getenv("SESSION_DIR", "./memory/sessions"),
     "max_sessions": int(os.getenv("SESSION_MAX", "50")),
+    # 单个对话文件超过该体积就提示压缩（会话每轮整份重写，且是唯一副本）
+    "warn_size_mb": float(os.getenv("SESSION_WARN_SIZE_MB", "20")),
     # 继续任务时注入上下文的"之前对话"条数（含当前句；注入 recent[:-1]）
     "context_messages": int(os.getenv("SESSION_CONTEXT_MESSAGES", "12")),
     # 上轮未完成（上限/停止）时自动放宽的回忆预算
@@ -505,6 +512,10 @@ TOOL_CONFIG = {
     # 默认 300s；browser 因 CDP 挂起高发单独设短值。
     "tool_timeout": float(os.getenv("TOOL_TIMEOUT", "300")),
     "browser_timeout": float(os.getenv("BROWSER_TIMEOUT", "60")),
+    # 单个模型轮次内并行执行的工具调用上限（超出排队）。模型一轮可发 N 个
+    # 并行安全调用，每个都可能再拉子进程/HTTP 连接——无上限会把线程、句柄
+    # 和上游限流同时打满（免费档尤其敏感）。
+    "max_parallel_tools": int(os.getenv("MAX_PARALLEL_TOOLS", "4")),
     # python 代码工具执行超时（秒）：exec 无法中断，超时后工具立即返回明确错误
     # （此前该工具体没有任何超时，sleep 轮询/长循环会挂到 tool_timeout 才返回）
     "python_timeout": float(os.getenv("PYTHON_TOOL_TIMEOUT", "30")),

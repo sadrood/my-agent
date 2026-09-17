@@ -775,14 +775,38 @@ class Memory:
     # ================================================================
 
     def _save_json(self, filename: str, data, chat_dir: str = None):
-        """保存数据到 JSON 文件，可选指定 chat 目录。"""
+        """原子保存数据到 JSON 文件（临时文件 + os.replace）。
+
+        必须是原子的：长期记忆/经验库/策略库每次 remember/save_experience 都会
+        整份重写，而旧实现直接 `open(filepath, "w")` 就地截断——进程在写入中途
+        被 Ctrl+C / 断电打断，文件就只剩半截 JSON。更糟的是 `_load_json` 遇到
+        解析失败静默 `return []`，下一次写入又只保留新条目：**历史数据静默全丢，
+        且毫无提示**（实测把文件截断一半 → 加载 0 条且不报错）。
+        agent/session.py 早已采用同款原子写法，这里补齐。
+        """
         base = chat_dir or self.chat_db_path
+        os.makedirs(base, exist_ok=True)
         filepath = os.path.join(base, filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp = f"{filepath}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, filepath)     # 原子替换，失败时原文件完好
+        except BaseException:
+            # 必须捕 BaseException：真实的中断是 Ctrl+C（KeyboardInterrupt），
+            # 它不是 Exception 的子类，只捕 Exception 会漏掉"最需要清理"的那种情况，
+            # 临时文件残留在数据目录里。
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def _load_json(self, filename: str, chat_dir: str = None) -> list:
-        """从 JSON 文件加载数据，可选指定 chat 目录。"""
+        """从 JSON 文件加载数据；损坏时**改名保留**并告警，绝不静默清空。"""
         base = chat_dir or self.chat_db_path
         filepath = os.path.join(base, filename)
         if not os.path.exists(filepath):
@@ -790,7 +814,22 @@ class Memory:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError) as e:
+            # 旧实现直接 return []：用户既不知道数据坏了，下一次写入还会把
+            # 残存内容覆盖掉。这里保留现场（.corrupt）并明确告警。
+            broken = f"{filepath}.corrupt"
+            try:
+                if os.path.exists(broken):
+                    os.remove(broken)
+                os.replace(filepath, broken)
+            except OSError:
+                broken = filepath
+            try:
+                print(f"[Memory] 警告: {filename} 解析失败（{e}），"
+                      f"已保留为 {os.path.basename(broken)} 并以空数据继续。"
+                      f"如需恢复请手工修复该文件。")
+            except Exception:
+                pass
             return []
 
     def _load_all(self):

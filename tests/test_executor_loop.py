@@ -184,11 +184,16 @@ class TestGoalLoop:
         elapsed = time.time() - t0
 
         # 1) 没有冻结：核心证据是"超时以工具失败形式回喂，循环继续收尾"
-        assert result["success"] is True
         assert "超时" in result["output"]
         failed = [d for t, d in events if t == "tool_result" and not d.get("success")]
         assert failed and "超时" in failed[-1].get("output", "")
-        # 2) 极宽松兜底：只拦"整体卡死"
+        # 2) 诚实记账：本回合没有任何工具成功，任务不应被记成成功。
+        #    此前超时被当成"被安全策略拦截"返回（blocked_reason 非空），调用方
+        #    因此不计入 errors、不推进 last_failure_idx，最终照样 success=True
+        #    —— 一次卡死的工具被记成"任务成功"并写进经验库（审计发现的假成功）。
+        assert result["success"] is False, (
+            "工具超时后无任何成功调用，success 必须为 False（否则经验库学到错误教训）")
+        # 3) 极宽松兜底：只拦"整体卡死"
         assert elapsed < 60, f"疑似整体卡死：elapsed={elapsed:.2f}s"
 
     def test_parallel_batch_with_hung_tool_not_frozen(self, monkeypatch):
@@ -231,8 +236,10 @@ class TestGoalLoop:
         t0 = time.time()
         result = ex.execute_goal_loop(**_loop_args())
         elapsed = time.time() - t0
-        assert result["success"] is True
         assert "超时" in result["output"]
+        # 诚实记账（同 test_hung_tool_times_out_and_loop_continues）：
+        # 批内工具全部超时 → 不得报成成功
+        assert result["success"] is False
         # 核心保证：并行批里出现超时判定，且循环继续收尾（不冻结）。
         # 注：不用"每个调用都超时"这种过强断言——第一个调用超时后会
         # reset_tool 重建工具实例，第二个调用的时序在整套测试高负载下

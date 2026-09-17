@@ -314,11 +314,24 @@ class ToolManager:
                 output="",
                 error=f"未知工具: '{tool_name}'。可用工具: {', '.join(self._tools.keys())}",
             )
+        # 回退判定必须基于**签名**，不能靠捕获 TypeError：
+        # 旧实现 `except TypeError:` 会把工具执行体内部抛出的 TypeError 也当成
+        # "该工具没实现 execute_json"，于是**把同一个调用再走一遍字符串路径**——
+        # 对 terminal / video_gen / file 这类有副作用的工具就是执行两次。
+        import inspect
+
+        impl = type(tool).execute_json
         try:
-            result = tool.execute_json(arguments or {})
-        except TypeError:
-            # 部分工具未实现 execute_json → 回退到基类字符串转换
-            result = BaseTool.execute_json(tool, arguments or {})
+            inspect.signature(impl).bind(tool, arguments or {})
+            signature_ok = True
+        except (TypeError, ValueError):
+            signature_ok = False          # 老式签名的工具 → 走基类字符串转换
+
+        try:
+            if signature_ok:
+                result = tool.execute_json(arguments or {})
+            else:
+                result = BaseTool.execute_json(tool, arguments or {})
         except Exception as e:
             return ToolResult(success=False, output="", error=f"工具调用失败: {e}")
         return self._truncate_result(result)

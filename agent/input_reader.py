@@ -100,6 +100,9 @@ def _drain_windows() -> list:
             if ch == "\x1a":      # Ctrl+Z：视为 EOF
                 break
             chars.append(ch)
+            # 行数上限：POSIX 路径一直有这个保护，Windows 侧此前漏了
+            if chars.count("\n") + chars.count("\r") >= MAX_DRAIN_LINES:
+                break
             # 手工回显：把回车换成换行，粘贴内容在屏幕上按行呈现
             try:
                 sys.stdout.write("\n" if ch == "\r" else ch)
@@ -118,10 +121,19 @@ def _drain_windows() -> list:
 
 
 def _drain_with_settle(drain_once, pending_fn, settle_delay: float = 0.05,
-                       max_rounds: int = 3) -> list:
+                       max_rounds: int = 6) -> list:
     """排干 + 短等待复检：粘贴可能分多个突发写入，等一小会儿确认收完。
 
     正常单行输入（无待读内容）时第一次检查即返回，不引入额外延迟。
+
+    实测坑（2026-09-17 审计）：轮数上限 × 单轮字符上限 = 实际上限
+    （旧值 3×20000=6 万字符）。超过的部分会**留在控制台队列里**，被下一次
+    input() 当成新的一条消息读走——用户看到的就是"粘贴被截成两半、后半段
+    变成了下一条指令"。这里把轮数放宽到 6，并在真正触顶时明确告警，
+    而不是静默把尾巴留给下一轮。
+
+    已知限制：若粘贴在**一行中间**被拆成两个突发，仍可能插入一个多余换行
+    （需要按原始字符流累积才能彻底消除，属低频场景）。
     """
     out = []
     for _ in range(max_rounds):
@@ -130,6 +142,15 @@ def _drain_with_settle(drain_once, pending_fn, settle_delay: float = 0.05,
             time.sleep(settle_delay)   # 等下一个突发到达
             continue
         break
+    else:
+        if pending_fn():
+            try:
+                sys.stderr.write(
+                    "\n[输入] 粘贴内容过大，已达到单次读入上限；剩余内容仍在终端"
+                    "队列里，会被当成下一条消息。建议把长文本存成文件后用 file 工具读取。\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
     return out
 
 

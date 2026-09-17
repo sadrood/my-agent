@@ -12,8 +12,7 @@ Deep Research 深度研究模块。
 """
 import re
 import time
-import json
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 from dataclasses import dataclass, field
 
 from tools.tool_manager import ToolManager

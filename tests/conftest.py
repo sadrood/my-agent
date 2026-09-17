@@ -18,6 +18,17 @@ from config import TOOL_CONFIG
 
 
 @pytest.fixture(autouse=True)
+def _allow_testclient_host(monkeypatch):
+    """放行 TestClient 的默认 Host（testserver）。
+
+    dashboard 加了 Host 白名单来挡 DNS rebinding（只允许回环地址），而
+    `TestClient(srv.app)` 默认发的是 `Host: testserver` → 全部 403。
+    在测试里显式放行，生产默认仍然只认回环地址——不为测试方便而放宽生产策略。
+    """
+    monkeypatch.setenv("DASHBOARD_ALLOWED_HOSTS", "testserver")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_heavy_runtime_switches(monkeypatch):
     """默认关闭会触发真实副作用的运行时开关（测试可自行覆盖）。"""
     # edit 后不真跑测试：preflight 只应由 test_patch_snapshot 显式开启验证

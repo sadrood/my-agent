@@ -1078,12 +1078,26 @@ class Agent:
             ]
             self.session_store.save_conversation(
                 name,
-                messages=messages,          # 全量记录
+                messages=messages,          # 全量记录（每轮整份重写，见下方体积告警）
                 last_summary=self.last_execution_summary,
                 model=self.llm.default_model,
                 base_url=str(self.llm.client.base_url),
             )
             print_evolution(f"对话已保存: {name}（{len(messages)} 条记录）", use_rich=self.config.verbose)
+            # 体积告警：会话是**每轮整份重写**的（O(n²) 落盘），且这是对话的唯一
+            # 副本。历史上出现过单文件 3.5GB / 630 万条消息把进程拖垮的事故，
+            # 所以到阈值就明确提示用户压缩，而不是等它涨到不可收拾。
+            try:
+                path = os.path.join(self.session_store.dir, f"{name}.json")
+                size_mb = os.path.getsize(path) / 1048576 if os.path.exists(path) else 0
+                limit = float(SESSION_CONFIG.get("warn_size_mb", 20))
+                if size_mb >= limit:
+                    print_warning(
+                        f"当前对话文件已 {size_mb:.0f}MB（{len(messages)} 条记录），"
+                        f"每轮都会整份重写。建议用 /compact 压缩历史，"
+                        f"或 /sessions 开新对话。", use_rich=self.config.verbose)
+            except Exception:
+                pass
         except Exception as e:
             print_warning(f"对话保存失败: {e}", use_rich=self.config.verbose)
 
@@ -1158,8 +1172,11 @@ class Agent:
                     "cache_hit_rate": round(metrics.cache_hit_rate * 100.0, 2),
                     "llm_seconds": round(metrics.llm_seconds, 1),
                     "tool_seconds": round(metrics.tool_seconds, 1),
-                    "first_token_avg": round(metrics.first_token_avg, 2) if metrics.first_token_seconds else 0,
-                    "tokens_per_sec": round(metrics.tokens_per_sec, 1),
+                    "first_token_avg": round(metrics.first_token_avg, 2) if metrics.first_token_seconds else None,
+                    # None = 无法可靠计算（非流式路径没有首 token 数据），
+                    # 前端应显示"—"而不是把它当成 0 吞吐
+                    "tokens_per_sec": (round(metrics.tokens_per_sec, 1)
+                                       if metrics.tokens_per_sec is not None else None),
                     "model": getattr(getattr(self, "llm", None), "default_model", None)
                     or getattr(self.config, "model", None) or "",
                     "context_tokens": getattr(metrics, "last_context_tokens", 0),
@@ -1440,7 +1457,16 @@ class Agent:
                 self.config.exec_mode = "plan"
                 return self.run(goal, keep_session, event_sink, stop_event)
             final = f"执行过程中出现错误：{e}"
-            result = {"success": False, "output": final, "tool_calls": [], "errors": [str(e)]}
+            # 保留已完成的工具成果（旧实现把 tool_calls 重置成 []，一次异常就让
+            # 用户看不到"刚才到底做到了哪一步"；执行器自己的 llm_error 分支就
+            # 会用 _render_partial_progress 保留进度，这里对齐）。
+            partial = ""
+            try:
+                partial = self.executor._render_partial_progress([], [str(e)]) or ""
+            except Exception:
+                partial = ""
+            result = {"success": False, "output": (partial + "\n\n" + final).strip(),
+                      "tool_calls": [], "errors": [str(e)]}
         self._stop_turn_spinner()
 
         final = result.get("output", "").strip() or "任务执行完毕（无文字总结）。"

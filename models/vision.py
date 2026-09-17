@@ -9,7 +9,6 @@
 import base64
 import json
 import re
-from typing import Optional
 
 from openai import OpenAI
 from config import LLM_CONFIG, VISION_CONFIG
@@ -50,9 +49,16 @@ class VisionModel:
         """
         # 视觉模型可走独立端点（VISION_API_KEY / VISION_BASE_URL），
         # 留空时回退到主 LLM 端点（如主模型用 OpenRouter、视觉用商汤）
+        #
+        # timeout/max_retries 必须显式给：OpenAI SDK 默认读超时 600s、自动重试
+        # 2 次，一次挂死的视觉调用能拖到 ~1800s；而调用方预算只有 300s，
+        # browser 的 visionclick 更是 60s。超时后执行器早已放弃，孤儿线程还在
+        # 重试，白烧 3 次付费调用。重试交给上层（执行器/工具）统一管理。
         self.client = OpenAI(
             api_key=api_key or VISION_CONFIG.get("api_key") or LLM_CONFIG["api_key"],
             base_url=base_url or VISION_CONFIG.get("base_url") or LLM_CONFIG["base_url"],
+            timeout=float(VISION_CONFIG.get("timeout", 30)),
+            max_retries=0,
         )
         self.vision_model = vision_model or VISION_CONFIG.get("vision_model") or self._auto_detect_model()
         self.screenshot_dir = VISION_CONFIG.get("screenshot_path", "./screenshots")
@@ -69,7 +75,7 @@ class VisionModel:
 
     def analyze(
         self,
-        image_data: str,
+        image_data,
         question: str,
         image_type: str = "image/png",
         detail: str = "auto",
@@ -81,7 +87,8 @@ class VisionModel:
         分析截图，回答关于页面内容的问题。
 
         Args:
-            image_data: 图片的 base64 编码（不含 data URI 前缀）。
+            image_data: 单张图片的 base64（不含 data URI 前缀），
+                或**多张图片的列表**（对比场景必须传全部图片——见下）。
             question: 要问的问题（如"页面上有哪些可点击的按钮？"）。
             image_type: 图片 MIME 类型。
             detail: 图片分析精度（'auto' / 'low' / 'high'）。
@@ -93,29 +100,25 @@ class VisionModel:
         Returns:
             模型的分析结果文本。
         """
-        data_uri = f"data:{image_type};base64,{image_data}"
-
+        # 支持多图：此前只能传一张，导致"对比前后两张截图"的调用方把 after 图
+        # 悄悄丢掉，却仍然让模型去对比——模型只能凭空编造变化（实测审计发现）。
+        images = image_data if isinstance(image_data, (list, tuple)) else [image_data]
+        images = [i for i in images if i]
+        if not images:
+            return "未提供图片，无法分析。"
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": question,
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": data_uri,
-                            "detail": detail,
-                        },
-                    },
-                ],
-            }
-        )
+        content_parts = [{"type": "text", "text": question}]
+        for img in images:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_type};base64,{img}",
+                    "detail": detail,
+                },
+            })
+        messages.append({"role": "user", "content": content_parts})
 
         try:
             kwargs = dict(model=self.vision_model, messages=messages, max_tokens=max_tokens)
