@@ -257,6 +257,8 @@ class TestAddAudio:
 
 
 class TestSubtitle:
+    """字幕改用「SRT → 自建 ASS → ass 滤镜」：PlayRes 显式等于视频尺寸。"""
+
     def _video(self, tmp_path, w, h):
         ed = make_editor(tmp_path)
         ed.probe = lambda p: {"duration": 6.0, "width": w, "height": h,
@@ -264,34 +266,63 @@ class TestSubtitle:
         return ed, touch(tmp_path / "v.mp4")
 
     def test_font_size_scales_with_height(self, tmp_path, fake_ffmpeg):
-        """T3：SRT 无 PlayRes，必须给 original_size，并按高度换算字号。"""
+        """T3：自建 ASS 的 PlayRes 必须等于视频尺寸，字号按高度 3.2% 换算。"""
         ed, video = self._video(tmp_path, 720, 1280)     # 竖屏
         srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,200 --> 00:00:02,800" + chr(10) + "第七次葬礼" + chr(10))
         r = ed.subtitle(video, srt)
         cmd = last_ffmpeg_cmd(fake_ffmpeg)
-        assert "original_size=720x1280" in cmd
+        assert "ass='" in cmd                            # 走 ass 滤镜
         assert r["font_size"] == 41                      # 1280 * 3.2%
         assert r["margin_v"] == 77                       # 1280 * 6%
-        assert f"FontSize=41" in cmd and "MarginV=77" in cmd
+        ass = open(r["ass_path"], encoding="utf-8").read()
+        assert "PlayResX: 720" in ass and "PlayResY: 1280" in ass
+        assert "Style: Default,SimHei,41," in ass
+        assert "MarginV" and ",77,1" in ass              # 边距进样式
+        assert "Dialogue: 0,0:00:00.20,0:00:02.80" in ass
 
     def test_horizontal_video_smaller_font(self, tmp_path, fake_ffmpeg):
         ed, video = self._video(tmp_path, 1280, 720)
         srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "横屏字幕" + chr(10))
         r = ed.subtitle(video, srt)
         assert r["font_size"] == 23                      # 720 * 3.2%
         assert r["original_size"] == "1280x720"
+        assert "PlayResY: 720" in open(r["ass_path"], encoding="utf-8").read()
 
     def test_explicit_font_size_wins(self, tmp_path, fake_ffmpeg):
         ed, video = self._video(tmp_path, 1280, 720)
         srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "x" + chr(10))
         r = ed.subtitle(video, srt, font_size=36, margin_v=100)
         assert r["font_size"] == 36 and r["margin_v"] == 100
+        assert ",100,1" in open(r["ass_path"], encoding="utf-8").read()
+
+    def test_srt_parser_rejects_empty(self, tmp_path, fake_ffmpeg):
+        """空/损坏字幕要给出明确错误，而不是产出无字幕视频。"""
+        from models.video_edit import VideoEditError, VideoEditor
+        with pytest.raises(VideoEditError, match="没有可用条目"):
+            VideoEditor._srt_to_ass("这不是字幕", 720, 1280, "SimHei", 41, 77)
+
+    def test_srt_parser_handles_multiline_and_tags(self, tmp_path):
+        from models.video_edit import VideoEditor
+        srt = ("1" + chr(10) + "00:00:01,000 --> 00:00:02,500" + chr(10)
+               + "<i>第一行</i>" + chr(10) + "第二行" + chr(10) + chr(10)
+               + "2" + chr(10) + "00:00:03,000 --> 00:00:04,000" + chr(10) + "第三条" + chr(10))
+        ass = VideoEditor._srt_to_ass(srt, 720, 1280, "SimHei", 41, 77)
+        assert ass.count("Dialogue:") == 2
+        assert "第一行 第二行" in ass and "<i>" not in ass
 
     def test_font_name_with_space_falls_back(self, tmp_path, fake_ffmpeg):
         """T8：含空格字体名导致滤镜失败 → 自动回退去空格字体并记录。"""
         from models.video_edit import VideoEditError
         ed, video = self._video(tmp_path, 1280, 720)
         srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "字体测试" + chr(10))
         calls = {"n": 0}
         real_run = ed._run
 
@@ -430,5 +461,20 @@ class TestRealFfmpegIntegration:
         r = ed.subtitle(v, str(srt))
         info = ed.probe(r["path"])
         assert info["duration"] > 1.0
-        assert r["font_size"] == 8 or r["font_size"] >= 7     # 240 高 * 3.2% ≈ 8
+        assert r["font_size"] == 14                           # 240*3.2%=7.7 → 下限 14
         assert r["original_size"] == "320x240"
+        # 真正烧进去没有？抽 t=1.0s 帧，看底部是否有字幕亮像素（回归"字幕丢失"）
+        import subprocess as sp
+        from models.video_edit import ffmpeg_path
+        png = tmp_path / "_sub.png"
+        sp.run([ffmpeg_path(), "-y", "-v", "error", "-i", r["path"],
+                "-ss", "1.0", "-frames:v", "1", "-update", "1", str(png)],
+               check=True, capture_output=True)
+        from PIL import Image
+        im = Image.open(str(png)).convert("L")
+        w, h = im.size
+        px = im.load()
+        rows = [y for y in range(int(h * 0.6), h)
+                if any(px[x, y] > 180 for x in range(0, w, 2))]
+        assert rows, "字幕没有烧进画面"
+        assert rows[-1] > h * 0.85                            # 应贴底

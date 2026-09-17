@@ -396,18 +396,77 @@ class VideoEditor:
         self._run(args + ["-c", "copy", output])
         return {"path": output, "duration": self.duration(output)}
 
+    # ------------------------------------------------------------
+    # 字幕：SRT → 自建 ASS → ass 滤镜烧录
+    # ------------------------------------------------------------
+    # 为什么不用 `subtitles` 滤镜直接烧 SRT（2026-09-17 实测结论）：
+    #   SRT 没有 PlayRes，libass 按默认 288 高度基准解释 force_style 的 FontSize，
+    #   在 1280 高的视频上 FontSize=41 会被放大到约 350px 高、飘到屏幕中间
+    #   （正是"竖屏字幕占半屏"）；且 original_size 对 force_style 无效。
+    #   自建 ASS 并把 PlayResX/Y 显式设成视频尺寸后，字号/边距就是真实像素，横竖屏一致。
+    @staticmethod
+    def _srt_to_ass(srt_text: str, width: int, height: int, font_name: str,
+                    font_size: int, margin_v: int, outline: int = 2) -> str:
+        """极简 SRT → ASS 转换（够用即可：单行/多行文本 + 标准时间轴）。"""
+        import re as _re
+        blocks = _re.split(r"\n\s*\n", (srt_text or "").replace("\r\n", "\n").strip())
+        events = []
+        for blk in blocks:
+            lines = [ln.rstrip() for ln in blk.split("\n") if ln.strip()]
+            if len(lines) < 2:
+                continue
+            idx = 1 if _re.match(r"^\d+$", lines[0].strip()) else 0
+            if idx >= len(lines):
+                continue
+            m = _re.match(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*"
+                          r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})", lines[idx])
+            if not m:
+                continue
+            g = m.groups()
+
+            def _ts(h, mi, sec, ms):
+                cs = int(str(ms).ljust(3, "0")[:3]) // 10
+                return f"{int(h):d}:{int(mi):02d}:{int(sec):02d}.{cs:02d}"
+
+            start_t = _ts(g[0], g[1], g[2], g[3])
+            end_t = _ts(g[4], g[5], g[6], g[7])
+            text = _re.sub(r"<[^>]+>", "", " ".join(lines[idx + 1:])).strip()
+            text = text.replace("{", "(").replace("}", ")")
+            if text:
+                events.append(f"Dialogue: 0,{start_t},{end_t},Default,,0,0,0,,{text}")
+        if not events:
+            raise VideoEditError("字幕文件没有可用条目（SRT 解析为空）")
+        header = [
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            f"PlayResX: {width}",
+            f"PlayResY: {height}",
+            "ScaledBorderAndShadow: yes",
+            "WrapStyle: 0",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+            "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+            "MarginL, MarginR, MarginV, Encoding",
+            f"Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,"
+            f"&H00000000,0,0,0,0,100,100,0,0,1,{outline},0,2,40,40,{margin_v},1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        ]
+        return "\n".join(header + events) + "\n"
+
     def subtitle(self, video: str, srt: str, output: str = None,
                  font_size: int = None, font_name: str = "SimHei",
                  margin_v: int = None, font_size_percent: float = 0.032,
                  outline: int = 2) -> dict:
         """烧录字幕（SRT）。
 
-        2026-09-17 修复「竖屏字幕占半屏」：SRT 自身没有 PlayRes，libass 会按默认
-        288 高度基准缩放——`FontSize=24` 在 1280 高视频上等于 8%+ 屏高。这里：
-        - `original_size=WxH` 把字幕坐标系对齐到视频尺寸
-        - `font_size` 缺省时按视频高度百分比换算（默认 3.2%），横竖屏观感一致
-        - `margin_v` 缺省为高度 6%，避免贴边
-        - 字体名带空格导致滤镜初始化失败时，自动回退去空格字体（并在返回值里记录）
+        - 自建 ASS（PlayRes = 视频尺寸），字号/边距即真实像素：横竖屏观感一致
+        - `font_size` 缺省按视频高度百分比换算（默认 3.2%）：720x1280≈41px、1280x720≈23px
+        - `margin_v` 缺省为高度 6%（贴底居中，不压画面主体）
+        - 字体名带空格导致失败时自动回退去空格字体，并在返回值里记录
         """
         if not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
@@ -421,30 +480,32 @@ class VideoEditor:
         px = int(font_size) if font_size else max(14, int(round(vh * float(font_size_percent))))
         mv = int(margin_v) if margin_v else max(20, int(round(vh * 0.06)))
 
-        sub = os.path.abspath(srt).replace("\\", "/")
-        sub = sub.replace(":", "\\:")    # ffmpeg 滤镜内冒号需转义
-
-        def _vf(name: str) -> str:
-            style = (f"FontName={name},FontSize={px},PrimaryColour=&H00FFFFFF,"
-                     f"OutlineColour=&H00000000,BorderStyle=1,Outline={int(outline)},"
-                     f"Shadow=0,MarginV={mv}")
-            return f"subtitles='{sub}':original_size={vw}x{vh}:force_style='{style}'"
+        with open(srt, encoding="utf-8", errors="replace") as f:
+            srt_text = f.read()
 
         used_name = str(font_name or "SimHei")
-        args_tail = ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
-                     "-c:a", "copy", "-pix_fmt", "yuv420p", output]
+        ass_path = os.path.splitext(output)[0] + ".ass"
+
+        def _burn(name: str) -> None:
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write(self._srt_to_ass(srt_text, vw, vh, name, px, mv, outline))
+            bs = chr(92)
+            esc = os.path.abspath(ass_path).replace(bs, "/").replace(":", bs + ":")
+            self._run(["-i", video, "-vf", f"ass='{esc}'",
+                       "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                       "-c:a", "copy", "-pix_fmt", "yuv420p", output])
+
         try:
-            self._run(["-i", video, "-vf", _vf(used_name)] + args_tail)
+            _burn(used_name)
         except VideoEditError:
             if " " in used_name:
-                fallback = used_name.replace(" ", "")
-                self._run(["-i", video, "-vf", _vf(fallback)] + args_tail)
-                used_name = fallback
+                used_name = used_name.replace(" ", "")
+                _burn(used_name)
             else:
                 raise
         return {"path": output, "duration": self.duration(output),
                 "font_size": px, "margin_v": mv, "font_name": used_name,
-                "original_size": f"{vw}x{vh}"}
+                "original_size": f"{vw}x{vh}", "ass_path": ass_path}
 
 
 def is_configured() -> bool:
