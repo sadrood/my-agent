@@ -81,15 +81,26 @@ class FileTool(BaseTool):
         }
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
+        """结构化入口：**直接按字段取值**，不再回落到字符串解码。
+
+        回归（实测）：此前把 JSON 参数拼成 `"write <path> <content>"` 再交给
+        execute() 按空格切分，于是路径里只要有空格就会写错文件——
+        `{"path": "C:\\My Documents\\notes.txt"}` 实际写出一个名为 `My` 的文件，
+        内容变成 `Documents\\notes.txt hello`，而且返回 success=True。
+        静默写错文件比报错危险得多，所以结构化路径必须直连实现。
+        """
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
-        content = arguments.get("content", "")
+        content = str(arguments.get("content", ""))
 
-        if operation in ("write", "append"):
-            return self.execute(f"{operation} {path} {content}")
-        if operation in ("copy", "move"):
-            dest = str(arguments.get("destination", "")).strip()
-            return self.execute(f"{operation} {path} {dest}")
+        if operation == "write":
+            return self._do_write(path, content)
+        if operation == "append":
+            return self._do_append(path, content)
+        if operation == "copy":
+            return self._do_copy(path, str(arguments.get("destination", "")).strip())
+        if operation == "move":
+            return self._do_move(path, str(arguments.get("destination", "")).strip())
         if operation in ("read", "list", "exists", "info"):
             return self.execute(f"{operation} {path}")
         return ToolResult(
@@ -160,14 +171,15 @@ class FileTool(BaseTool):
             return ToolResult(success=False, output="", error=str(e))
 
     def _write_file(self, args: str) -> ToolResult:
-        """args 格式: <路径> <内容>"""
+        """字符串入口：``<路径> <内容>``（路径含空格请用 execute_json）。"""
         parts = args.split(maxsplit=1)
         if len(parts) < 2:
             return ToolResult(
                 success=False, output="", error="写入操作需要: write <路径> <内容>"
             )
-        path = parts[0].strip()
-        content = parts[1]
+        return self._do_write(parts[0].strip(), parts[1])
+
+    def _do_write(self, path: str, content: str) -> ToolResult:
         # diff 追踪：写入前留旧内容快照（新建文件为 None）
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
@@ -182,14 +194,15 @@ class FileTool(BaseTool):
             return ToolResult(success=False, output="", error=str(e))
 
     def _append_file(self, args: str) -> ToolResult:
-        """args 格式: <路径> <内容>（追加到文件末尾，文件不存在则创建）。"""
+        """字符串入口：``<路径> <内容>``（路径含空格请用 execute_json）。"""
         parts = args.split(maxsplit=1)
         if len(parts) < 2:
             return ToolResult(
                 success=False, output="", error="追加操作需要: append <路径> <内容>"
             )
-        path = parts[0].strip()
-        content = parts[1]
+        return self._do_append(parts[0].strip(), parts[1])
+
+    def _do_append(self, path: str, content: str) -> ToolResult:
         # diff 追踪：追加前留旧内容快照，便于展示增量 diff
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
@@ -208,13 +221,19 @@ class FileTool(BaseTool):
             return ToolResult(success=False, output="", error=str(e))
 
     def _copy(self, args: str) -> ToolResult:
-        """args 格式: <源路径> <目标路径>。目录递归复制；目标为已存在目录时复制到其中。"""
+        """字符串入口：``<源路径> <目标路径>``（源路径含空格请用 execute_json）。"""
         parts = args.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             return ToolResult(
                 success=False, output="", error="复制操作需要: copy <源路径> <目标路径>"
             )
-        src, dst = parts[0].strip(), parts[1].strip()
+        return self._do_copy(parts[0].strip(), parts[1].strip())
+
+    def _do_copy(self, src: str, dst: str) -> ToolResult:
+        if not src or not dst:
+            return ToolResult(
+                success=False, output="", error="复制操作需要: copy <源路径> <目标路径>"
+            )
         if not os.path.exists(src):
             return ToolResult(success=False, output="", error=f"源路径不存在: {src}")
         try:
@@ -239,13 +258,19 @@ class FileTool(BaseTool):
             return ToolResult(success=False, output="", error=str(e))
 
     def _move(self, args: str) -> ToolResult:
-        """args 格式: <源路径> <目标路径>（移动或重命名）。"""
+        """字符串入口：``<源路径> <目标路径>``（源路径含空格请用 execute_json）。"""
         parts = args.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             return ToolResult(
                 success=False, output="", error="移动操作需要: move <源路径> <目标路径>"
             )
-        src, dst = parts[0].strip(), parts[1].strip()
+        return self._do_move(parts[0].strip(), parts[1].strip())
+
+    def _do_move(self, src: str, dst: str) -> ToolResult:
+        if not src or not dst:
+            return ToolResult(
+                success=False, output="", error="移动操作需要: move <源路径> <目标路径>"
+            )
         if not os.path.exists(src):
             return ToolResult(success=False, output="", error=f"源路径不存在: {src}")
         try:
