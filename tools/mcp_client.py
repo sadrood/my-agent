@@ -96,6 +96,16 @@ class MCPTool(BaseTool):
                 texts = [c.get("text", str(c)) for c in content if isinstance(c, dict)]
                 return ToolResult(success=True, output="\n".join(texts) or str(result))
 
+        if result is None:
+            # 旧代码在这里返回 success=True, output="None" —— 超时/进程崩溃/
+            # JSON-RPC 报错/管道断全都被伪装成"成功"，模型拿到一个字面量
+            # "None" 完全无法判断发生了什么（本仓库反复踩过的"无用报错"坑）。
+            return ToolResult(
+                success=False, output="",
+                error=("MCP 工具无响应：请求超时、服务器未连接或已崩溃。"
+                       "可用 mcp 的 status/重连，或改用其他方式完成该步骤。"),
+            )
+
         return ToolResult(success=True, output=str(result))
 
     def execute(self, input_str: str) -> ToolResult:
@@ -199,7 +209,11 @@ class MCPClient:
                 shell=use_shell,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                # stderr 必须给 DEVNULL：stdio MCP 服务器（尤其 npx/node 系）
+                # 打日志很勤，管道只开不读的话，写满 ~64KB 缓冲区后子进程会
+                # 永久阻塞在 write 上，此后每个请求都超时——表现为"工具返回
+                # None"这种毫无线索的失败。
+                stderr=subprocess.DEVNULL,
                 text=True,
                 # 关键：MCP 走 UTF-8 JSON-RPC；Windows 下 text=True 默认 cp936，
                 # 不指定会把手套帧解成乱码导致握手失败（此前 playwright-mcp 连不上）
@@ -216,6 +230,10 @@ class MCPClient:
             "process": process,
             "command": command,
             "args": args,
+            # 每台服务器各自一把锁：此前所有服务器共用实例级 _lock，
+            # 一台慢服务器会把其它服务器的请求一起卡住（最长 15s/次）
+            "name": server_name,
+            "lock": threading.Lock(),
         }
 
         # 初始化握手
@@ -264,6 +282,8 @@ class MCPClient:
                 "headers": headers or {},
                 "session_id": str(uuid.uuid4()),
                 "last_event_id": None,
+                "name": server_name,
+                "lock": threading.Lock(),
             }
             
             print(f"[MCP] 已连接 SSE 服务器 '{server_name}': {url}")
@@ -421,7 +441,8 @@ class MCPClient:
             return None
 
         try:
-            with self._lock:
+            lock = server.get("lock") or self._lock
+            with lock:
                 request_id = request.get("id")
                 request_str = json.dumps(request) + "\n"
                 process.stdin.write(request_str)
@@ -431,9 +452,15 @@ class MCPClient:
                 while time.time() < deadline:
                     line = self._readline_timeout(process.stdout, deadline)
                     if line is None:
-                        print(f"[MCP] 等待响应超时（{timeout}s）")
+                        # 超时即判定该服务器已不可用并断开：
+                        # 读者线程仍阻塞在 readline 上并持有管道，若不断开，
+                        # 迟到的响应会被这个已废弃的请求吃掉，下一个请求
+                        # 永远等不到自己的回包（协议错位）。
+                        print(f"[MCP] 等待响应超时（{timeout}s），断开该服务器")
+                        self._mark_dead(server)
                         return None
                     if not line:
+                        self._mark_dead(server)
                         return None                      # EOF
                     try:
                         msg = json.loads(line.strip())
@@ -450,7 +477,23 @@ class MCPClient:
                 return None
         except (BrokenPipeError, OSError, json.JSONDecodeError) as e:
             print(f"[MCP] stdio 通信失败: {e}")
+            self._mark_dead(server)
             return None
+
+    def _mark_dead(self, server: dict) -> None:
+        """把某台服务器标记为不可用并清理其进程（幂等、绝不抛错）。"""
+        name = server.get("name")
+        try:
+            proc = server.get("process")
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+        if name:
+            try:
+                self.disconnect(name)
+            except Exception:
+                pass
 
     @staticmethod
     def _readline_timeout(stream, deadline: float) -> Optional[str]:

@@ -130,6 +130,9 @@ VISION_CONFIG = {
     "enabled": os.getenv("VISION_ENABLED", "true").lower() == "true",
     "api_key": os.getenv("VISION_API_KEY", "") or LLM_CONFIG["api_key"],
     "base_url": os.getenv("VISION_BASE_URL", "") or LLM_CONFIG["base_url"],
+    # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
+    # browser visionclick 仅 60s），必须显式收紧
+    "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
 }
 
 # ============================================================
