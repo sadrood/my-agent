@@ -12,6 +12,21 @@ from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
+_ROLE_EXTS = (".wav", ".mp3", ".m4a", ".flac")
+
+
+def _list_role_files(ref_dir: str) -> list:
+    """列出角色声线库（TTS_REFERENCE_DIR）里的角色名。"""
+    import os
+    if not ref_dir or not os.path.isdir(ref_dir):
+        return []
+    return sorted(
+        fn[: -len(ext)] if fn.lower().endswith(ext) else fn
+        for fn in os.listdir(ref_dir)
+        for ext in _ROLE_EXTS
+        if fn.lower().endswith(ext)
+    )
+
 
 class TTSTool(BaseTool):
     """文字转语音工具（配音）。"""
@@ -44,6 +59,9 @@ class TTSTool(BaseTool):
                 head
                 + "用法：tts(command=\"speak\", text=\"台词\")"
                 "（可传 voice 覆盖；模型不支持时该参数会被忽略）。\n"
+                "多角色配音：voice 传角色名（如 voice=\"linshen\"），"
+                "会自动命中角色声线库里的同名参考样本做克隆绑定，"
+                "同一角色音色恒定不偏移（见 TTS_REFERENCE_DIR）。\n"
                 "tts(command=\"voices\") 查看当前供应商与音色说明。\n"
                 "提示：合成后用 video_edit 的 add_audio 把配音合到画面上；"
                 "若配音比画面长，用 video_edit 的 probe 读出两者时长再调整。"
@@ -143,6 +161,16 @@ class TTSTool(BaseTool):
                          "默认音色即内置）")
             ref = TTS_CONFIG.get("reference_audio", "")
             lines.append(f"  声音克隆参考样本: {ref or '未配置（TTS_REFERENCE_AUDIO 可开启）'}")
+            ref_dir = TTS_CONFIG.get("reference_dir", "")
+            roles = _list_role_files(ref_dir)
+            if roles:
+                lines.append(f"  角色声线库（{len(roles)} 个角色，"
+                             "voice=角色名 启用对应克隆）:")
+                for role in roles:
+                    lines.append(f"    - {role}")
+            else:
+                lines.append("  角色声线库: 未配置（TTS_REFERENCE_DIR 指向"
+                             "参考样本目录即可启用，如 ./output/.../role_refs）")
             lines.append("  提示：若不传 voice，请求会交由模型默认音色合成。")
             return ToolResult(success=True, output="\n".join(lines))
         lines.append("可用中文音色（传简称或完整名均可）:")
@@ -179,6 +207,10 @@ class TTSTool(BaseTool):
                  f"供应商: {r.get('provider')} · 音色/模型: {r.get('voice')}"
                  f" · 字数: {r.get('chars')}"
                  + (f" · 时长: {dur:.2f}s" if dur else "")]
+        if r.get("reference"):
+            # 角色声线库命中：明示这次用的参考样本，便于核对绑定是否偏移
+            lines.append(f"🔒 角色声线绑定: {r['reference']}"
+                         "（同角色所有台词都用这份参考样本 → 音色恒定）")
         if r.get("fallback_from"):
             # 降级必须可见：免费档不保证可用性，静默兜底会掩盖真实故障
             lines.append(f"⚠️ 已降级：{r['fallback_from']} 失败，改用 edge-tts 兜底"

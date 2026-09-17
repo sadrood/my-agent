@@ -221,8 +221,30 @@ TTS_CONFIG = {
     # 声音克隆（fish-audio S2.1 Pro 等支持）：参考音频 + 其文字稿（可选）
     "reference_audio": os.getenv("TTS_REFERENCE_AUDIO", ""),
     "reference_text": os.getenv("TTS_REFERENCE_TEXT", ""),
+    # 角色声线库（多角色配音用）：一个目录，每个文件是一个角色的克隆参考样本，
+    # 命名 {角色名}.wav|mp3（如 linshen.wav / hugong.wav）。
+    # 合成时传 voice=角色名，会自动带上对应参考样本 → 同角色音色恒定不偏移。
+    # 优先级高于上面的全局 reference_audio；目录为空则退回全局参考。
+    "reference_dir": os.getenv("TTS_REFERENCE_DIR", ""),
     # OpenRouter 失败时是否回退 edge-tts（免费档"不保证可用性"，兜底更稳）
     "fallback_edge": os.getenv("TTS_FALLBACK_EDGE", "true").lower() == "true",
+}
+
+# ============================================================
+# Toonflow 对接配置（外部 AI 短剧工厂，由 agent 通过其 REST API 驱动）
+# ============================================================
+# Toonflow（https://github.com/HBAI-Ltd/Toonflow-app）是独立的短剧生产工具：
+# 自带 Express 后端（默认 127.0.0.1:10588）与 169 个 /api 路由，覆盖
+# 原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片 全流程。agent 通过 HTTP 驱动它。
+# ⚠️ 仅限本机使用：默认账号 admin/admin123、密码明文比对、token 有效期 180 天。
+TOONFLOW_CONFIG = {
+    "enabled": os.getenv("TOONFLOW_ENABLED", "true").lower() == "true",
+    "base_url": os.getenv("TOONFLOW_BASE_URL", "http://127.0.0.1:10588").rstrip("/"),
+    "username": os.getenv("TOONFLOW_USERNAME", "admin"),
+    "password": os.getenv("TOONFLOW_PASSWORD", "admin123"),
+    "timeout": float(os.getenv("TOONFLOW_TIMEOUT", "60")),
+    # 单次回给模型的 JSON 字符上限（部分路由会返回整表数据）
+    "max_chars": int(os.getenv("TOONFLOW_MAX_CHARS", "6000")),
 }
 
 # ============================================================

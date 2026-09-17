@@ -147,6 +147,15 @@ class ToolManager:
         except Exception:
             pass
 
+        # Toonflow 短剧工厂对接（外部 REST 服务，可选；不在跑也不影响其它工具）
+        try:
+            from config import TOONFLOW_CONFIG
+            if TOONFLOW_CONFIG.get("enabled", True):
+                from tools.toonflow import ToonflowTool
+                self.register(ToonflowTool())
+        except Exception:
+            pass
+
     def register(self, tool: BaseTool):
         """
         注册一个工具。
