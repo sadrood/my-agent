@@ -41,4 +41,10 @@ def test_run_agent_mcp_config_built():
     assert cfg.approval_policy == "never"
     assert cfg.approval_interactive is False
     assert cfg.guardian_enabled is False
-    assert cfg.rollout_enabled is True
+    # 不能硬断言 True：该字段默认值来自 ROLLOUT_CONFIG，而它读的是 .env
+    # （ROLLOUT_ENABLED / MY_AGENT_MINIMAL）——实测在 ROLLOUT_ENABLED=false 或
+    # MY_AGENT_MINIMAL=1 的环境下这条会失败，属于"测试依赖开发者环境"。
+    # 这里断言的是"显式传入的值被尊重"，与 .env 无关。
+    from config import ROLLOUT_CONFIG
+    assert cfg.rollout_enabled == ROLLOUT_CONFIG["enabled"]
+    assert AgentConfig(rollout_enabled=True).rollout_enabled is True
