@@ -182,18 +182,44 @@ VIDEO_GEN_CONFIG = {
 }
 
 # ============================================================
-# 语音合成配置（edge-tts：微软在线语音，免费、中文多音色）
+# 语音合成配置（配音：多供应商）
 # ============================================================
 # 用于漫剧/短视频配音：文字 → mp3，再由 video_edit 的 add_audio 合到画面。
+# 供应商：
+#   edge       —— 微软 Edge 在线语音（免费、免 key、中文多音色，默认）
+#   openrouter —— OpenRouter 的 /api/v1/audio/speech（OpenAI 兼容），
+#                 可挂 fish-audio 等 TTS 模型；按字符计费，":free" 变体 0 元
 TTS_CONFIG = {
     "enabled": os.getenv("TTS_ENABLED", "true").lower() == "true",
-    # 默认音色（简短别名，见 models/tts.py ZH_VOICES）：
+    "provider": os.getenv("TTS_PROVIDER", "edge").strip().lower(),
+    # 默认音色（edge 的简短别名，见 models/tts.py ZH_VOICES）：
     #   xiaoxiao 女声温柔 / yunxi 男声年轻 / yunjian 男声沉稳解说
     "voice": os.getenv("TTS_VOICE", "xiaoxiao"),
-    "rate": os.getenv("TTS_RATE", "+0%"),      # 语速，如 +20%
-    "volume": os.getenv("TTS_VOLUME", "+0%"),  # 音量，如 +20%
+    "rate": os.getenv("TTS_RATE", "+0%"),      # 语速（仅 edge 支持），如 +20%
+    "volume": os.getenv("TTS_VOLUME", "+0%"),  # 音量（仅 edge 支持），如 +20%
     "save_dir": os.getenv("TTS_SAVE_DIR", "./generated_audio"),
     "timeout": float(os.getenv("TTS_TIMEOUT", "60")),
+    # --- openrouter 供应商 ---
+    # 专用 key 优先；也接受通用的 OPENROUTER_API_KEY
+    "openrouter_api_key": (os.getenv("TTS_OPENROUTER_API_KEY")
+                           or os.getenv("OPENROUTER_API_KEY", "")),
+    "openrouter_base_url": os.getenv("TTS_OPENROUTER_BASE_URL",
+                                     "https://openrouter.ai/api/v1"),
+    "model": os.getenv("TTS_MODEL", "fish-audio/s2.1-pro-free:free"),
+    # openrouter 的音色由模型决定：默认留空＝用模型内置默认音色。
+    # 注意别把 edge 的音色别名（xiaoxiao 等）填这里——上游会报 Invalid voice。
+    "openrouter_voice": os.getenv("TTS_OPENROUTER_VOICE", ""),
+    # 输出格式：mp3（默认）/ pcm / wav —— 按模型支持情况填写
+    "response_format": os.getenv("TTS_RESPONSE_FORMAT", "mp3"),
+    # 站点归属头（可选，OpenRouter 官方示例里的 HTTP-Referer / X-OpenRouter-Title，
+    # 仅用于 openrouter.ai 的排行榜统计，不影响请求结果）
+    "referer": os.getenv("TTS_OPENROUTER_REFERER", ""),
+    "title": os.getenv("TTS_OPENROUTER_TITLE", "my_agent"),
+    # 声音克隆（fish-audio S2.1 Pro 等支持）：参考音频 + 其文字稿（可选）
+    "reference_audio": os.getenv("TTS_REFERENCE_AUDIO", ""),
+    "reference_text": os.getenv("TTS_REFERENCE_TEXT", ""),
+    # OpenRouter 失败时是否回退 edge-tts（免费档"不保证可用性"，兜底更稳）
+    "fallback_edge": os.getenv("TTS_FALLBACK_EDGE", "true").lower() == "true",
 }
 
 # ============================================================

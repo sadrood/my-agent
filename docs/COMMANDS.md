@@ -151,22 +151,58 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 
 ## 三·七、语音合成（配音）
 
-- 工具：`tts`（底层 edge-tts，微软在线语音，**免费**）
-  ```
-  tts(command="speak", text="从前有座山", voice="yunxi", rate="+10%")
-  tts(command="voices")            # 列出可用中文音色
-  ```
+- 工具：`tts`，两种供应商由 `TTS_PROVIDER` 切换：
+
+### 供应商 A：`edge`（默认，免费、免 key）
+
+```
+tts(command="speak", text="从前有座山", voice="yunxi", rate="+10%")
+tts(command="voices")            # 列出可用中文音色
+```
 - 音色别名：`xiaoxiao`(女·温柔) `xiaoyi`(女·活泼) `yunxi`(男·年轻)
   `yunjian`(男·沉稳解说) `yunyang`(男·新闻) `yunxia`(男·少年)
   `liaoning`(东北话) `shaanxi`(陕西话)；也可传完整名 `zh-CN-YunxiNeural`
-- 产物落在 `./generated_audio/`（mp3），返回路径与时长，供 `video_edit` 合成。
-- 配置：
-  ```
-  TTS_ENABLED=true
-  TTS_VOICE=xiaoxiao
-  TTS_RATE=+0%
-  TTS_SAVE_DIR=./generated_audio
-  ```
+
+### 供应商 B：`openrouter`（可挂 fish-audio 等 TTS 模型）
+
+```
+tts(command="speak", text="有些告别，要重复七次。")
+tts(command="voices")            # 显示当前模型与克隆参考样本状态
+```
+- 走 OpenRouter 的 `/api/v1/audio/speech`（OpenAI 兼容），按字符计费；
+  `:free` 变体 0 元（如 `fish-audio/s2.1-pro-free:free`，多语言、有表现力）。
+- **音色**：由模型决定；fish-audio 没有预设音色目录，不传 `voice` 即用内置默认音色。
+  ⚠️ 别把 edge 的音色别名填进 openrouter——上游会报 `Invalid voice`（代码会自动
+  忽略并留痕，但显式配置更清楚，用 `TTS_OPENROUTER_VOICE`）。
+- **声音克隆**（模型支持时，如付费版 `fish-audio/s2.1-pro`）：在 `.env` 填
+  `TTS_REFERENCE_AUDIO=<参考音频路径>` 与 `TTS_REFERENCE_TEXT=<该音频的文字稿>`，
+  即可用参考音色合成。免费版实测也能受理克隆请求。
+- **兜底**：`TTS_FALLBACK_EDGE=true`（默认）时，OpenRouter 失败会自动回退
+  edge-tts，并在工具输出里标注「已降级」——免费档不保证可用性。
+
+### 配置
+
+```
+# 通用
+TTS_ENABLED=true
+TTS_PROVIDER=edge               # edge | openrouter
+TTS_SAVE_DIR=./generated_audio
+
+# TTS_PROVIDER=edge 时
+TTS_VOICE=xiaoxiao
+TTS_RATE=+0%
+
+# TTS_PROVIDER=openrouter 时
+TTS_OPENROUTER_API_KEY=         # 留空则读 OPENROUTER_API_KEY
+TTS_MODEL=fish-audio/s2.1-pro-free:free
+TTS_RESPONSE_FORMAT=mp3         # mp3（默认）/ pcm
+TTS_OPENROUTER_VOICE=           # 留空＝模型默认音色
+TTS_OPENROUTER_REFERER=         # 可选，OpenRouter 榜单归属
+TTS_OPENROUTER_TITLE=my_agent
+TTS_REFERENCE_AUDIO=            # 声音克隆参考样本（可选）
+TTS_FALLBACK_EDGE=true
+```
+- 产物落在 `./generated_audio/`（mp3/wav），返回路径与时长，供 `video_edit` 合成。
 
 ## 三·八、视频剪辑与合成（漫剧路线）
 
