@@ -15,7 +15,6 @@ import base64
 import mimetypes
 import os
 from datetime import datetime
-from typing import Optional
 
 from config import TTS_CONFIG
 

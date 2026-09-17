@@ -84,29 +84,6 @@ class ChangeTracker:
         except (OSError, UnicodeDecodeError):
             return None
 
-    def record(self, path: str, tool: str) -> None:
-        """在**写操作成功后**调用。内部自行快照旧内容语义如下：
-        首次记录时快照应为"修改前内容"——因此调用方要在写入前先调
-        snapshot_before()，写入后再调 commit()；本方法是两步的便捷封装
-        （适用于调用方能拿到旧内容的场景）。"""
-        abs_path = self._norm(path)
-        with self._lock:
-            rec = self._records.get(abs_path)
-            if rec is not None:
-                rec.writes += 1
-                return
-            if len(self._records) >= self._max_paths:
-                return  # 超限静默降级
-        # 注意：这里假定调用时尚未写入（供 write 工具在打开文件前调用）
-        old = self._snapshot(abs_path)
-        is_new = not os.path.exists(abs_path)
-        with self._lock:
-            # 双重检查：等待快照期间可能已有其他线程记录
-            if abs_path in self._records:
-                self._records[abs_path].writes += 1
-                return
-            self._records[abs_path] = ChangeRecord(abs_path, old, is_new, tool)
-
     def record_with_old(self, path: str, tool: str, old_content: Optional[str]) -> None:
         """调用方已持有修改前内容时直接登记（edit 工具场景）。"""
         abs_path = self._norm(path)

@@ -9,7 +9,6 @@
 import base64
 import json
 import re
-from typing import Optional
 
 from openai import OpenAI
 from config import LLM_CONFIG, VISION_CONFIG

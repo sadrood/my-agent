@@ -18,7 +18,7 @@ OpenAI 兼容提供方的兼容性最好。
 import base64
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 import httpx
 
