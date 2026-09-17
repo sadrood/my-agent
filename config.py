@@ -349,6 +349,8 @@ APPROVAL_CONFIG = {
     "interactive": os.getenv("APPROVAL_INTERACTIVE", "true").lower() == "true",
     "default_answer_when_not_interactive": os.getenv("APPROVAL_NONINTERACTIVE_ANSWER", "deny"),
     "workspace_dir": os.getenv("APPROVAL_WORKSPACE_DIR", os.getcwd()),
+    # 审批决策日志最多保留条数（长驻进程里只增不减会越用越慢；只影响报表口径）
+    "decision_log_max": int(os.getenv("APPROVAL_DECISION_LOG_MAX", "200")),
     "dangerous_requires_approval": os.getenv("APPROVAL_DANGEROUS_REQUIRES", "true").lower() == "true",
     # 命令白名单（深度防御）：true = 终端命令只有命中白名单才按原策略放行，
     # 未命中的一律升级为需人工批准（never/无人值守下直接拒绝）。
@@ -431,6 +433,8 @@ SESSION_CONFIG = {
     "enabled": os.getenv("SESSION_ENABLED", "true").lower() == "true",
     "dir": os.getenv("SESSION_DIR", "./memory/sessions"),
     "max_sessions": int(os.getenv("SESSION_MAX", "50")),
+    # 单个对话文件超过该体积就提示压缩（会话每轮整份重写，且是唯一副本）
+    "warn_size_mb": float(os.getenv("SESSION_WARN_SIZE_MB", "20")),
     # 继续任务时注入上下文的"之前对话"条数（含当前句；注入 recent[:-1]）
     "context_messages": int(os.getenv("SESSION_CONTEXT_MESSAGES", "12")),
     # 上轮未完成（上限/停止）时自动放宽的回忆预算
