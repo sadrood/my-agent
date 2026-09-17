@@ -123,11 +123,30 @@ class TestTokenEstimate:
             {"role": "tool", "tool_call_id": "c1", "content": "ok"},
         ]
         est = Executor._estimate_tokens(msgs)
-        assert est > 9000, (
+        # 30000 个 ASCII 字符 ≈ 7500 token；只数 content 的话这里≈0
+        assert est > 5000, (
             f"tool_calls 的 arguments 未计入估算（得到 {est}），"
             "会导致压缩触发过晚、上下文先撑爆上游窗口"
         )
 
-    def test_plain_messages_still_estimated(self):
-        assert Executor._estimate_tokens(
-            [{"role": "user", "content": "x" * 300}]) == 100
+    def test_cjk_counted_near_one_token_per_char(self):
+        """中文一字≈1 token，不能被"字符数/3"低估。
+
+        实测：旧实现把「你好世界」估成 1（实际 4，低估 4 倍），36 字中文句子
+        低估 3.1 倍。压缩阈值是窗口的 0.75，低估会让压缩迟迟不触发，
+        真触发时上下文早已超过上游窗口 → 直接 400（长中文会话必踩）。
+        """
+        assert Executor._estimate_tokens([{"role": "user", "content": "你好世界"}]) == 4
+        assert Executor._estimate_tokens([{"role": "user", "content": "中" * 100}]) >= 90
+
+    def test_ascii_uses_quarter_ratio(self):
+        """英文按 ≈4 字符/token 估算。"""
+        assert Executor._estimate_tokens([{"role": "user", "content": "x" * 400}]) == 100
+
+    def test_multimodal_text_parts_counted(self):
+        """多模态 content 数组里的 text 部分也要计入。"""
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "中" * 50},
+            {"type": "image_url", "image_url": {"url": "data:..."}},
+        ]}]
+        assert Executor._estimate_tokens(msgs) >= 45

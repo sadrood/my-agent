@@ -61,6 +61,38 @@ class TestBrowserSessionContinuity:
         assert "3 个标签页" in note
         assert "仍在运行" in note
 
+    def test_note_does_not_launch_browser(self, monkeypatch):
+        """回归：写交接备注绝不能顺手把浏览器拉起来。
+
+        实测故障：`_pages` 里只剩残留引用（底层连接已断）时，取 URL 会走
+        `_ensure_page → _launch`，于是这条只读备注真的开出一个**有头** Chromium
+        并占用用户 profile——单测跑一次就往 memory/browser_profile 里塞十几 MB
+        （该目录实测已涨到 250MB）。
+        """
+        a = self._agent()
+        b = a.tool_manager.get_tool("browser")
+        b._pages = [object()]
+        called = []
+        monkeypatch.setattr(b, "execute",
+                            lambda *args, **kw: called.append(args) or None)
+        monkeypatch.setattr(b, "_is_browser_alive", lambda: False)
+        note = a._browser_session_note()
+        assert called == [], "浏览器未存活时不该调用 execute（会触发 launch）"
+        assert "1 个标签页" in note and "仍在运行" in note
+
+    def test_note_fetches_url_when_alive(self, monkeypatch):
+        """浏览器确实存活时，仍要带上当前 URL（交接信息才有用）。"""
+        from tools.base import ToolResult
+
+        a = self._agent()
+        b = a.tool_manager.get_tool("browser")
+        b._pages = [object()]
+        monkeypatch.setattr(b, "_is_browser_alive", lambda: True)
+        monkeypatch.setattr(b, "execute", lambda *args, **kw: ToolResult(
+            success=True, output="当前页面 URL: https://example.com/x"))
+        note = a._browser_session_note()
+        assert "example.com" in note
+
     def test_handoff_rule_forbids_closing_browser(self, monkeypatch):
         """交接清单里必须带"不要 close / 不要 launch"的约束。"""
         a = self._agent()

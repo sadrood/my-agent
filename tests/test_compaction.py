@@ -51,8 +51,15 @@ def test_no_compact_under_threshold():
 
 
 def test_estimate_tokens():
+    """估算改为 CJK 感知（英文≈4 字符/token）。
+
+    旧断言 `"a"*30 == 10` 编码的是"字符数/3"的老公式；该公式把中文低估 3~4 倍
+    （实测「你好世界」→1 vs 实际 4），会让压缩迟迟不触发、最终撞上游窗口 400。
+    现复用 agent/rollout.py 的估算：英文按 4 字符/token、中文按 1 字符/token。
+    """
     ex = _make(FakeLLM())
-    assert ex._estimate_tokens([{"role": "user", "content": "a" * 30}]) == 10
+    assert ex._estimate_tokens([{"role": "user", "content": "a" * 40}]) == 10
+    assert ex._estimate_tokens([{"role": "user", "content": "中" * 10}]) == 10
 
 
 def test_summarize_failure_is_safe():
