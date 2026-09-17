@@ -90,11 +90,24 @@ class RunMetrics:
         return sum(self.first_token_seconds) / len(self.first_token_seconds)
 
     @property
-    def tokens_per_sec(self) -> float:
-        if self.first_token_seconds and self.llm_seconds > 0:
-            # 速率 = 输出 token / 流式输出时长（LLM 总耗时）
-            return self.output_tokens / self.llm_seconds if self.llm_seconds > 0 else 0.0
-        return 0.0
+    def decode_seconds(self) -> float:
+        """纯解码时长 = LLM 总耗时 − 各次首 token 等待。"""
+        return max(0.0, self.llm_seconds - sum(self.first_token_seconds))
+
+    @property
+    def tokens_per_sec(self) -> Optional[float]:
+        """输出速率；无法可靠计算时返回 None（应显示"—"而不是 0.0）。
+
+        旧实现分母用 llm_seconds（把首 token 延迟也算成生成时间 → 速率被低估），
+        且在"没有首 token 记录"时（非流式回退路径）直接返回 0.0 却照样打印，
+        状态行于是显示一个看起来像实测值的 `0.0 tok/s`。
+        """
+        if not self.first_token_seconds or self.output_tokens <= 0:
+            return None
+        secs = self.decode_seconds
+        if secs <= 0:
+            return None
+        return self.output_tokens / secs
 
     @property
     def cache_hit_rate(self) -> float:
@@ -126,7 +139,11 @@ class RunMetrics:
             parts.append(f"首 token 平均 {avg:.2f}s" if avg < 1 else f"首 token 平均 {avg:.1f}s")
         if self.output_tokens > 0:
             rate = self.tokens_per_sec
-            parts.append(f"{rate:.1f} tok/s" if rate < 10 else f"{rate:.0f} tok/s")
+            # 测不出就明确显示"—"，不要打印一个像实测值的 0.0
+            if rate is None:
+                parts.append("tok/s —")
+            else:
+                parts.append(f"{rate:.1f} tok/s" if rate < 10 else f"{rate:.0f} tok/s")
         if self.input_tokens > 0:
             parts.append(f"缓存命中 {self.cache_hit_rate:.0%}")
         parts.append(f"输入 {humanize_tokens(self.input_tokens)}")

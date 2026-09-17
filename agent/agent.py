@@ -1172,8 +1172,11 @@ class Agent:
                     "cache_hit_rate": round(metrics.cache_hit_rate * 100.0, 2),
                     "llm_seconds": round(metrics.llm_seconds, 1),
                     "tool_seconds": round(metrics.tool_seconds, 1),
-                    "first_token_avg": round(metrics.first_token_avg, 2) if metrics.first_token_seconds else 0,
-                    "tokens_per_sec": round(metrics.tokens_per_sec, 1),
+                    "first_token_avg": round(metrics.first_token_avg, 2) if metrics.first_token_seconds else None,
+                    # None = 无法可靠计算（非流式路径没有首 token 数据），
+                    # 前端应显示"—"而不是把它当成 0 吞吐
+                    "tokens_per_sec": (round(metrics.tokens_per_sec, 1)
+                                       if metrics.tokens_per_sec is not None else None),
                     "model": getattr(getattr(self, "llm", None), "default_model", None)
                     or getattr(self.config, "model", None) or "",
                     "context_tokens": getattr(metrics, "last_context_tokens", 0),

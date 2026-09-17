@@ -34,7 +34,11 @@ class TestRunMetrics:
         assert m.output_tokens == 300
         assert m.cached_tokens == 1000
         assert m.first_token_avg == 3.0
-        assert m.tokens_per_sec == 300 / 15.0
+        # 速率分母是**纯解码时长**（LLM 总耗时 − 首 token 等待），
+        # 旧实现用 llm_seconds 当分母，会把首 token 延迟也算成生成时间，
+        # 系统性低估速率（此处 15s 里有 6s 是等首 token）
+        assert m.decode_seconds == 15.0 - 6.0
+        assert m.tokens_per_sec == 300 / 9.0
         assert m.cache_hit_rate == 1000 / 1500
         assert m.has_data() is True
 
