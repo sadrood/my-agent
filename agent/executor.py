@@ -925,10 +925,22 @@ class Executor:
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """粗略估算消息 token 数（CJK 混合：字符数 / 3）。"""
+        """粗略估算消息 token 数（CJK 混合：字符数 / 3）。
+
+        必须把 assistant 的 tool_calls 参数也算进去：写文件/长参数的工具调用
+        把内容全放在 arguments 里（content 为空），只数 content 会严重低估，
+        导致压缩触发太晚、上下文先把上游窗口撑爆。
+        """
         total = 0
         for m in messages:
             total += len(str(m.get("content", "")) or "")
+            tc = m.get("tool_calls")
+            if tc:
+                import json as _json
+                try:
+                    total += len(_json.dumps(tc, ensure_ascii=False))
+                except Exception:
+                    total += len(str(tc))
         return int(total / 3)
 
     def _compact_threshold(self) -> int:
@@ -957,6 +969,31 @@ class Executor:
             return messages
         old = messages[:-keep]
         recent = messages[-keep:]
+        # 截断点必须落在完整工具闭环之后：单循环里每轮会追加
+        # assistant(tool_calls) + N 条 tool 消息，盲切 messages[-keep:]
+        # 有 N/(N+2) 的概率正好切在 tool 中间，保留区就会以一条"孤立的 tool
+        # 消息"开头（它的 tool_calls 被切走了）→ 上游 400
+        # "Messages with role 'tool' must be a response to a preceding message
+        # with 'tool_calls'"，且无参数可赖，重试 3 次后整轮任务直接失败。
+        # 同一修法在 agent/rollout.py 早已落地，这里是默认路径上的漏网副本。
+        while recent and recent[0].get("role") == "tool":
+            start = len(messages) - len(recent) - 1
+            if start < 0:
+                break
+            prev = messages[start]
+            if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                # 连同它的 assistant(tool_calls) 一起留在保留区，保持对仗
+                recent = [prev] + recent
+                old = messages[:start]
+                break
+            # 前面不是配对消息：这条孤立 tool 只能裁掉
+            recent = recent[1:]
+            old = messages[:-len(recent)] if recent else messages
+        if not recent:
+            # 全被判成孤立 tool（极端情况）：宁可这轮不压缩，也不能只剩摘要
+            self._emit("compaction", {"ok": False,
+                                      "error": "保留区全为孤立 tool 消息，已跳过压缩"})
+            return messages
         try:
             summary = self._summarize_old(old)
         except Exception as e:
