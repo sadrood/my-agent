@@ -113,18 +113,34 @@ class VideoGenTool(BaseTool):
         return self._model
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
-        cmd = str(arguments.get("command") or "generate").strip().lower()
+        args = dict(arguments or {})
+        cmd = str(args.get("command") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
+        task_id = str(args.get("task_id") or "").strip()
+
+        # 容错：实测模型经常把整段提示词塞进 command、顺手漏掉 prompt
+        # （30 次调用里 7 次如此）。旧代码直接回 "未知命令: <两百字提示词>"，
+        # 模型只能重做一次——每次白等约 110 秒。这里按意图纠正，别让工具比
+        # 模型更死板；字符串入口 execute() 早就是宽松的，两条路径保持一致。
+        low = cmd.lower()
+        if low in ("", "generate", "gen", "create"):
+            cmd = "generate"
+        elif low == "status" or (task_id and not prompt):
+            cmd = "status"
+        else:
+            # command 不是已知命令：视作提示词（prompt 为空时），否则忽略它
+            if not prompt:
+                prompt = cmd
+            cmd = "generate"
+
         if cmd == "status":
-            return self._status(str(arguments.get("task_id") or "").strip())
-        if cmd != "generate":
-            return ToolResult(success=False, output="",
-                              error=f"未知命令: {cmd}（可用: generate / status）")
+            return self._status(task_id)
         return self._generate(
-            prompt=str(arguments.get("prompt") or "").strip(),
-            seconds=arguments.get("seconds") or None,
-            size=arguments.get("size") or None,
-            aspect_ratio=arguments.get("aspect_ratio") or None,
-            wait=arguments.get("wait", True) is not False,
+            prompt=prompt,
+            seconds=args.get("seconds") or None,
+            size=args.get("size") or None,
+            aspect_ratio=args.get("aspect_ratio") or None,
+            wait=args.get("wait", True) is not False,
         )
 
     def execute(self, input_str: str) -> ToolResult:

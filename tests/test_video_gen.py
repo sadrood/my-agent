@@ -145,6 +145,52 @@ class TestVideoGenModel:
         assert out["status"] == "failed"
         assert "审核" in out["error"]
 
+    def test_wait_survives_transient_429(self, tmp_path, monkeypatch):
+        """回归：轮询被限流不能判任务死刑。
+
+        实测（2026-09-17）6 秒一次的查询被上游拒绝 429 "查询过于频繁"，
+        旧实现直接抛错 → 模型重做整条视频，白烧一次配额（500 秒/天）外加
+        两分钟等待。现在应退避重试直到拿到结果。
+        """
+        import models.video_gen as vg
+        seq = [
+            ("err", 429, '{"error":{"code":429,"message":"查询过于频繁，请稍后重试"}}'),
+            ("err", 429, '{"error":{"code":429,"message":"查询过于频繁，请稍后重试"}}'),
+            ("ok", 200, {"status": "completed", "progress": 100, "url": VIDEO_URL}),
+        ]
+
+        def fake_get(url, headers=None, timeout=None):
+            kind, code, payload = seq.pop(0)
+            return FakeResponse(payload if kind == "ok" else None,
+                                status_code=code, content=str(payload))
+
+        monkeypatch.setattr(vg.httpx, "get", fake_get)
+        m = make_model(tmp_path)
+        m.poll_interval = 0
+        out = m.wait("task_1", max_wait=10)
+        assert out["status"] == "completed"
+        assert out["url"] == VIDEO_URL
+        assert out["timed_out"] is False
+
+    def test_wait_still_fails_fast_on_auth_error(self, tmp_path, monkeypatch):
+        """401/404 这类不是"待会儿再问就好"，必须立刻抛出，别无谓重试。"""
+        import models.video_gen as vg
+        monkeypatch.setattr(vg.httpx, "get",
+                            lambda url, headers=None, timeout=None:
+                            FakeResponse(None, status_code=401, content="bad key"))
+        m = make_model(tmp_path)
+        m.poll_interval = 0
+        with pytest.raises(RuntimeError, match="401"):
+            m.wait("task_1", max_wait=10)
+
+    def test_transient_classifier(self):
+        from models.video_gen import _is_transient_query_error
+        assert _is_transient_query_error(RuntimeError("查询失败 HTTP 429: 查询过于频繁"))
+        assert _is_transient_query_error(RuntimeError("HTTP 503: bad gateway"))
+        assert _is_transient_query_error(RuntimeError("视频任务查询失败: timeout"))
+        assert not _is_transient_query_error(RuntimeError("查询失败 HTTP 401: bad key"))
+        assert not _is_transient_query_error(RuntimeError("查询失败 HTTP 404: not found"))
+
     def test_generate_downloads_video(self, tmp_path, monkeypatch):
         import models.video_gen as vg
         monkeypatch.setattr(vg.httpx, "post", lambda url, json=None, headers=None,
@@ -210,12 +256,17 @@ class FakeModel:
         self._gen = gen or {}
         self._query = query_result or {}
         self.downloaded = []
+        self.generated = []      # 记录每次 generate 的参数，便于断言"没有误生成"
+        self.queried = []        # 记录每次 query 的 task_id
 
     def generate(self, prompt, seconds=None, size=None, aspect_ratio=None,
                  wait=True, **kw):
+        self.generated.append({"prompt": prompt, "seconds": seconds,
+                               "size": size, "aspect_ratio": aspect_ratio})
         return {**self._gen, "prompt": prompt}
 
     def query(self, task_id, model=None):
+        self.queried.append(task_id)
         return self._query
 
     def download(self, url, video_id=""):
@@ -282,9 +333,41 @@ class TestVideoGenTool:
         r = VideoGenTool(video_model=FakeModel()).execute_json({"command": "status"})
         assert r.success is False and "task_id" in r.error
 
-    def test_unknown_command(self):
-        r = VideoGenTool(video_model=FakeModel()).execute_json({"command": "boom"})
-        assert r.success is False and "未知命令" in r.error
+    def test_command_holding_prompt_is_tolerated(self):
+        """回归：模型常把整段提示词塞进 command、漏掉 prompt。
+
+        实测（2026-09-17 动漫漫剧任务）30 次 video_gen 调用里 7 次如此，旧实现
+        回一句"未知命令: <两百字提示词>"，模型只能整轮重做——每次白等约 110 秒。
+        现在按提示词处理，与字符串入口 execute() 的宽松语义一致。
+        """
+        fm = FakeModel(gen={"video_id": "t9", "status": "completed",
+                            "local_path": "/tmp/x.mp4"})
+        r = VideoGenTool(video_model=fm).execute_json(
+            {"command": "一只橘猫在窗台上打哈欠，特写，暖色夕阳"})
+        assert r.success is True, r.error
+        assert "未知命令" not in (r.error or "")
+        assert fm.generated and fm.generated[0]["prompt"].startswith("一只橘猫")
+
+    def test_explicit_prompt_wins_over_bogus_command(self):
+        """两个字段都在时以 prompt 为准，command 只当噪声忽略。"""
+        fm = FakeModel(gen={"video_id": "t9", "status": "completed",
+                            "local_path": "/tmp/x.mp4"})
+        r = VideoGenTool(video_model=fm).execute_json(
+            {"command": "生成一只猫", "prompt": "一只狗"})
+        assert r.success is True
+        assert fm.generated[0]["prompt"] == "一只狗"
+
+    def test_status_inferred_from_task_id(self):
+        """只给了 task_id（command 缺失/写错）也应走 status 而不是误生成。"""
+        fm = FakeModel(query_result={"status": "completed", "url": VIDEO_URL})
+        r = VideoGenTool(video_model=fm).execute_json({"command": "看看", "task_id": "t7"})
+        assert r.success is True
+        assert fm.generated == []          # 没有触发新生成
+        assert fm.queried == ["t7"]
+
+    def test_generate_without_prompt_still_errors(self):
+        r = VideoGenTool(video_model=FakeModel()).execute_json({"command": "generate"})
+        assert r.success is False and "prompt" in r.error
 
     def test_string_entry_generate_and_status(self):
         t = VideoGenTool(video_model=FakeModel(gen={
