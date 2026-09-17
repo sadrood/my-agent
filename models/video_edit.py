@@ -160,13 +160,16 @@ class VideoEditor:
         fmt = data.get("format") or {}
         streams = data.get("streams") or []
         video = next((s for s in streams if s.get("codec_type") == "video"), {})
-        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
         return {
             "duration": float(fmt.get("duration") or 0.0),
             "width": int(video.get("width") or 0),
             "height": int(video.get("height") or 0),
-            "has_audio": has_audio,
+            "has_audio": bool(audio),
             "size_bytes": int(fmt.get("size") or 0),
+            # 音轨规格（T5 校验用：混音后必须是 44100Hz 立体声）
+            "audio_sample_rate": int(audio.get("sample_rate") or 0),
+            "audio_channels": int(audio.get("channels") or 0),
         }
 
     def duration(self, path: str) -> float:
@@ -293,52 +296,91 @@ class VideoEditor:
 
     def add_audio(self, video: str, audio: str, output: str = None,
                   replace: bool = True, volume: float = 1.0,
-                  pad_audio: bool = True, fade_out: float = 0.0) -> dict:
-        """给视频叠加配音/BGM。
+                  pad_audio: bool = True, fade_out: float = 0.0,
+                  bgm: str = None, bgm_volume: float = 0.25,
+                  keep_original: bool = False) -> dict:
+        """给视频合成音轨：配音（+ 可选 BGM），默认**丢弃原视频声音**。
 
-        replace=True 丢弃原音轨（漫剧通常如此）；pad_audio=True 时若音轨比
-        画面短则补静音（到画面结束），保证整段都有声音、不被截断。
+        2026-09-17 修复三处实测问题：
+        - 层次可控（原「混音混入原声」）：`audio` 是主层，`bgm` 是背景层；
+          原视频音轨默认丢弃，只有 replace=False 或 keep_original=True 才混入。
+          漫剧因此可以「只混配音 + BGM 两层」，不再出现原声/环境音糊在一起。
+        - 时长以画面为准（原「音轨长于画面 → 容器被拉长、末尾冻帧」）：
+          统一 `-t <画面时长>`；音轨更短且 pad_audio=True 时补静音。
+        - 采样统一（原「混音后降级成 24k 单声道」）：所有音轨先
+          `aformat=44100/立体声`，输出 `-ar 44100`，避免被 TTS 的 24kHz 单声道拖累。
         """
         if not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
         if not os.path.exists(audio):
             raise VideoEditError(f"音频不存在: {audio}")
+        if bgm and not os.path.exists(bgm):
+            raise VideoEditError(f"BGM 不存在: {bgm}")
         output = output or self._out("voiced")
 
-        v_dur = self.duration(video)
-        a_dur = self.duration(audio)
-        args = ["-i", video, "-i", audio]
-        filters = []
-        if abs(volume - 1.0) > 1e-6:
-            filters.append(f"volume={volume:.2f}")
-        if pad_audio and v_dur and a_dur and a_dur < v_dur:
-            # 音轨不足 → 补静音（避免 -shortest 把画面截短）
-            filters.append(f"apad=pad_dur={v_dur - a_dur:.3f}")
-        if fade_out > 0:
-            filters.append(f"afade=t=out:st={max(0.0, v_dur - fade_out):.3f}:d={fade_out:.3f}")
+        v_dur = self.duration(video) or 0.0
+        a_dur = self.duration(audio) or 0.0
+        b_dur = (self.duration(bgm) or 0.0) if bgm else 0.0
+        try:
+            has_orig = bool(self.probe(video).get("has_audio"))
+        except VideoEditError:
+            has_orig = False
 
-        if replace:
-            args += ["-map", "0:v:0", "-map", "1:a:0"]
+        afmt = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+        inputs = ["-i", video, "-i", audio] + (["-i", bgm] if bgm else [])
+        chains: List[str] = []
+        layers: List[str] = []
+
+        # 主层：配音
+        dub = [afmt]
+        if abs(float(volume) - 1.0) > 1e-6:
+            dub.append(f"volume={float(volume):.2f}")
+        padded = bool(pad_audio and v_dur and a_dur and a_dur < v_dur)
+        if padded:
+            dub.append(f"apad=pad_dur={v_dur - a_dur:.3f}")
+        chains.append(f"[1:a]{','.join(dub)}[dub]")
+        layers.append("dub")
+
+        # 背景层：BGM（可选）
+        if bgm:
+            chains.append(f"[2:a]{afmt},volume={max(0.0, float(bgm_volume)):.2f}[bgm]")
+            layers.append("bgm")
+
+        # 原声层：默认不混（只有显式要求才保留）
+        dropped_original = False
+        if has_orig and (keep_original or not replace):
+            chains.append(f"[0:a]{afmt}[orig]")
+            layers.insert(0, "original")
+        elif has_orig:
+            dropped_original = True
+
+        if len(layers) > 1:
+            mix_in = "".join(f"[{name}]" for name in layers)
+            chains.append(f"{mix_in}amix=inputs={len(layers)}:"
+                          f"duration=longest:normalize=0[aout]")
         else:
-            # 混音：原音轨 + 新音轨
-            filters.insert(0, "[0:a][1:a]amix=inputs=2:duration=longest[aout]")
-            args += ["-filter_complex", ";".join(filters)]
-            args += ["-map", "0:v:0", "-map", "[aout]"]
-            filters = []
-            self._run(args + ["-c:v", "copy", "-c:a", "aac", "-shortest", output])
-            return {"path": output, "duration": self.duration(output),
-                    "video_duration": v_dur, "audio_duration": a_dur,
-                    "mixed": True}
+            chains.append(f"[{layers[0]}]anull[aout]")
 
-        if filters:
-            args += ["-af", ",".join(filters)]
-        args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
-        # 画面与音轨取长者（pad_audio 时音轨已补齐，故等价于画面时长）
-        args += ["-shortest"] if not pad_audio else []
-        self._run(args + [output])
+        if fade_out > 0 and v_dur:
+            chains.append(f"[aout]afade=t=out:st={max(0.0, v_dur - fade_out):.3f}:"
+                          f"d={float(fade_out):.3f}[aoutf]")
+            out_label = "[aoutf]"
+        else:
+            out_label = "[aout]"
+
+        args = inputs + ["-filter_complex", ";".join(chains),
+                         "-map", "0:v:0", "-map", out_label]
+        if v_dur:
+            args += ["-t", f"{v_dur:.3f}"]     # 画面为准：音轨再长也不拉长容器
+        args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                 "-movflags", "+faststart", output]
+        self._run(args)
         return {"path": output, "duration": self.duration(output),
                 "video_duration": v_dur, "audio_duration": a_dur,
-                "padded": bool(pad_audio and a_dur and v_dur and a_dur < v_dur)}
+                "bgm_duration": b_dur, "layers": layers,
+                "mixed": len(layers) > 1, "padded": padded,
+                "dropped_original": dropped_original,
+                "bounded_to_video": bool(v_dur)}
 
     def trim(self, video: str, start: float = 0.0, end: float = None,
              duration: float = None, output: str = None) -> dict:
@@ -355,22 +397,54 @@ class VideoEditor:
         return {"path": output, "duration": self.duration(output)}
 
     def subtitle(self, video: str, srt: str, output: str = None,
-                 font_size: int = 24) -> dict:
-        """烧录字幕（SRT）。注意：需重编码，比 copy 慢。"""
+                 font_size: int = None, font_name: str = "SimHei",
+                 margin_v: int = None, font_size_percent: float = 0.032,
+                 outline: int = 2) -> dict:
+        """烧录字幕（SRT）。
+
+        2026-09-17 修复「竖屏字幕占半屏」：SRT 自身没有 PlayRes，libass 会按默认
+        288 高度基准缩放——`FontSize=24` 在 1280 高视频上等于 8%+ 屏高。这里：
+        - `original_size=WxH` 把字幕坐标系对齐到视频尺寸
+        - `font_size` 缺省时按视频高度百分比换算（默认 3.2%），横竖屏观感一致
+        - `margin_v` 缺省为高度 6%，避免贴边
+        - 字体名带空格导致滤镜初始化失败时，自动回退去空格字体（并在返回值里记录）
+        """
         if not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
         if not os.path.exists(srt):
             raise VideoEditError(f"字幕文件不存在: {srt}")
         output = output or self._out("subbed")
-        # Windows 路径需转义给 subtitles 滤镜
-        sub = os.path.abspath(srt).replace("\\", "/").replace(":", "\\:")
-        style = (f"FontSize={font_size},PrimaryColour=&H00FFFFFF,"
-                 f"OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0")
-        self._run(["-i", video, "-vf",
-                   f"subtitles='{sub}':force_style='{style}'",
-                   "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-                   "-c:a", "copy", "-pix_fmt", "yuv420p", output])
-        return {"path": output, "duration": self.duration(output)}
+
+        info = self.probe(video)
+        vw = int(info.get("width") or self.width)
+        vh = int(info.get("height") or self.height)
+        px = int(font_size) if font_size else max(14, int(round(vh * float(font_size_percent))))
+        mv = int(margin_v) if margin_v else max(20, int(round(vh * 0.06)))
+
+        sub = os.path.abspath(srt).replace("\\", "/")
+        sub = sub.replace(":", "\\:")    # ffmpeg 滤镜内冒号需转义
+
+        def _vf(name: str) -> str:
+            style = (f"FontName={name},FontSize={px},PrimaryColour=&H00FFFFFF,"
+                     f"OutlineColour=&H00000000,BorderStyle=1,Outline={int(outline)},"
+                     f"Shadow=0,MarginV={mv}")
+            return f"subtitles='{sub}':original_size={vw}x{vh}:force_style='{style}'"
+
+        used_name = str(font_name or "SimHei")
+        args_tail = ["-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                     "-c:a", "copy", "-pix_fmt", "yuv420p", output]
+        try:
+            self._run(["-i", video, "-vf", _vf(used_name)] + args_tail)
+        except VideoEditError:
+            if " " in used_name:
+                fallback = used_name.replace(" ", "")
+                self._run(["-i", video, "-vf", _vf(fallback)] + args_tail)
+                used_name = fallback
+            else:
+                raise
+        return {"path": output, "duration": self.duration(output),
+                "font_size": px, "margin_v": mv, "font_name": used_name,
+                "original_size": f"{vw}x{vh}"}
 
 
 def is_configured() -> bool:
