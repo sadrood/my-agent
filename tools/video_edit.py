@@ -46,8 +46,12 @@ class VideoEditTool(BaseTool):
             "pan_down / static\n"
             "      **做漫剧/图文视频的主力命令**：不消耗视频生成配额，画面可控\n"
             "  concat — 按顺序拼接多段视频（自动尝试无损，参数不一致回退重编码）\n"
-            "  add_audio — 给视频叠配音/BGM（音轨短于画面时自动补静音，不截断画面）\n"
-            "  trim — 裁剪片段；probe — 读时长/分辨率；subtitle — 烧录 SRT 字幕\n\n"
+            "  add_audio — 合成音轨：audio=配音，bgm=背景音乐（可选）。\n"
+            "      **默认丢弃原视频声音**（避免原声/环境音/配音三层糊在一起）；\n"
+            "      时长以画面为准（音轨更长会裁掉、更短会补静音），音轨统一 44.1kHz 立体声。\n"
+            "      想保留原声：replace=false 或 keep_original=true。\n"
+            "  trim — 裁剪片段；probe — 读时长/分辨率；\n"
+            "  subtitle — 烧录 SRT 字幕（字号默认按视频高度 3.2% 自动换算，竖屏不再占半屏）\n\n"
             "典型漫剧流程：image_gen 出图 → 逐镜 kenburns（配时长）→ tts 出配音 → "
             "add_audio 逐镜配音 → concat 合成 → 得到完整视频。\n"
             "注意：concat 要求各段规格一致，kenburns 产出已统一；"
@@ -117,11 +121,35 @@ class VideoEditTool(BaseTool):
                 },
                 "replace": {
                     "type": "boolean",
-                    "description": "add_audio：是否替换原音轨（默认 true）",
+                    "description": "add_audio：是否替换原音轨（默认 true = 丢弃原声）",
                 },
                 "volume": {
                     "type": "number",
-                    "description": "add_audio：音量倍率（默认 1.0）",
+                    "description": "add_audio：配音音量倍率（默认 1.0）",
+                },
+                "bgm": {
+                    "type": "string",
+                    "description": "add_audio：背景音乐/BGM 路径（可选；与配音混成两层）",
+                },
+                "bgm_volume": {
+                    "type": "number",
+                    "description": "add_audio：BGM 音量倍率（默认 0.25，避免盖住配音）",
+                },
+                "keep_original": {
+                    "type": "boolean",
+                    "description": "add_audio：是否保留原视频声音一起混（默认 false）",
+                },
+                "font_size": {
+                    "type": "integer",
+                    "description": "subtitle：字号像素（默认按视频高度 3.2% 自动换算）",
+                },
+                "font_name": {
+                    "type": "string",
+                    "description": "subtitle：字体名（默认 SimHei；含空格的字体会自动回退去空格）",
+                },
+                "margin_v": {
+                    "type": "integer",
+                    "description": "subtitle：字幕距底部像素（默认按高度 6% 换算）",
                 },
                 "output": {
                     "type": "string",
@@ -172,10 +200,20 @@ class VideoEditTool(BaseTool):
                     output=arguments.get("output") or None,
                     replace=arguments.get("replace", True) is not False,
                     volume=float(arguments.get("volume") or 1.0),
+                    bgm=(str(arguments.get("bgm")) if arguments.get("bgm") else None),
+                    bgm_volume=float(arguments.get("bgm_volume") or 0.25),
+                    keep_original=bool(arguments.get("keep_original")),
                 )
-                note = "（音轨已补齐到画面时长）" if r.get("padded") else ""
-                return self._ok(f"✅ 已合成配音 → {r['path']}"
-                                f"（时长 {r['duration']:.2f}s）{note}", r)
+                notes = []
+                if r.get("padded"):
+                    notes.append("音轨已补齐到画面时长")
+                if r.get("dropped_original"):
+                    notes.append("已丢弃原声")
+                if r.get("bounded_to_video"):
+                    notes.append("已按画面时长封顶")
+                note = f"（{'；'.join(notes)}）" if notes else ""
+                return self._ok(f"✅ 已合成音轨 [{' + '.join(r.get('layers') or [])}] "
+                                f"→ {r['path']}（时长 {r['duration']:.2f}s）{note}", r)
             if cmd == "trim":
                 r = editor.trim(str(arguments.get("video") or ""),
                                 start=float(arguments.get("start") or 0.0),
@@ -193,8 +231,14 @@ class VideoEditTool(BaseTool):
             if cmd == "subtitle":
                 r = editor.subtitle(str(arguments.get("video") or ""),
                                     str(arguments.get("srt") or ""),
-                                    output=arguments.get("output") or None)
-                return self._ok(f"✅ 已烧录字幕 → {r['path']}", r)
+                                    output=arguments.get("output") or None,
+                                    font_size=arguments.get("font_size"),
+                                    font_name=str(arguments.get("font_name") or "SimHei"),
+                                    margin_v=arguments.get("margin_v"))
+                return self._ok(
+                    f"✅ 已烧录字幕 → {r['path']}"
+                    f"（字号 {r.get('font_size')}px @ {r.get('original_size')}，"
+                    f"字体 {r.get('font_name')}）", r)
             return ToolResult(success=False, output="",
                               error=f"未知命令: {cmd}（可用: kenburns / concat / "
                                     f"add_audio / trim / probe / subtitle）")
