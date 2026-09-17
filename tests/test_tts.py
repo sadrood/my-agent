@@ -262,6 +262,48 @@ class TestOpenRouterProvider:
         m.synthesize("hi")
         assert "input_references" not in fake.calls[0]["json"]
 
+    # ------------------------------------------------------------
+    # 角色声线库（TTS_REFERENCE_DIR）：voice=角色名 → 同名参考样本强绑定
+    # ------------------------------------------------------------
+
+    def test_role_voice_library_binds_reference(self, or_model, tmp_path):
+        """命中：input_references 用该角色参考样本，角色名不当 voice 透传，
+        结果里带 reference 文件名供核对。"""
+        ref_dir = tmp_path / "roles"
+        ref_dir.mkdir()
+        (ref_dir / "linshen.wav").write_bytes(b"RIFFrole")
+        m, fake = or_model(FakeResponse(200, content=b"x"),
+                           reference_dir=str(ref_dir), reference_audio="")
+        r = m.synthesize("你好，我是林深", voice="linshen")
+        call = fake.calls[0]
+        refs = call["json"]["input_references"]
+        assert refs[0]["type"] == "input_audio"
+        assert refs[0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
+        assert "voice" not in call["json"]      # 角色名只是库索引，不发给上游
+        assert r["reference"] == "linshen.wav"  # 记录绑定，便于核对不偏移
+
+    def test_role_voice_missing_falls_back_to_plain_voice(self, or_model, tmp_path):
+        """未命中：不报错，回退为普通 voice 透传（无参考样本时由模型默认音色）。"""
+        ref_dir = tmp_path / "roles"
+        ref_dir.mkdir()
+        (ref_dir / "linshen.wav").write_bytes(b"RIFFrole")
+        m, fake = or_model(FakeResponse(200, content=b"x"),
+                           reference_dir=str(ref_dir), reference_audio="")
+        m.synthesize("你好", voice="someone_else")
+        call = fake.calls[0]
+        assert call["json"].get("voice") == "someone_else"
+        assert "input_references" not in call["json"]
+
+    def test_empty_reference_dir_falls_back_to_global(self, or_model, tmp_path):
+        """目录为空/未配置：退回全局 reference_audio（向后兼容）。"""
+        ref = tmp_path / "ref.wav"
+        ref.write_bytes(b"RIFFfake")
+        m, fake = or_model(FakeResponse(200, content=b"x"),
+                           reference_dir="", reference_audio=str(ref))
+        m.synthesize("hi", voice="linshen")
+        refs = fake.calls[0]["json"]["input_references"]
+        assert refs[0]["input_audio"]["data"].startswith("data:audio/")
+
     def test_empty_audio_is_error(self, or_model):
         m, _ = or_model(FakeResponse(200, content=b""))
         m.fallback_edge = False
@@ -365,8 +407,55 @@ class TestOpenRouterProvider:
         assert r.success is True
         assert "降级" in r.output, "降级必须对用户可见"
 
+    def test_fallback_uses_role_edge_voice(self, tmp_path, or_model, monkeypatch):
+        """降级到 edge 时按角色走兜底音色，而不是整片默认女声。"""
+        m, _ = or_model(FakeResponse(500, payload={"error": {"message": "x"}}))
+        seen = {}
+
+        def fake_edge(text, voice=None, rate=None, volume=None, output=None):
+            seen["voice"] = voice
+            seen["rate"] = rate
+            p = str(tmp_path / "edge.mp3")
+            open(p, "w").close()
+            return {"path": p, "voice": voice or "default", "chars": len(text),
+                    "text": text, "provider": "edge"}
+
+        # 林深：降级走 yunxi 兜底音色（_synth_edge 内部会解析成完整名）
+        monkeypatch.setattr(m, "_synth_edge", fake_edge)
+        r = m.synthesize("我认识她。", voice="linshen")
+        assert r["provider"] == "edge"
+        assert seen["voice"] == "yunxi", "林深降级应走 yunxi 兜底音色"
+
+        # 老太太：女声 + 放慢语速
+        monkeypatch.setattr(m, "_synth_edge", fake_edge)
+        m.synthesize("我年轻时候认识一个人。", voice="laotaitai")
+        assert seen["voice"] == "xiaoxiao"
+        assert seen["rate"] == "-25%"
+
+        # 未知角色名：走默认（voice=None，edge 默认音色兜底）
+        monkeypatch.setattr(m, "_synth_edge", fake_edge)
+        m.synthesize("测试", voice="路人甲")
+        assert seen["voice"] is None
+
+    def test_voices_lists_role_library(self, monkeypatch, tmp_path):
+        """角色声线库配置后，voices 应列出角色名供配音时选用。"""
+        from config import TTS_CONFIG
+        roles = tmp_path / "roles"
+        roles.mkdir()
+        (roles / "linshen.wav").write_bytes(b"RIFF")
+        (roles / "laotaitai.mp3").write_bytes(b"ID3")
+        monkeypatch.setitem(TTS_CONFIG, "provider", "openrouter")
+        monkeypatch.setitem(TTS_CONFIG, "reference_audio", "")
+        monkeypatch.setitem(TTS_CONFIG, "reference_dir", str(roles))
+        out = TTSTool().execute_json({"command": "voices"}).output
+        assert "角色声线库" in out
+        assert "linshen" in out and "laotaitai" in out
+
     def test_voices_reports_openrouter_provider(self, monkeypatch, tmp_path):
         from config import TTS_CONFIG
         monkeypatch.setitem(TTS_CONFIG, "provider", "openrouter")
+        # 与开发者 .env 解耦：清空参考样本配置，保证提示字样必然出现
+        monkeypatch.setitem(TTS_CONFIG, "reference_audio", "")
+        monkeypatch.setitem(TTS_CONFIG, "reference_dir", "")
         out = TTSTool().execute_json({"command": "voices"}).output
         assert "openrouter" in out and "TTS_REFERENCE_AUDIO" in out

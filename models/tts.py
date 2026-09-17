@@ -32,6 +32,16 @@ ZH_VOICES = {
 
 SUPPORTED_PROVIDERS = ("edge", "openrouter")
 
+# 角色声线库 → edge 兜底音色（openrouter 限流/失败降级时按角色走对应音色，
+# 避免整片降级成同一个默认女声）。key 与 reference_dir 里的角色文件名一致。
+ROLE_FALLBACK_VOICES = {
+    "narration": ("yunjian", "+0%"),    # 旁白：沉稳解说感
+    "linshen": ("yunxi", "+0%"),        # 林深：年轻克制的男声
+    "hugong": ("xiaoxiao", "+0%"),      # 护工：温柔女声
+    "laotaitai": ("xiaoxiao", "-25%"),  # 老太太：放慢显年纪感
+    "girl": ("xiaoyi", "+0%"),          # 彩蛋女孩：活泼少女
+}
+
 
 def _run_async(coro):
     """在同步环境里跑异步协程（已有事件循环时另起线程，避免嵌套报错）。"""
@@ -84,6 +94,9 @@ class TTSModel:
         timeout: float = None,
         provider: str = None,
         model: str = None,
+        reference_dir: str = None,
+        reference_audio: str = None,
+        reference_text: str = None,
     ):
         cfg = TTS_CONFIG
         self.provider = str(provider or cfg.get("provider") or "edge").strip().lower()
@@ -112,8 +125,12 @@ class TTSModel:
         self.response_format = cfg.get("response_format", "mp3")
         self.referer = cfg.get("referer", "")
         self.title = cfg.get("title", "")
-        self.reference_audio = cfg.get("reference_audio", "")
-        self.reference_text = cfg.get("reference_text", "")
+        self.reference_audio = reference_audio if reference_audio is not None \
+            else cfg.get("reference_audio", "")
+        self.reference_text = reference_text if reference_text is not None \
+            else cfg.get("reference_text", "")
+        self.reference_dir = reference_dir if reference_dir is not None \
+            else cfg.get("reference_dir", "")
         self.fallback_edge = bool(cfg.get("fallback_edge", True))
 
     # ------------------------------------------------------------
@@ -162,9 +179,11 @@ class TTSModel:
                 if not self.fallback_edge:
                     raise
                 # 免费档"不保证生产可用性"，失败时兜底到 edge-tts，
-                # 但把降级事实如实回传，不静默掩盖。
-                r = self._synth_edge(text, voice=None, rate=rate, volume=volume,
-                                     output=output)
+                # 但按角色走对应兜底音色，避免整片降级成同一个默认女声；
+                # 降级事实如实回传，不静默掩盖。
+                fv, fr = self._role_fallback_voice(voice)
+                r = self._synth_edge(text, voice=fv, rate=fr or rate,
+                                     volume=volume, output=output)
                 r["fallback_from"] = f"openrouter({self.model})"
                 r["fallback_reason"] = str(e)[:200]
                 return r
@@ -196,12 +215,53 @@ class TTSModel:
     # openrouter（/api/v1/audio/speech）
     # ------------------------------------------------------------
 
+    def _resolve_reference(self, voice: str):
+        """角色声线库：voice=角色名 → ``reference_dir/{角色名}.wav|mp3``。
+
+        返回 (参考音频路径, 参考文字稿)。找不到返回 ("", "")。
+        同一角色永远命中同一份参考样本 → 音色恒定不偏移。
+        """
+        ref_dir = (self.reference_dir or "").strip()
+        v = (voice or "").strip()
+        if not ref_dir or not v:
+            return "", ""
+        for ext in (".wav", ".mp3", ".m4a", ".flac"):
+            p = os.path.join(ref_dir, v + ext)
+            if os.path.isfile(p):
+                return p, self.reference_text
+        return "", ""
+
+    @staticmethod
+    def _role_fallback_voice(voice: str):
+        """openrouter 降级到 edge 时，按角色名选兜底音色。
+
+        返回 (edge 音色, 语速)；角色不在表里返回 (None, None)，
+        由调用方走默认音色/原语速。
+        """
+        v = (voice or "").strip().lower()
+        if v in ROLE_FALLBACK_VOICES:
+            return ROLE_FALLBACK_VOICES[v]
+        return None, None
+
     def _payload(self, text: str, voice: str = None) -> dict:
         payload = {
             "model": self.model,
             "input": text,
             "response_format": self.response_format,
         }
+        # 角色声线库优先：voice=角色名 → 用该角色的参考样本克隆
+        ref_audio, ref_text = self._resolve_reference(voice if voice is not None
+                                                      else self.voice)
+        if ref_audio:
+            refs = [{"type": "input_audio",
+                     "input_audio": {"data": _data_uri(ref_audio)}}]
+            if ref_text:
+                refs.append({"type": "text", "text": ref_text})
+            payload["input_references"] = refs
+            # 有克隆参考时音色由样本决定：角色名只是库里的索引，不当作
+            # voice 透传（fish-audio 对未知 voice 名可能报 Invalid voice）
+            payload["_role_ref"] = ref_audio
+            return payload
         # 音色：只有显式指定才带。fish-audio 这类模型没有预设音色目录，
         # 文档要求"仅在提供方有默认音色时才可省略 voice"——它的默认音色即内置。
         v = voice if voice is not None else self.voice
@@ -232,7 +292,10 @@ class TTSModel:
         if self.title:
             headers["X-OpenRouter-Title"] = self.title
         try:
-            resp = httpx.post(url, json=self._payload(text, voice), headers=headers,
+            payload = self._payload(text, voice)
+            # 角色声线库命中信息：内部键，摘出来记入结果，不发给上游
+            role_ref = payload.pop("_role_ref", "")
+            resp = httpx.post(url, json=payload, headers=headers,
                               timeout=self.timeout)
         except httpx.HTTPError as e:
             raise RuntimeError(f"TTS 请求失败: {str(e)[:200]}") from e
@@ -252,6 +315,9 @@ class TTSModel:
         result = {"path": output, "voice": self.model if not self.voice else self.voice,
                   "chars": len(text), "text": text, "provider": "openrouter",
                   "bytes": len(audio)}
+        if role_ref:
+            # 记录这次用的角色参考样本，供调用方核对"声音绑定没偏移"
+            result["reference"] = os.path.basename(role_ref)
         if self.voice_ignored:
             result["voice_ignored"] = self.voice_ignored
         return result

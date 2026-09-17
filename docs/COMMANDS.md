@@ -204,8 +204,46 @@ TTS_FALLBACK_EDGE=true
 ```
 - 产物落在 `./generated_audio/`（mp3/wav），返回路径与时长，供 `video_edit` 合成。
 
-## 三·八、视频剪辑与合成（漫剧路线）
+## 三·八、外部短剧工厂 Toonflow（可选）
 
+[Toonflow](https://github.com/HBAI-Ltd/Toonflow-app) 是独立的开源 AI 短剧工具。
+它的 Electron 只是外壳，**后端是独立的 Express 服务**（默认 `127.0.0.1:10588`），
+169 个 `/api` 路由覆盖 `原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片` 全流程 ——
+所以 agent 可以完全不碰它的界面，直接用 `toonflow` 工具编排它。
+
+```
+toonflow(command="health")      # 连通性/登录自检（不触发模型调用，不花钱）
+toonflow(command="styles")      # 画风列表（建项目要填 artStyle）
+toonflow(command="models")      # 模型列表（建项目要填 imageModel/videoModel）
+toonflow(command="projects")    # 项目列表
+toonflow(command="create_project", name="第七次葬礼", art_style="3",
+         image_model="...", video_model="...", video_ratio="9:16")
+toonflow(command="add_novel", project_id=1, text="第一章 …\n…")   # 自动切章
+toonflow(command="events", project_id=1)
+toonflow(command="storyboard", project_id=1)
+toonflow(command="videos", project_id=1)
+toonflow(command="call", method="POST", path="/api/xxx", body={...})  # 直连其余路由
+```
+
+- **登录**：`POST /api/login/login` → JWT（有效期 180 天），客户端自动缓存并在 401 时重登。
+- **参数发现**：上游用 zod 校验，字段不对会返回 400 + 具体字段名，错误原样回传，
+  按提示补齐即可；主干路由清单见工具 `description`（来自上游 `router.ts` 核实）。
+- **配置**：
+  ```
+  TOONFLOW_ENABLED=true
+  TOONFLOW_BASE_URL=http://127.0.0.1:10588
+  TOONFLOW_USERNAME=admin
+  TOONFLOW_PASSWORD=admin123
+  TOONFLOW_MAX_CHARS=6000        # 单次回给模型的 JSON 上限
+  ```
+- ⚠️ **仅限本机**：Toonflow 默认账号 `admin/admin123`、密码明文比对、token 180 天有效。
+  要暴露到局域网请先在它里面改密码。
+- ⚠️ **它要自己的模型供应商**（设置中心 → 模型服务），生成走它配置的厂商；
+  官方 Demo 做 2 分钟短剧约 ¥130（大头是视频）。可以把本项目的 Agnes/OpenRouter
+  key 填进它的供应商配置。
+- 它的 API 无公开文档、路由是代码生成的，版本间字段可能变；**升级后先跑 `health`**。
+
+## 三·九、视频剪辑与合成（漫剧路线）
 工具：`video_edit`（底层 ffmpeg）。**"图 + 运镜 + 配音"**是漫剧/图文视频的推荐路线
 ——不消耗 `video_gen` 的视频生成配额（免费额度有严格 RPM 限制），画面完全由图像模型控制。
 
@@ -244,7 +282,7 @@ TTS_FALLBACK_EDGE=true
   FFMPEG_PATH=                    # 留空自动探测
   ```
 
-## 三·九、运行中卡住的排查
+## 三·十、运行中卡住的排查
 
 **症状**：程序跑着跑着不动了，但进程还在（CPU 为 0）。
 
