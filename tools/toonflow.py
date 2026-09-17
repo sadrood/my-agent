@@ -52,8 +52,21 @@ class ToonflowTool(BaseTool):
             "  create_project 新建项目（name 必填，其余可选，见 schema）\n"
             "  add_novel      导入原文（project_id + text 或 data）\n"
             "  events         章节事件图谱（project_id）\n"
-            "  storyboard     分镜数据（project_id）\n"
-            "  videos         成片清单（project_id）\n"
+            "  scripts        剧本列表（project_id）→ 拿 script_id 才能查分镜/出片\n"
+            "  storyboard     分镜数据（script_id）\n"
+            "  videos         成片清单（project_id + script_id）\n"
+            "  generate_images 批量出图（storyboard_ids + project_id + script_id）\n"
+            "  image_state    出图进度（ids）\n"
+            "  generate_video 批量出片（project_id + script_id + track_data）\n"
+            "  video_state    出片进度（project_id + script_id + video_ids）\n"
+            "  tasks          任务队列（page/limit，可按 project_id 过滤）\n"
+            "  vendor         供应商配置（密钥已掩码）\n"
+            "  add_track      新建出片轨道（project_id + script_id）→ track_id\n"
+            "  gen_prompts    为轨道生成视频提示词（track_data + model + mode）\n"
+            "  gen_videos     批量出片（project_id + script_id + track_data + model + mode + resolution）\n"
+            "  workbench      出片工作台数据（分镜/轨道/视频当前状态）\n"
+            "  file_url       取素材/成片文件地址（items）\n"
+            "  出片标准流程：add_track → gen_prompts → gen_videos → video_state → file_url\n"
             "  call           通用调用：任意 method/path/query/body（覆盖其余 100+ 路由）\n"
             "已核实的主干路由：\n" + routes + "\n"
             "提示：参数不全时上游会返回 400 并说明缺哪个字段，照提示补齐即可；\n"
@@ -68,8 +81,11 @@ class ToonflowTool(BaseTool):
                 "command": {
                     "type": "string",
                     "enum": ["health", "models", "styles", "projects", "novels",
-                             "create_project", "add_novel", "events",
-                             "storyboard", "videos", "call"],
+                             "create_project", "add_novel", "events", "scripts",
+                             "storyboard", "videos", "generate_images", "image_state",
+                             "generate_video", "video_state", "tasks", "vendor",
+                             "add_track", "gen_prompts", "workbench", "file_url",
+                             "call"],
                     "description": "要执行的命令",
                 },
                 "project_id": {
@@ -101,6 +117,51 @@ class ToonflowTool(BaseTool):
                     "type": "array",
                     "description": "原文章节数组（add_novel 直连上游格式）",
                     "items": {"type": "object"},
+                },
+                "storyboard_ids": {
+                    "type": "array", "items": {"type": "number"},
+                    "description": "generate_images 用：要出图的分镜 ID 列表",
+                },
+                "ids": {
+                    "type": "array", "items": {"type": "number"},
+                    "description": "image_state 用：分镜 ID 列表",
+                },
+                "video_ids": {
+                    "type": "array", "items": {"type": "number"},
+                    "description": "video_state 用：出片任务 ID 列表",
+                },
+                "track_data": {
+                    "type": "array", "items": {"type": "object"},
+                    "description": "generate_video 用：上游 trackData 数组",
+                },
+                "page": {"type": "number", "description": "tasks 用：页码（默认 1）"},
+                "limit": {"type": "number", "description": "tasks 用：每页条数（默认 20）"},
+                "concurrent_count": {
+                    "type": "number", "description": "generate_images 用：并发数（默认 5）",
+                },
+                "track_id": {
+                    "type": "number", "description": "gen_prompts 用：出片轨道 ID（add_track 返回）",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "gen_prompts / gen_videos 用：模型，如 agnes:agnes-video-2.5-flash",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "gen_prompts / gen_videos 用：生成模式（agnes 视频模型只支持 text）",
+                },
+                "resolution": {
+                    "type": "string", "description": "gen_videos 用：分辨率，如 720P",
+                },
+                "duration": {
+                    "type": "number", "description": "gen_videos 用：单镜时长（秒，4-12）",
+                },
+                "audio": {
+                    "type": "boolean", "description": "gen_videos 用：是否带音频（默认 false）",
+                },
+                "items": {
+                    "type": "array", "items": {"type": "object"},
+                    "description": "file_url 用：[{id, sources}]（sources: storyboard/assets）",
                 },
                 "method": {"type": "string",
                            "description": "call 用：GET / POST / PUT / DELETE"},
@@ -153,6 +214,29 @@ class ToonflowTool(BaseTool):
                 "videos": lambda c, a: self._read(
                     c, "/api/production/workbench/getVideoList",
                     {"projectId": a.get("project_id"), "scriptId": a.get("script_id")}),
+                "scripts": lambda c, a: self._read(c, "/api/script/getScrptApi",
+                                                   {"projectId": a.get("project_id")}),
+                "generate_images": self._generate_images,
+                "image_state": lambda c, a: self._read(
+                    c, "/api/production/storyboard/pollingImage",
+                    {"ids": a.get("ids") or a.get("storyboard_ids") or []}),
+                "generate_video": self._generate_video,
+                "video_state": lambda c, a: self._read(
+                    c, "/api/production/workbench/checkVideoStateList",
+                    {"projectId": a.get("project_id"), "scriptId": a.get("script_id"),
+                     "videoIds": a.get("video_ids") or []}),
+                "tasks": lambda c, a: self._read(
+                    c, "/api/task/getTaskApi",
+                    {"page": int(a.get("page") or 1), "limit": int(a.get("limit") or 20)}),
+                "vendor": self._vendor,
+                "add_track": self._add_track,
+                "gen_prompts": self._gen_prompts,
+                "workbench": lambda c, a: self._read(
+                    c, "/api/production/workbench/getGenerateData",
+                    {"projectId": a.get("project_id"), "scriptId": a.get("script_id")}),
+                "file_url": lambda c, a: self._read(
+                    c, "/api/production/workbench/getFileUrl",
+                    {"items": a.get("items") or []}),
                 "create_project": self._create_project,
                 "add_novel": self._add_novel,
                 "call": self._call,
@@ -265,6 +349,91 @@ class ToonflowTool(BaseTool):
                    "（下一步：events 查看/触发章节事件图谱）",
             metadata={"chapters": len(data)})
 
+    def _generate_images(self, client, args) -> ToolResult:
+        """批量出图（上游字段：storyboardIds + projectId + scriptId）。"""
+        ids = args.get("storyboard_ids") or args.get("ids")
+        if not ids or args.get("project_id") is None or args.get("script_id") is None:
+            return ToolResult(
+                success=False, output="",
+                error="generate_images 需要 storyboard_ids + project_id + script_id"
+                      "（先用 storyboard 拿到分镜 ID）。")
+        body = {"storyboardIds": [int(i) for i in ids],
+                "projectId": int(args["project_id"]), "scriptId": int(args["script_id"])}
+        if args.get("concurrent_count"):
+            body["concurrentCount"] = int(args["concurrent_count"])
+        data = client.request("POST", "/api/production/storyboard/batchGenerateImage",
+                              json_body=body)
+        return ToolResult(
+            success=True,
+            output="已提交 " + str(len(body["storyboardIds"])) + " 个分镜的出图任务：" + chr(10)
+                   + client.summarize(data) + chr(10)
+                   + "（用 image_state + ids 查进度；出图会消耗额度）",
+            metadata={"storyboard_ids": body["storyboardIds"]})
+
+    def _add_track(self, client, args) -> ToolResult:
+        """新建出片轨道（免费，仅写库）：gen_prompts / gen_videos 都挂在它上面。"""
+        if args.get("project_id") is None or args.get("script_id") is None:
+            return ToolResult(success=False, output="",
+                              error="add_track 需要 project_id + script_id。")
+        body = {"projectId": int(args["project_id"]), "scriptId": int(args["script_id"])}
+        if args.get("duration"):
+            body["duration"] = float(args["duration"])
+        data = client.request("POST", "/api/production/workbench/addTrack", json_body=body)
+        track_id = (data or {}).get("data") if isinstance(data, dict) else None
+        tip = ("已新建出片轨道 track_id=" + str(track_id)
+               + "。下一步 gen_prompts：track_data=[{trackId: <id>, "
+                 "info: [{id: <分镜ID>, sources: storyboard}]}]")
+        return ToolResult(success=True, output=tip,
+                          metadata={"track_id": track_id, "body": body})
+
+    def _gen_prompts(self, client, args) -> ToolResult:
+        """为轨道生成视频提示词（走文本模型，消耗文本额度）。"""
+        if args.get("project_id") is None or not args.get("track_data"):
+            return ToolResult(
+                success=False, output="",
+                error="gen_prompts 需要 project_id + track_data"
+                      "（track_data=[{trackId, info:[{id, sources}]}]）+ model + mode。")
+        body = {"projectId": int(args["project_id"]), "trackData": args["track_data"],
+                "model": str(args.get("model") or "agnes:agnes-video-2.5-flash"),
+                "mode": str(args.get("mode") or "text")}
+        if args.get("concurrent_count"):
+            body["concurrentCount"] = int(args["concurrent_count"])
+        data = client.request("POST", "/api/production/workbench/batchGeneratePrompt",
+                              json_body=body, timeout=client.gen_timeout)
+        return ToolResult(success=True,
+                          output="已提交提示词生成：" + chr(10) + client.summarize(data),
+                          metadata={"track_data": body["trackData"]})
+
+    def _generate_video(self, client, args) -> ToolResult:
+        """批量出片（上游字段：projectId + scriptId + trackData）。"""
+        if (args.get("project_id") is None or args.get("script_id") is None
+                or not args.get("track_data")):
+            return ToolResult(
+                success=False, output="",
+                error="generate_video 需要 project_id + script_id + track_data"
+                      "（track_data 结构见上游 batchGenerateVideo 的 zod schema；"
+                      "可用 call 查 getGenerateData 拿模板）。")
+        body = {"projectId": int(args["project_id"]), "scriptId": int(args["script_id"]),
+                "trackData": args["track_data"],
+                "model": str(args.get("model") or "agnes:agnes-video-2.5-flash"),
+                "mode": str(args.get("mode") or "text"),
+                "resolution": str(args.get("resolution") or "720P"),
+                "audio": bool(args.get("audio"))}
+        data = client.request("POST", "/api/production/workbench/batchGenerateVideo",
+                              json_body=body, timeout=client.gen_timeout)
+        return ToolResult(success=True,
+                          output="已提交出片任务：" + chr(10) + client.summarize(data) + chr(10)
+                                 + "（用 video_state + video_ids 查进度）",
+                          metadata={"project_id": body["projectId"]})
+
+    def _vendor(self, client, args) -> ToolResult:
+        """供应商配置（密钥掩码后回给模型，避免 key 进上下文/日志）。"""
+        data = client.request("POST", "/api/setting/vendorConfig/getVendorList",
+                              json_body={})
+        safe = _mask_secrets(data)
+        return ToolResult(success=True, output=client.summarize(safe),
+                          metadata={"masked": True})
+
     def _call(self, client, args) -> ToolResult:
         path = str(args.get("path") or "").strip()
         if not path:
@@ -272,9 +441,12 @@ class ToonflowTool(BaseTool):
                 success=False, output="",
                 error="call 需要 path，例如 /api/project/getProject 或 "
                       "/api/production/workbench/getVideoList")
-        method = str(args.get("method") or "GET").upper()
+        # 方法：显式指定优先；否则查权威路由表（1.1.8 里 159/169 是 POST，读接口也是 POST）
+        method = str(args.get("method") or "").upper() or client.method_for(path)
         query = args.get("query") or None
-        body = args.get("body") or None
+        body = args.get("body")
+        if body is None and method == "POST":
+            body = {}      # 上游 zod 要求 body 必须是 object（缺省会报"期望 object，实际 undefined"）
         data = client.request(method, path, params=query, json_body=body)
         return ToolResult(success=True,
                           output=f"{method} {path} →\n{client.summarize(data)}",
@@ -286,8 +458,9 @@ class ToonflowTool(BaseTool):
         from agent.approval import ApprovalRequest
 
         cmd = str(arguments.get("command") or "").lower()
-        is_write = cmd in ("create_project", "add_novel") or (
-            cmd == "call" and str(arguments.get("method") or "GET").upper() != "GET")
+        is_write = cmd in ("create_project", "add_novel", "generate_images",
+                           "generate_video", "add_track", "gen_prompts") or (
+            cmd == "call" and str(arguments.get("method") or "").upper() not in ("", "GET"))
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
@@ -295,6 +468,27 @@ class ToonflowTool(BaseTool):
             risk_level="medium" if is_write else "low",
             min_sandbox_mode="read-only",
         )
+
+
+#: 响应里需要掩码的字段（供应商配置会带回 apiKey/ak/sk 等）
+_SECRET_FIELDS = ("apikey", "api_key", "key", "secret", "token", "accesskey", "ak", "sk")
+
+
+def _mask_secrets(obj, _depth: int = 0):
+    """递归掩码密钥字段：只留前后各 4 位，避免密钥进入模型上下文与日志。"""
+    if _depth > 6:
+        return obj
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if any(t in str(k).lower() for t in _SECRET_FIELDS) and isinstance(v, str) and v:
+                out[k] = (v[:4] + "***" + v[-4:]) if len(v) > 12 else "***"
+            else:
+                out[k] = _mask_secrets(v, _depth + 1)
+        return out
+    if isinstance(obj, list):
+        return [_mask_secrets(v, _depth + 1) for v in obj]
+    return obj
 
 
 def _split_chapters(text: str, max_chars: int = 4000) -> list:
