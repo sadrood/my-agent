@@ -320,7 +320,18 @@ class Agent:
             if not pages:
                 return ""
             note = f"浏览器会话仍在运行（{len(pages)} 个标签页"
-            # 取当前 URL：走 worker 线程（Playwright 线程绑定），失败就只报标签数
+            # 只在浏览器**确实存活**时才去取 URL。
+            # 踩过的坑：_pages 里可能只剩残留引用（底层连接早断了），此时
+            # execute("url") 会走 _ensure_page → _launch，等于"写一条交接备注
+            # 顺带把浏览器重新打开"——有头窗口弹出、占用用户 profile，
+            # 单元测试里也会因此真的拉起 Chromium（实测每次测试跑都污染
+            # memory/browser_profile，涨到 250MB）。
+            try:
+                alive = getattr(b, "_is_browser_alive", None)
+                if callable(alive) and not alive():
+                    return note + "）"
+            except Exception:
+                pass
             try:
                 r = b.execute("url")
                 if getattr(r, "success", False) and r.output:
