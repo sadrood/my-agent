@@ -274,8 +274,7 @@ class MCPClient:
         """
         try:
             import urllib.request
-            import ssl
-            
+
             self._servers[server_name] = {
                 "type": "sse",
                 "url": url,

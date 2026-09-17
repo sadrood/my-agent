@@ -110,6 +110,7 @@ class Executor:
         # 在飞工具调用计数（按工具名）：并行批里决定超时后能否安全 reset_tool
         self._inflight: dict = {}
         self._inflight_lock = threading.Lock()
+        self._checkpoint_warned = False           # 检查点失败只告警一次
         self._hooks = None                       # HookManager（首次工具调用时延迟获取）
 
     @property
@@ -1181,8 +1182,14 @@ class Executor:
                             self._event_sink("checkpoint", {"tool": tool_name, "file": changed, "commit": commit_hash})
                         except Exception:
                             pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 静默吞掉会让"每次修改都有独立提交、git revert HEAD 即可回滚"
+                    # 这道安全网**在无声无息中不存在**（自升级场景尤其危险）。
+                    # 只告警一次，不阻断主流程。
+                    if not self._checkpoint_warned:
+                        self._checkpoint_warned = True
+                        print(f"[Checkpoint] 警告: 逐操作 git 检查点失败（{str(e)[:120]}）。"
+                              "本次运行的自动回滚点不可用，改坏了请手工 git 回滚。")
 
         self._emit("tool_result", {
             "tool": tool_name,

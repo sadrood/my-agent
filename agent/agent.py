@@ -1457,7 +1457,16 @@ class Agent:
                 self.config.exec_mode = "plan"
                 return self.run(goal, keep_session, event_sink, stop_event)
             final = f"执行过程中出现错误：{e}"
-            result = {"success": False, "output": final, "tool_calls": [], "errors": [str(e)]}
+            # 保留已完成的工具成果（旧实现把 tool_calls 重置成 []，一次异常就让
+            # 用户看不到"刚才到底做到了哪一步"；执行器自己的 llm_error 分支就
+            # 会用 _render_partial_progress 保留进度，这里对齐）。
+            partial = ""
+            try:
+                partial = self.executor._render_partial_progress([], [str(e)]) or ""
+            except Exception:
+                partial = ""
+            result = {"success": False, "output": (partial + "\n\n" + final).strip(),
+                      "tool_calls": [], "errors": [str(e)]}
         self._stop_turn_spinner()
 
         final = result.get("output", "").strip() or "任务执行完毕（无文字总结）。"
