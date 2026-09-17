@@ -29,6 +29,20 @@ from config import VIDEO_GEN_CONFIG
 _STATUS_DONE = ("completed", "succeeded", "success")
 _STATUS_FAILED = ("failed", "error", "canceled", "cancelled")
 
+# 轮询期可重试的上游错误（限流/网关抖动/网络闪断）。
+# 这些**不代表任务失败**——任务还在服务端跑，重试即可，别让模型重做。
+_TRANSIENT_MARKERS = (
+    "429", "500", "502", "503", "504",
+    "查询过于频繁", "too many requests", "rate limit",
+    "timeout", "timed out", "连接", "connection",
+)
+
+
+def _is_transient_query_error(err: Exception) -> bool:
+    """轮询查询失败是否属于"待会儿再问就好"的瞬时错误。"""
+    msg = str(err).lower()
+    return any(m.lower() in msg for m in _TRANSIENT_MARKERS)
+
 
 def _query_base_from(base_url: str) -> str:
     """由 base_url 推导查询端点主机（去掉结尾的 /v1）。
@@ -136,12 +150,34 @@ class VideoGenModel:
              "error": ...}
             超时时 status 为最后一次观测值、timed_out=True（任务仍在跑，
             调用方可用 video_id 稍后再查）。
+
+        轮询期的**瞬时错误不计为任务失败**：实测 6 秒一次的查询会被上游
+        拒绝（HTTP 429 "查询过于频繁"），旧实现直接抛错，模型只好重做一遍，
+        白烧一次视频配额（Token Plan 仅 500 秒/天）外加两分钟等待。
+        这类错误只降速重试，直到 deadline 或任务真正完成。
         """
         import time
         deadline = time.time() + (max_wait if max_wait is not None else self.max_wait)
         last: dict = {"status": "unknown", "progress": 0, "url": None, "error": None}
+        interval = self.poll_interval
+        transient_error = None
         while True:
-            data = self.query(video_id)
+            try:
+                data = self.query(video_id)
+            except RuntimeError as e:
+                if not _is_transient_query_error(e):
+                    raise
+                # 任务还在服务端跑：退避后继续问，不要把它判死
+                transient_error = str(e)[:200]
+                interval = min(interval * 2, 30.0)
+                if time.time() >= deadline:
+                    return {**last, "timed_out": True,
+                            "transient_error": transient_error}
+                time.sleep(interval)
+                continue
+
+            interval = self.poll_interval          # 查询恢复即回到常规节奏
+            transient_error = None
             last = {
                 "status": data.get("status"),
                 "progress": data.get("progress"),
@@ -160,7 +196,7 @@ class VideoGenModel:
                 return {**last, "timed_out": False}
             if time.time() >= deadline:
                 return {**last, "timed_out": True}
-            time.sleep(self.poll_interval)
+            time.sleep(interval)
 
     def download(self, url: str, video_id: str = "") -> str:
         """下载 mp4 到 save_dir，返回本地路径。"""
