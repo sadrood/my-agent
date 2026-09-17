@@ -194,13 +194,16 @@ class TestAddAudio:
         cmd = last_ffmpeg_cmd(fake_ffmpeg)
         assert "apad" not in cmd
         assert r["padded"] is False
+        # T4 回归：音轨(8s) 长于画面(5s) 时必须封顶到画面时长，否则容器被拉长、末尾冻帧
+        assert "-t 5.000" in cmd and r["bounded_to_video"] is True
 
     def test_replace_maps_new_audio(self, tmp_path, fake_ffmpeg):
         video = touch(tmp_path / "v.mp4")
         audio = touch(tmp_path / "a.mp3")
-        make_editor(tmp_path).add_audio(video, audio, replace=True)
-        cmd = fake_ffmpeg["ffmpeg_cmds"][-1]
-        assert "-map" in cmd and "1:a:0" in " ".join(cmd)
+        r = make_editor(tmp_path).add_audio(video, audio, replace=True)
+        cmd = " ".join(fake_ffmpeg["ffmpeg_cmds"][-1])
+        assert "-map 0:v:0" in cmd and "[aout]" in cmd
+        assert r["layers"] == ["dub"] and r["mixed"] is False
 
     def test_volume_filter(self, tmp_path, fake_ffmpeg):
         video = touch(tmp_path / "v.mp4")
@@ -214,6 +217,125 @@ class TestAddAudio:
         video = touch(tmp_path / "v.mp4")
         with pytest.raises(VideoEditError, match="音频不存在"):
             make_editor(tmp_path).add_audio(video, str(tmp_path / "nope.mp3"))
+
+    def test_bgm_two_layers_default_drops_original(self, tmp_path, fake_ffmpeg):
+        """T6：配音 + BGM 两层，原视频声音默认丢弃（不再三层糊在一起）。"""
+        video = touch(tmp_path / "v.mp4")
+        audio = touch(tmp_path / "dub.mp3")
+        bgm = touch(tmp_path / "bgm.mp3")
+        fake_ffmpeg["probe"]["has_audio"] = True       # 原视频本来有声音
+        ed = make_editor(tmp_path)
+        ed.probe = lambda p: {"duration": 5.0, "width": 1280, "height": 720,
+                              "has_audio": True, "size_bytes": 10}
+        r = ed.add_audio(video, audio, bgm=bgm, bgm_volume=0.2)
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert r["layers"] == ["dub", "bgm"]
+        assert "amix=inputs=2" in cmd and "volume=0.20" in cmd
+        assert "[0:a]" not in cmd                       # 原声不参与
+        assert r["dropped_original"] is True
+
+    def test_keep_original_mixes_three_layers(self, tmp_path, fake_ffmpeg):
+        """显式要求保留原声时才混三层。"""
+        video = touch(tmp_path / "v.mp4")
+        audio = touch(tmp_path / "dub.mp3")
+        ed = make_editor(tmp_path)
+        ed.probe = lambda p: {"duration": 5.0, "width": 1280, "height": 720,
+                              "has_audio": True, "size_bytes": 10}
+        r = ed.add_audio(video, audio, replace=False)
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert r["layers"] == ["original", "dub"]
+        assert "amix=inputs=2" in cmd and "[0:a]" in cmd
+
+    def test_audio_normalized_to_44100_stereo(self, tmp_path, fake_ffmpeg):
+        """T5：所有音轨统一 44.1kHz 立体声，避免被 TTS 24k 单声道降级。"""
+        video = touch(tmp_path / "v.mp4")
+        audio = touch(tmp_path / "a.mp3")
+        make_editor(tmp_path).add_audio(video, audio)
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert "sample_rates=44100" in cmd and "channel_layouts=stereo" in cmd
+        assert "-ar 44100" in cmd
+
+
+class TestSubtitle:
+    """字幕改用「SRT → 自建 ASS → ass 滤镜」：PlayRes 显式等于视频尺寸。"""
+
+    def _video(self, tmp_path, w, h):
+        ed = make_editor(tmp_path)
+        ed.probe = lambda p: {"duration": 6.0, "width": w, "height": h,
+                              "has_audio": True, "size_bytes": 10}
+        return ed, touch(tmp_path / "v.mp4")
+
+    def test_font_size_scales_with_height(self, tmp_path, fake_ffmpeg):
+        """T3：自建 ASS 的 PlayRes 必须等于视频尺寸，字号按高度 3.2% 换算。"""
+        ed, video = self._video(tmp_path, 720, 1280)     # 竖屏
+        srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,200 --> 00:00:02,800" + chr(10) + "第七次葬礼" + chr(10))
+        r = ed.subtitle(video, srt)
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert "ass='" in cmd                            # 走 ass 滤镜
+        assert r["font_size"] == 41                      # 1280 * 3.2%
+        assert r["margin_v"] == 77                       # 1280 * 6%
+        ass = open(r["ass_path"], encoding="utf-8").read()
+        assert "PlayResX: 720" in ass and "PlayResY: 1280" in ass
+        assert "Style: Default,SimHei,41," in ass
+        assert "MarginV" and ",77,1" in ass              # 边距进样式
+        assert "Dialogue: 0,0:00:00.20,0:00:02.80" in ass
+
+    def test_horizontal_video_smaller_font(self, tmp_path, fake_ffmpeg):
+        ed, video = self._video(tmp_path, 1280, 720)
+        srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "横屏字幕" + chr(10))
+        r = ed.subtitle(video, srt)
+        assert r["font_size"] == 23                      # 720 * 3.2%
+        assert r["original_size"] == "1280x720"
+        assert "PlayResY: 720" in open(r["ass_path"], encoding="utf-8").read()
+
+    def test_explicit_font_size_wins(self, tmp_path, fake_ffmpeg):
+        ed, video = self._video(tmp_path, 1280, 720)
+        srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "x" + chr(10))
+        r = ed.subtitle(video, srt, font_size=36, margin_v=100)
+        assert r["font_size"] == 36 and r["margin_v"] == 100
+        assert ",100,1" in open(r["ass_path"], encoding="utf-8").read()
+
+    def test_srt_parser_rejects_empty(self, tmp_path, fake_ffmpeg):
+        """空/损坏字幕要给出明确错误，而不是产出无字幕视频。"""
+        from models.video_edit import VideoEditError, VideoEditor
+        with pytest.raises(VideoEditError, match="没有可用条目"):
+            VideoEditor._srt_to_ass("这不是字幕", 720, 1280, "SimHei", 41, 77)
+
+    def test_srt_parser_handles_multiline_and_tags(self, tmp_path):
+        from models.video_edit import VideoEditor
+        srt = ("1" + chr(10) + "00:00:01,000 --> 00:00:02,500" + chr(10)
+               + "<i>第一行</i>" + chr(10) + "第二行" + chr(10) + chr(10)
+               + "2" + chr(10) + "00:00:03,000 --> 00:00:04,000" + chr(10) + "第三条" + chr(10))
+        ass = VideoEditor._srt_to_ass(srt, 720, 1280, "SimHei", 41, 77)
+        assert ass.count("Dialogue:") == 2
+        assert "第一行 第二行" in ass and "<i>" not in ass
+
+    def test_font_name_with_space_falls_back(self, tmp_path, fake_ffmpeg):
+        """T8：含空格字体名导致滤镜失败 → 自动回退去空格字体并记录。"""
+        from models.video_edit import VideoEditError
+        ed, video = self._video(tmp_path, 1280, 720)
+        srt = touch(tmp_path / "s.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write("1" + chr(10) + "00:00:00,000 --> 00:00:01,000" + chr(10) + "字体测试" + chr(10))
+        calls = {"n": 0}
+        real_run = ed._run
+
+        def flaky(args, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise VideoEditError("ffmpeg 失败: Could not find font")
+            return real_run(args, timeout)
+
+        ed._run = flaky
+        r = ed.subtitle(video, srt, font_name="Microsoft YaHei")
+        assert calls["n"] == 2
+        assert r["font_name"] == "MicrosoftYaHei"
 
 
 class TestProbeAndTrim:
@@ -287,3 +409,72 @@ class TestToolLayer:
     def test_registered_in_tool_manager(self):
         from tools.tool_manager import ToolManager
         assert "video_edit" in ToolManager().list_tools()
+
+def _real_ffmpeg() -> bool:
+    try:
+        from models.video_edit import available
+        return bool(available())
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _real_ffmpeg(), reason="需要真实 ffmpeg/ffprobe")
+class TestRealFfmpegIntegration:
+    """真机回归（本机装了 ffmpeg 才跑）：用真实媒体验证 T3/T4/T5/T6 的修复。"""
+
+    def _inputs(self, tmp_path):
+        import subprocess as sp
+        from models.video_edit import ffmpeg_path
+        ff = ffmpeg_path()
+        v, dub, bgm = tmp_path / "v.mp4", tmp_path / "dub.wav", tmp_path / "bgm.wav"
+        sp.run([ff, "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-shortest",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(v)],
+               check=True, capture_output=True)
+        for path, freq in ((dub, 880), (bgm, 220)):
+            sp.run([ff, "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=5",
+                    "-c:a", "pcm_s16le", str(path)], check=True, capture_output=True)
+        return str(v), str(dub), str(bgm)
+
+    def test_mix_bounded_normalized_drops_original(self, tmp_path):
+        from models.video_edit import VideoEditor
+        v, dub, bgm = self._inputs(tmp_path)
+        ed = VideoEditor(save_dir=str(tmp_path))
+        r = ed.add_audio(v, dub, bgm=bgm, bgm_volume=0.2)
+        info = ed.probe(r["path"])
+        assert abs(info["duration"] - 2.0) < 0.4, info       # T4：封顶到画面
+        assert info["audio_sample_rate"] == 44100, info      # T5：统一采样率
+        assert info["audio_channels"] == 2, info             # T5：立体声
+        assert r["layers"] == ["dub", "bgm"] and r["dropped_original"] is True
+
+    def test_subtitle_burn_real(self, tmp_path):
+        from models.video_edit import VideoEditor
+        v, _, _ = self._inputs(tmp_path)
+        srt = tmp_path / "s.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:01,500\n测试字幕\n",
+            encoding="utf-8",
+        )
+        ed = VideoEditor(save_dir=str(tmp_path))
+        r = ed.subtitle(v, str(srt))
+        info = ed.probe(r["path"])
+        assert info["duration"] > 1.0
+        assert r["font_size"] == 14                           # 240*3.2%=7.7 → 下限 14
+        assert r["original_size"] == "320x240"
+        # 真正烧进去没有？抽 t=1.0s 帧，看底部是否有字幕亮像素（回归"字幕丢失"）
+        import subprocess as sp
+        from models.video_edit import ffmpeg_path
+        png = tmp_path / "_sub.png"
+        sp.run([ffmpeg_path(), "-y", "-v", "error", "-i", r["path"],
+                "-ss", "1.0", "-frames:v", "1", "-update", "1", str(png)],
+               check=True, capture_output=True)
+        from PIL import Image
+        im = Image.open(str(png)).convert("L")
+        w, h = im.size
+        px = im.load()
+        rows = [y for y in range(int(h * 0.6), h)
+                if any(px[x, y] > 180 for x in range(0, w, 2))]
+        assert rows, "字幕没有烧进画面"
+        assert rows[-1] > h * 0.85                            # 应贴底

@@ -381,10 +381,17 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
       1. `image_gen` 逐镜出图（同角色可在 prompt 里固定外观描述以保持一致）
       2. `video_edit(command="kenburns", images=[...], duration=每镜秒数)`
          把静态图变成带推拉摇移的镜头（运镜自动轮换，也可用 motions 指定）
-      3. `tts` 逐镜生成台词配音
-      4. `video_edit(command="add_audio", video=..., audio=...)` 逐镜合成配音
-         （音轨短于画面会自动补静音，不会截断画面）
+      3. `tts` 逐镜生成台词配音；若要背景音乐，另行准备一个 BGM 音频文件
+      4. `video_edit(command="add_audio", video=..., audio=配音, bgm=BGM, bgm_volume=0.25)`
+         —— **配音 + BGM 两层，原视频声音默认丢弃**：不要再自己拼 ffmpeg amix 去混原声，
+         那会把原声/环境音和配音糊成三层；确实要保留原声才传 keep_original=true。
+         时长以画面为准：配音更长会被裁到画面长度、更短会自动补静音，
+         不会出现"容器被拉长 + 末尾冻帧"；音轨统一输出 44.1kHz 立体声，
+         不会被 TTS 的 24kHz 单声道拖降级。
       5. `video_edit(command="concat", videos=[...])` 按顺序拼接成完整视频
+      6. 需要字幕：`video_edit(command="subtitle", video=..., srt=字幕文件)`
+         —— 字号默认按视频高度 3.2% 自动换算（竖屏 720x1280≈41px、横屏 1280x720≈23px），
+         不要再自造 ASS 或按 288 高度基准调字号；字体默认 SimHei，可传 font_name。
     这条路**不消耗 video_gen 的生成配额**，画面完全由图像模型控制，
     是漫剧类需求的首选；只有"必须有真实动态"的镜头才用 video_gen。
   · 用 `video_edit(command="probe", video=...)` 读片长/分辨率，用于对齐画面与配音时长。

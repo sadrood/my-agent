@@ -173,6 +173,9 @@ VIDEO_GEN_CONFIG = {
     "query_base": os.getenv("VIDEO_GEN_QUERY_BASE", ""),
     "model": os.getenv("VIDEO_GEN_MODEL", "agnes-video-2.5-flash"),
     "seconds": os.getenv("VIDEO_GEN_SECONDS", "5"),        # 视频时长（秒，字符串）
+    # 供应商合法区间：小于 4s 会被拒（invalid_request），超过 12s 不支持
+    "seconds_min": float(os.getenv("VIDEO_GEN_SECONDS_MIN", "4")),
+    "seconds_max": float(os.getenv("VIDEO_GEN_SECONDS_MAX", "12")),
     "size": os.getenv("VIDEO_GEN_SIZE", "720P"),           # Flash 仅支持 720P
     "aspect_ratio": os.getenv("VIDEO_GEN_ASPECT_RATIO", "16:9"),
     "save_dir": os.getenv("VIDEO_GEN_SAVE_DIR", "./generated_videos"),

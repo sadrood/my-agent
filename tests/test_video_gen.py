@@ -378,3 +378,40 @@ class TestVideoGenTool:
     def test_registered_in_tool_manager(self):
         from tools.tool_manager import ToolManager
         assert "video_gen" in ToolManager().list_tools()
+
+class TestSecondsClamp:
+    """P2：供应商只接受 [4,12] 秒；越界必须就近 clamp，不能原样发出换一次无效请求。"""
+
+    def test_normalize_seconds_bounds(self):
+        from models.video_gen import _normalize_seconds as n
+        assert n("3") == "4"          # 3s 实测会被拒（invalid_request）
+        assert n("5") == "5"
+        assert n("30") == "12"
+        assert n("4.5") == "4.5"
+        assert n("abc") == "5"        # 非法值回退默认
+        assert n("3", 6, 8) == "6"    # 自定义区间
+
+    def test_create_payload_is_clamped(self, tmp_path, monkeypatch):
+        import models.video_gen as vg
+        seen = {}
+
+        def _post(url, json=None, headers=None, timeout=None):
+            seen["payload"] = json
+            return FakeResponse({"id": "t1", "video_id": "t1", "status": "queued"})
+
+        monkeypatch.setattr(vg.httpx, "post", _post)
+        m = make_model(tmp_path)
+        d = m.create("短镜", seconds="3")
+        assert seen["payload"]["seconds"] == "4"
+        assert d["seconds_clamped_from"] == "3"
+
+    def test_create_keeps_legal_value(self, tmp_path, monkeypatch):
+        import models.video_gen as vg
+        seen = {}
+        monkeypatch.setattr(vg.httpx, "post", lambda url, json=None, headers=None,
+                            timeout=None: (seen.update(payload=json),
+                                           FakeResponse({"id": "t2", "video_id": "t2"}))[1])
+        m = make_model(tmp_path)
+        d = m.create("正常", seconds="8")
+        assert seen["payload"]["seconds"] == "8"
+        assert "seconds_clamped_from" not in d

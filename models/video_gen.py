@@ -55,6 +55,26 @@ def _query_base_from(base_url: str) -> str:
     return base
 
 
+# 供应商合法时长区间（agnes-video 实测：3s → invalid_request；上限 12s）
+_SECONDS_MIN = 4.0
+_SECONDS_MAX = 12.0
+
+
+def _normalize_seconds(value, lo: float = None, hi: float = None) -> str:
+    """把任意时长输入归一化到供应商合法区间，返回字符串（如 '5' / '4.5'）。
+
+    越界不再原样发出（那会换来一次无效请求 + 一轮模型试错），而是就近 clamp。
+    """
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        num = 5.0
+    lo = _SECONDS_MIN if lo is None else lo
+    hi = _SECONDS_MAX if hi is None else hi
+    num = max(lo, min(hi, num))
+    return str(int(num)) if abs(num - round(num)) < 1e-6 else f"{num:g}"
+
+
 class VideoGenModel:
     """文生视频客户端（异步任务：创建 → 轮询 → 下载）。"""
 
@@ -88,14 +108,25 @@ class VideoGenModel:
         return {"Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"}
 
+    @staticmethod
+    def _bounds() -> tuple:
+        try:
+            from config import VIDEO_GEN_CONFIG
+            return (float(VIDEO_GEN_CONFIG.get("seconds_min", _SECONDS_MIN)),
+                    float(VIDEO_GEN_CONFIG.get("seconds_max", _SECONDS_MAX)))
+        except Exception:
+            return _SECONDS_MIN, _SECONDS_MAX
+
     def create(self, prompt: str, seconds: str = None, size: str = None,
                aspect_ratio: str = None, mode: str = "text",
                model: str = None) -> dict:
         """创建视频任务，返回创建响应（含 video_id / status）。"""
+        raw_seconds = seconds or self.seconds
+        norm_seconds = _normalize_seconds(raw_seconds, *self._bounds())
         payload = {
             "model": model or self.model,
             "prompt": prompt,
-            "seconds": str(seconds or self.seconds),
+            "seconds": norm_seconds,
             "mode": mode,
             "size": size or self.size,
             "aspect_ratio": aspect_ratio or self.aspect_ratio,
@@ -117,6 +148,8 @@ class VideoGenModel:
         if not vid:
             raise RuntimeError(f"视频任务创建响应缺少任务 ID: {json.dumps(data)[:300]}")
         data["video_id"] = vid
+        if str(raw_seconds).strip() != norm_seconds:
+            data["seconds_clamped_from"] = str(raw_seconds).strip()
         return data
 
     def query(self, video_id: str, model: str = None) -> dict:
