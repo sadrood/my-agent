@@ -970,7 +970,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         try:
             html = self._page.content()
             if len(html) > 8000:
-                html = html[:8000] + f"\n\n... (HTML 过长，已截断。总长度: {len(self._page.content())} 字符)"
+                html = html[:8000] + f"\n\n... (HTML 过长，已截断。总长度: {len(html)} 字符)"
             return ToolResult(success=True, output=html)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
@@ -1233,9 +1233,16 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return ensure
         action = args.strip().lower()
         try:
+            # 弹窗文字：唯一可靠的来源是 dialog 事件回调。旧实现读的是
+            # `window.__dialog_text`——该变量在全仓库只出现在这一行、**从未被赋值**，
+            # 所以 `alert text` 永远返回"无活跃弹窗"。
+            captured = {}
 
             def _dialog_handler(dialog):
-                text = dialog.message
+                captured["text"] = dialog.message
+                if action == "text":
+                    # 只查询不解弹窗：保持弹窗打开，交由后续 accept/dismiss
+                    return
                 if action == "accept":
                     dialog.accept()
                 elif action == "dismiss":
@@ -1243,13 +1250,22 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 elif "prompt" in action or "text" not in action:
                     dialog.accept(action.split(" ", 1)[1] if " " in action else "")
 
-            self._page.on("dialog", _dialog_handler)
+            # 关键：只能注册**一次性**监听器。此前每次 alert 调用都 `page.on(...)`
+            # 且永不摘除：监听器越堆越多，而且一旦注册了 dialog 监听器，
+            # Playwright 就不再自动 dismiss → 弹窗挂着，后续操作全部阻塞到超时；
+            # 残留的旧处理器还会在无关的新弹窗上乱点。
+            self._page.once("dialog", _dialog_handler)
 
             if action == "text":
-                dialog_text = self._page.evaluate(
-                    "() => { const d = window.__dialog_text; return d || '无活跃弹窗'; }"
-                )
-                return ToolResult(success=True, output=f"弹窗文字: {dialog_text}")
+                # 给弹窗事件一点时间到达；没有弹窗就如实说明
+                for _ in range(20):
+                    if captured.get("text") is not None:
+                        break
+                    self._page.wait_for_timeout(50)
+                text = captured.get("text")
+                if text is None:
+                    return ToolResult(success=True, output="当前没有活跃弹窗。")
+                return ToolResult(success=True, output=f"弹窗文字: {text}")
 
             return ToolResult(success=True, output=f"弹窗已处理: {action}")
         except Exception as e:
@@ -1265,7 +1281,10 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         if not ensure.success:
             return ensure
         try:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            # 毫秒精度：旧实现只到秒，同一秒内两次截图会**互相覆盖**，
+            # 而两次调用都返回 success 和同一个路径（与 tts/video_gen/
+            # image_gen/video_edit 里已经修过的同款问题一致）。
+            timestamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
             filename = f"screenshot_{timestamp}.png"
             filepath = os.path.join(self._screenshot_dir, filename)
 
@@ -1388,6 +1407,17 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages = []
         self._current_page_idx = 0
+        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时
+        # 都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node，
+        # 并且 `--user-data-dir=<profile>` 仍被占用，下一次
+        # launch_persistent_context 直接起不来（`_force_cleanup_residual` 存在的
+        # 意义正是收拾这个局面，_close_impl 里会调它，这里此前漏了）。
+        try:
+            killed = self._force_cleanup_residual()
+            if killed:
+                print(f"[Browser] 已清理残留浏览器进程 {killed} 个")
+        except Exception:
+            pass
 
     def get_page(self):
         return self._page
