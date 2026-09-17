@@ -709,7 +709,15 @@ class LLM:
         )
 
     def supports_tools(self) -> bool:
-        """探测当前供应商是否支持 function calling（一次 0-token 探测）。"""
+        """探测当前供应商是否支持 function calling（一次 0-token 探测）。
+
+        注意：执行器实际用的是 `_looks_like_unsupported()`（只在报错时判定），
+        本方法目前没有调用方，保留供外部/脚本探测用。
+
+        异常处理必须区分类型：旧实现把**任何**异常都吞成 False——一次网络抖动
+        或 429 会被读成"该模型不支持 function calling"，进而静默降级到经典
+        计划模式（用户看到的是行为突变，而不是一个网络错误）。
+        """
         try:
             self.client.chat.completions.create(
                 model=self.default_model,
@@ -719,5 +727,12 @@ class LLM:
                 max_tokens=1,
             )
             return True
-        except Exception:
-            return False
+        except _bad_request_error() as e:
+            # 明确是"参数/能力"类错误 → 确实不支持
+            msg = str(e).lower()
+            if any(k in msg for k in ("tool", "function", "unsupported", "not support")):
+                return False
+            raise
+        # 网络类错误（超时/限流/连接失败）→ 不能拿它当"不支持"，交给调用方处理
+        except _openai_errors() as e:
+            raise RuntimeError(f"探测 function calling 失败（非能力问题）: {str(e)[:200]}") from e
