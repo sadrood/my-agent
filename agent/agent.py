@@ -1078,12 +1078,26 @@ class Agent:
             ]
             self.session_store.save_conversation(
                 name,
-                messages=messages,          # 全量记录
+                messages=messages,          # 全量记录（每轮整份重写，见下方体积告警）
                 last_summary=self.last_execution_summary,
                 model=self.llm.default_model,
                 base_url=str(self.llm.client.base_url),
             )
             print_evolution(f"对话已保存: {name}（{len(messages)} 条记录）", use_rich=self.config.verbose)
+            # 体积告警：会话是**每轮整份重写**的（O(n²) 落盘），且这是对话的唯一
+            # 副本。历史上出现过单文件 3.5GB / 630 万条消息把进程拖垮的事故，
+            # 所以到阈值就明确提示用户压缩，而不是等它涨到不可收拾。
+            try:
+                path = os.path.join(self.session_store.dir, f"{name}.json")
+                size_mb = os.path.getsize(path) / 1048576 if os.path.exists(path) else 0
+                limit = float(SESSION_CONFIG.get("warn_size_mb", 20))
+                if size_mb >= limit:
+                    print_warning(
+                        f"当前对话文件已 {size_mb:.0f}MB（{len(messages)} 条记录），"
+                        f"每轮都会整份重写。建议用 /compact 压缩历史，"
+                        f"或 /sessions 开新对话。", use_rich=self.config.verbose)
+            except Exception:
+                pass
         except Exception as e:
             print_warning(f"对话保存失败: {e}", use_rich=self.config.verbose)
 

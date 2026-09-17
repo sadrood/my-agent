@@ -14,6 +14,88 @@ from tools.computer_use import ComputerUseMixin
 from tools.intent_detector import get_intent_detector
 from config import BROWSER_CONFIG
 
+# 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage
+# 在 Default/ 下），但会随每次浏览器启动各长几 MB。实测该目录涨到 250MB：
+# DeferredBrowserMetrics 144MB + BrowserMetrics 48MB + Default/Cache 30MB。
+_PROFILE_JUNK_DIRS = (
+    "DeferredBrowserMetrics",
+    "BrowserMetrics",
+    "Crashpad/reports",
+    "ShaderCache",
+    "GrShaderCache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "Default/DawnWebGPUCache",
+    "Default/DawnGraphiteCache",
+)
+
+
+def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
+                       max_total_mb: float = None) -> int:
+    """清理持久 profile 里的遥测/缓存垃圾，返回释放的字节数。
+
+    sessions/rollouts 都有轮转上限，唯独 web-profile 从无清理策略（grep
+    profile_dir 只有创建点）——每个用过浏览器的任务都会留下约 3×4MB 的
+    DeferredBrowserMetrics。这里在每次启动前按年龄+总量清一遍，**只动上述
+    遥测目录**，绝不碰 Default/Cookies、Login Data、Local Storage 等登录态。
+    """
+    import shutil
+    from datetime import datetime
+
+    max_age_days = float(BROWSER_CONFIG.get("profile_max_age_days", 7)
+                         if max_age_days is None else max_age_days)
+    max_total_mb = float(BROWSER_CONFIG.get("profile_max_mb", 150)
+                         if max_total_mb is None else max_total_mb)
+    root = os.path.abspath(profile_dir)
+    if not os.path.isdir(root):
+        return 0
+    freed = 0
+    cutoff = time.time() - max_age_days * 86400
+
+    def _dir_size(p: str) -> int:
+        total = 0
+        for dp, _, fs in os.walk(p):
+            for f in fs:
+                try:
+                    total += os.path.getsize(os.path.join(dp, f))
+                except OSError:
+                    pass
+        return total
+
+    for rel in _PROFILE_JUNK_DIRS:
+        target = os.path.join(root, rel.replace("/", os.sep))
+        if not os.path.isdir(target):
+            continue
+        # Crashpad/reports 与 *Metrics 目录都是"一堆历史文件"，按年龄删；
+        # 缓存目录整体删（浏览器会重建）。
+        if rel in ("Default/Code Cache", "Default/GPUCache",
+                   "Default/DawnWebGPUCache", "Default/DawnGraphiteCache"):
+            freed += _dir_size(target)
+            shutil.rmtree(target, ignore_errors=True)
+            continue
+        for name in os.listdir(target):
+            p = os.path.join(target, name)
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    if os.path.isdir(p):
+                        freed += _dir_size(p)
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        freed += os.path.getsize(p)
+                        os.remove(p)
+            except OSError:
+                pass
+
+    # 总量兜底：仍超限就整体丢掉遥测目录（缓存会重建，登录态不受影响）
+    total = _dir_size(root)
+    if total > max_total_mb * 1024 * 1024:
+        for rel in ("DeferredBrowserMetrics", "BrowserMetrics", "Crashpad/reports"):
+            target = os.path.join(root, rel.replace("/", os.sep))
+            if os.path.isdir(target):
+                freed += _dir_size(target)
+                shutil.rmtree(target, ignore_errors=True)
+    return freed
+
 
 class BrowserTool(BaseTool, ComputerUseMixin):
     """
@@ -472,6 +554,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 # 启动保留——网页型分身先 headed 手动登录一次，之后 agent 复用会话。
                 # 返回值直接是 BrowserContext（没有独立 Browser 对象）。
                 os.makedirs(self._profile_dir, exist_ok=True)
+                _prune_profile_dir(self._profile_dir)
                 self._browser = None
                 self._context = self._playwright.chromium.launch_persistent_context(
                     self._profile_dir,

@@ -221,16 +221,28 @@ class SessionStore:
         return result
 
     def _cleanup(self):
-        """保留最近 max_sessions 个会话文件。"""
+        """保留最近 max_sessions 个会话文件。
+
+        注意：会话文件是**用户对话的唯一副本**（没有任何其它备份）。旧实现
+        `for f in files[:-max_files]: os.remove(f)` 会静默删掉最旧的那些，
+        用户既看不到提示、也无法找回。现在超限时先明确告警并告知路径，
+        让"被清理"成为一件可感知、可干预的事。
+        """
         try:
             files = sorted(
                 (os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.endswith(".json")),
                 key=os.path.getmtime,
             )
             max_files = int(self.config.get("max_sessions", 50))
-            for f in files[:-max_files]:
+            doomed = files[:-max_files] if max_files > 0 else []
+            if doomed:
+                print(f"[Session] 会话数超过上限（{max_files}），将清理最旧的 "
+                      f"{len(doomed)} 个会话文件。它们是对话的唯一副本，"
+                      f"如需保留请先把 {self.dir} 里的文件备份出去。")
+            for f in doomed:
                 try:
                     os.remove(f)
+                    print(f"[Session] 已清理: {os.path.basename(f)}")
                 except Exception:
                     pass
         except Exception:

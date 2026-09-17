@@ -367,7 +367,13 @@ class ApprovalPolicy:
         return ApprovalDecision(allowed, "用户选择" + ("批准。" if allowed else "拒绝。"), required_approval=True)
 
     def _record(self, request: ApprovalRequest, decision: ApprovalDecision):
+        # 只保留最近 N 条：decision_log 在长驻进程（桌面端）里只增不减，
+        # 而 agent 每次 run 都要全量扫一遍统计被拒次数 → 越用越慢、内存越涨。
+        # 统计口径（report / 被拒计数）只看近期即可。
         self.decision_log.append({"tool": request.tool_name, "command": request.command[:200], "risk": request.risk_level, "decision": "allow" if decision.allowed else "deny", "reason": decision.reason})
+        max_len = int(APPROVAL_CONFIG.get("decision_log_max", 200))
+        if max_len > 0 and len(self.decision_log) > max_len:
+            del self.decision_log[:-max_len]
 
     def report(self) -> str:
         """输出本次运行的审批统计。"""
