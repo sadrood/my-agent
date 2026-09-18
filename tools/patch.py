@@ -210,6 +210,19 @@ class EditTool(BaseTool):
     # 验证式应用（preflight）
     # ================================================================
 
+    @staticmethod
+    def _find_repo_root(file_path: str) -> str:
+        """从被改文件向上找仓库根（第一个含 tests/ 目录的祖先），
+        避免 preflight 在 cwd 漂移时找不到测试而误判失败。"""
+        d = os.path.dirname(os.path.abspath(file_path))
+        while True:
+            if os.path.isdir(os.path.join(d, "tests")):
+                return d
+            parent = os.path.dirname(d)
+            if parent == d:
+                return os.getcwd()
+            d = parent
+
     def _related_test_command(self, file_path: str, test_cmd: str) -> str:
         """按被改文件推断**相关**测试目标，避免每次 edit 都跑全套测试。
 
@@ -238,7 +251,8 @@ class EditTool(BaseTool):
         stem = os.path.splitext(os.path.basename(norm))[0]
         parent = os.path.basename(os.path.dirname(norm))
 
-        tests_dir = os.path.join(os.getcwd(), "tests")
+        repo_root = self._find_repo_root(file_path)
+        tests_dir = os.path.join(repo_root, "tests")
         if not os.path.isdir(tests_dir):
             return test_cmd
 
@@ -312,6 +326,7 @@ class EditTool(BaseTool):
                 timeout=int(TOOL_CONFIG.get("edit_preflight_timeout", 180)),
                 encoding="utf-8", errors="replace",
                 stdin=subprocess.DEVNULL,   # 防止命令意外读取 stdin 而永久阻塞
+                cwd=self._find_repo_root(file_path),
             )
         except subprocess.TimeoutExpired:
             rolled = self._rollback_edit(file_path, backup_path)

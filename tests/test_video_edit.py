@@ -478,3 +478,30 @@ class TestRealFfmpegIntegration:
                 if any(px[x, y] > 180 for x in range(0, w, 2))]
         assert rows, "字幕没有烧进画面"
         assert rows[-1] > h * 0.85                            # 应贴底
+class TestKenBurnsPortrait:
+    """竖图输入 → 输出规格自动交换为竖屏（回归保护：升级前竖图被压扁成横屏）。"""
+
+    def test_portrait_image_swaps_to_portrait_output(self, tmp_path, fake_ffmpeg):
+        """竖图（9:16）输入：输出规格自动交换为竖屏 720x1280。"""
+        fake_ffmpeg["probe"]["width"], fake_ffmpeg["probe"]["height"] = 720, 1280
+        img = touch(tmp_path / "a.png")
+        make_editor(tmp_path).kenburns(img, duration=2, motion="zoom_in")
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert "s=720x1280" in cmd
+
+    def test_landscape_image_keeps_landscape_output(self, tmp_path, fake_ffmpeg):
+        """横图（16:9）输入：保持默认横屏规格，不交换。"""
+        fake_ffmpeg["probe"]["width"], fake_ffmpeg["probe"]["height"] = 1280, 720
+        img = touch(tmp_path / "a.png")
+        make_editor(tmp_path).kenburns(img, duration=2, motion="zoom_in")
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert "s=1280x720" in cmd
+
+    def test_probe_failure_falls_back_to_default(self, tmp_path, fake_ffmpeg):
+        """探测失败（无宽高信息）：回退默认横屏规格，不抛异常。"""
+        fake_ffmpeg["probe"]["width"], fake_ffmpeg["probe"]["height"] = 0, 0
+        img = touch(tmp_path / "a.png")
+        r = make_editor(tmp_path).kenburns(img, duration=2, motion="zoom_in")
+        assert r["path"].endswith(".mp4")
+        cmd = last_ffmpeg_cmd(fake_ffmpeg)
+        assert "s=1280x720" in cmd

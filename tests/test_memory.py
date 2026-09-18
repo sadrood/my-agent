@@ -722,3 +722,29 @@ def test_default_chat_id_backward_compat():
         assert len(m.long_term_memory) == 1
     finally:
         shutil.rmtree(tmp)
+class TestCwdAnchor:
+    """默认记忆路径锚定项目根：cwd 漂移（如运行在 output/ 子目录）不再写丢/分叉。"""
+
+    def test_default_db_path_anchored_to_project_root(self, monkeypatch, tmp_path):
+        import agent.memory as mem
+        # 模拟"项目根在别处"，证明锚定走的是 PROJECT_ROOT 而非 cwd
+        monkeypatch.setattr(mem, "PROJECT_ROOT", str(tmp_path))
+        drifted = tmp_path / "output"
+        drifted.mkdir()                          # cwd 漂移到 output/ 子目录
+        monkeypatch.chdir(drifted)
+        m = mem.Memory(db_path=None)
+        assert m.db_path == os.path.join(str(tmp_path), "memory")
+
+    def test_relative_db_path_anchored_to_project_root(self, monkeypatch, tmp_path):
+        import agent.memory as mem
+        monkeypatch.setattr(mem, "PROJECT_ROOT", str(tmp_path))
+        drifted = tmp_path / "output"
+        drifted.mkdir()
+        monkeypatch.chdir(drifted)
+        m = mem.Memory(db_path="mem-rel")
+        assert m.db_path == os.path.join(str(tmp_path), "mem-rel")
+
+    def test_absolute_db_path_respected(self, tmp_path):
+        import agent.memory as mem
+        m = mem.Memory(db_path=str(tmp_path), chat_id="conv-abs")
+        assert m.db_path == str(tmp_path)

@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 # 加载 .env 文件中的环境变量
 load_dotenv()
 
+# 项目根目录（config.py 位于仓库顶层）：默认存储路径（记忆/会话/缓存）统一
+# 锚定到这里，杜绝进程 cwd 漂移导致数据写到 output/ 等子目录造成分叉。
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 
 def resolve_minimal_mode(env: dict) -> bool:
     """极简模式解析（纯函数，便于测试）：禁用一切非必要功能。"""
