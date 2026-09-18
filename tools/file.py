@@ -7,6 +7,13 @@ v2 变化：
 - execute_json() 把结构化参数映射到旧字符串命令，复用全部内部逻辑
 - 风险分级：读操作 low，写操作 medium
 
+v4 变化（2026-09-18）：
+- 补齐 delete：此前 schema 只有 read/write/append/copy/move/list/exists/info，
+  **没有任何删除能力**，而 python 工具的 shutil 被黑名单拦下 → Agent 只能新建、
+  无法清理，产物目录（output/）只涨不减（实测膨胀到 36GB，其中一个坏 wav 占 34GB）。
+  删除=破坏性操作，因此：目录必须显式 recursive=true、危险路径（.git/项目根/盘根）
+  一律拒绝、审批分级 medium（递归删除 high）。
+
 v3 变化（2026-09-15）：
 - 补齐 append：schema 与 executor 提示词一直在教模型「用 file append 分段写大文件」，
   但本工具从未实现该操作，模型照做必然失败。
@@ -45,6 +52,7 @@ class FileTool(BaseTool):
             "  - append <文件路径> <内容>: 追加内容到文件末尾（不存在则创建）\n"
             "  - copy <源路径> <目标路径>: 复制文件或目录（目标为已存在目录时复制到其中）\n"
             "  - move <源路径> <目标路径>: 移动/重命名文件或目录\n"
+            "  - delete <路径> [recursive]: 删除文件；目录必须显式 recursive=true\n"
             "  - list <目录路径>: 列出目录中的文件\n"
             "  - exists <路径>: 检查文件或目录是否存在\n"
             "  - info <文件路径>: 获取文件信息（大小、修改时间等）\n"
@@ -57,12 +65,18 @@ class FileTool(BaseTool):
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["read", "write", "append", "copy", "move", "list", "exists", "info"],
+                    "enum": ["read", "write", "append", "copy", "move", "delete",
+                             "list", "exists", "info"],
                     "description": "要执行的文件操作",
                 },
                 "path": {
                     "type": "string",
                     "description": "文件或目录路径（copy/move 时为源路径）",
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "delete 用：删除整个目录树时必须显式传 true"
+                                   "（防误删；拒绝 .git/项目根/盘根）",
                 },
                 "destination": {
                     "type": "string",
@@ -101,11 +115,14 @@ class FileTool(BaseTool):
             return self._do_copy(path, str(arguments.get("destination", "")).strip())
         if operation == "move":
             return self._do_move(path, str(arguments.get("destination", "")).strip())
+        if operation == "delete":
+            return self._do_delete(path, bool(arguments.get("recursive")))
         if operation in ("read", "list", "exists", "info"):
             return self.execute(f"{operation} {path}")
         return ToolResult(
             success=False, output="",
-            error=f"未知操作: '{operation}'。支持: read/write/append/copy/move/list/exists/info",
+            error=f"未知操作: '{operation}'。支持: "
+                  f"read/write/append/copy/move/delete/list/exists/info",
         )
 
     def build_approval_request(self, arguments: Dict[str, Any]):
@@ -114,12 +131,18 @@ class FileTool(BaseTool):
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
         is_write = operation in ("write", "append", "copy", "move")
+        is_delete = operation == "delete"
+        recursive = bool(arguments.get("recursive"))
+        if is_delete:
+            risk = "high" if recursive else "medium"
+        else:
+            risk = "medium" if is_write else "low"
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
-            command=f"file {operation} {path}",
-            risk_level="medium" if is_write else "low",
-            min_sandbox_mode="workspace-write" if is_write else "read-only",
+            command=f"file {operation} {path}" + (" recursive" if recursive else ""),
+            risk_level=risk,
+            min_sandbox_mode="workspace-write" if (is_write or is_delete) else "read-only",
         )
 
     def execute(self, input_str: str) -> ToolResult:
@@ -138,6 +161,7 @@ class FileTool(BaseTool):
             "write": self._write_file,
             "append": self._append_file,
             "copy": self._copy,
+            "delete": self._delete,
             "move": self._move,
             "list": self._list_dir,
             "exists": self._check_exists,
@@ -228,6 +252,80 @@ class FileTool(BaseTool):
                 success=False, output="", error="复制操作需要: copy <源路径> <目标路径>"
             )
         return self._do_copy(parts[0].strip(), parts[1].strip())
+
+    #: 删除时必须拒绝的危险目标（.git / 项目根 / 盘根）
+    _PROTECTED_NAMES = (".git", ".env")
+
+    @staticmethod
+    def _project_root() -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _delete_guard(self, path: str) -> str:
+        """返回拒绝原因（"" = 允许删除）。"""
+        if not path or not path.strip():
+            return "删除操作需要路径"
+        target = os.path.abspath(path.strip())
+        root = os.path.abspath(self._project_root())
+        drive, tail = os.path.splitdrive(target)
+        if tail in ("\\", "/", ""):
+            return f"拒绝删除盘根/根目录: {target}"
+        if target == root:
+            return f"拒绝删除项目根目录: {target}"
+        if root.startswith(target + os.sep):
+            return f"拒绝删除项目根目录的上级: {target}"
+        parts = [x for x in target.replace("\\", "/").split("/") if x]
+        for bad in self._PROTECTED_NAMES:
+            if bad in parts:
+                return f"拒绝删除受保护路径（含 {bad}）: {target}"
+        return ""
+
+    def _delete(self, args: str) -> ToolResult:
+        """字符串入口：``<路径> [recursive]``。"""
+        text = (args or "").strip()
+        recursive = text.lower().endswith(" recursive")
+        if recursive:
+            text = text[: -len(" recursive")].strip()
+        return self._do_delete(text, recursive)
+
+    def _do_delete(self, path: str, recursive: bool = False) -> ToolResult:
+        """删除文件；目录需显式 recursive=true（破坏性操作，故加多重守卫）。"""
+        reason = self._delete_guard(path)
+        if reason:
+            return ToolResult(success=False, output="", error=reason)
+        target = os.path.abspath(path.strip())
+        if not os.path.exists(target):
+            return ToolResult(success=False, output="", error=f"路径不存在: {target}")
+        try:
+            if os.path.isdir(target):
+                if not recursive:
+                    n = sum(len(f) for _r, _d, f in os.walk(target))
+                    return ToolResult(
+                        success=False, output="",
+                        error=f"{target} 是目录（含 {n} 个文件）。确认要整树删除请传 "
+                              f"recursive=true。")
+                n = 0
+                size = 0
+                for dirpath, _dirs, files in os.walk(target):
+                    for f in files:
+                        n += 1
+                        try:
+                            size += os.path.getsize(os.path.join(dirpath, f))
+                        except OSError:
+                            pass
+                shutil.rmtree(target)
+                return ToolResult(
+                    success=True,
+                    output=f"已删除目录: {target}（{n} 个文件，{size / 1048576:.2f} MB）",
+                    metadata={"deleted": target, "files": n, "bytes": size,
+                              "recursive": True})
+            size = os.path.getsize(target)
+            os.remove(target)
+            return ToolResult(
+                success=True,
+                output=f"已删除文件: {target}（{size / 1024:.1f} KB）",
+                metadata={"deleted": target, "files": 1, "bytes": size})
+        except Exception as e:                              # noqa: BLE001
+            return ToolResult(success=False, output="", error=f"删除失败: {e}")
 
     def _do_copy(self, src: str, dst: str) -> ToolResult:
         if not src or not dst:
