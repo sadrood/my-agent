@@ -151,31 +151,50 @@ class TestSnapshot:
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_checkpoint_per_tool(self, tmp_path):
-        """逐操作式检查点：每次修改前 git 提交，可逐操作回滚。"""
-        from agent.snapshot import checkpoint, ensure_repo, is_git_repo
+        """逐操作式检查点：快照挂 refs/snapshots/*，**不进 main 历史**（可回滚）。"""
+        from agent.snapshot import checkpoint, ensure_repo, is_git_repo, list_snapshots
         import subprocess
 
         ensure_repo(str(tmp_path))
         assert is_git_repo(str(tmp_path)) is True
 
-        # 第一次修改 → checkpoint 提交（返回该检查点的 commit hash）
+        def head():
+            return subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(tmp_path),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            ).stdout.strip()
+
+        head0 = head()
         (tmp_path / "a.py").write_text("v1", encoding="utf-8")
         hash1 = checkpoint(str(tmp_path), "edit a.py")
-        assert hash1
+        assert hash1 and hash1 != head0
 
-        # 第二次修改 → 再一个 checkpoint
         (tmp_path / "a.py").write_text("v2", encoding="utf-8")
         hash2 = checkpoint(str(tmp_path), "edit a.py")
-        assert hash2 and hash2 != hash1
+        assert hash2 and hash2 not in (hash1, head0)
 
+        # 关键：checkpoint 不再推进 HEAD，也不出现在分支历史里
+        assert head() == head0
         log = subprocess.run(
             ["git", "log", "--oneline"], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        assert log.stdout.count("checkpoint:") == 2
+        assert "checkpoint:" not in log.stdout
 
-        # 干净仓库 → checkpoint 也成功（无需提交，返回 HEAD hash）
-        assert checkpoint(str(tmp_path), "noop") == hash2
+        # 但快照确实存在（挂在 refs/snapshots 上，可回滚）
+        snaps = list_snapshots(str(tmp_path))
+        assert len(snaps) == 2
+        assert snaps[0][0].startswith("refs/snapshots/")
+        assert {snaps[0][1], snaps[1][1]} == {hash1, hash2}
+        assert "checkpoint:" in snaps[0][2]
+
+        # 工作区仍有未提交改动（快照不推进 HEAD）→ 先清干净再验"无改动"语义
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "user commit"], cwd=str(tmp_path),
+                       capture_output=True)
+        head1 = head()
+        assert checkpoint(str(tmp_path), "noop") == head1     # 无改动 → 返回 HEAD
+        assert len(list_snapshots(str(tmp_path))) == 2        # 且不新增快照
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_rollback_to_checkpoint(self, tmp_path):
@@ -196,19 +215,20 @@ class TestSnapshot:
         second_hash = checkpoint(str(tmp_path), "edit a.py b.py")
         assert second_hash
 
-        # 回滚到第一次检查点：a.py 恢复 v1，b.py 应被移除
+        # 回滚到第一次检查点（它挂在 refs/snapshots 上，不是 HEAD 祖先）：
+        # a.py 恢复 v1，b.py 应被移除
         new_head = rollback_to(str(tmp_path), base_hash)
         assert new_head and new_head != second_hash
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "v1"
         assert not (tmp_path / "b.py").exists()
 
-        # 历史保留：所有旧提交仍在（不重写历史）
+        # 回滚以新提交落库（不重写历史），且分支历史里没有 checkpoint 流水账
         log = subprocess.run(
             ["git", "log", "--oneline"], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         assert "rollback:" in log.stdout
-        assert second_hash[:10] in log.stdout or base_hash[:10] in log.stdout
+        assert "checkpoint:" not in log.stdout
 
         # 工作区干净（回滚已提交）
         status = subprocess.run(
@@ -323,6 +343,15 @@ def _commit_count(repo: str) -> int:
     return int(log.stdout.strip() or "0")
 
 
+def _snapshot_files(repo: str, sha: str) -> list:
+    """快照提交里的文件清单（用于断言归因提交只含指定文件）。"""
+    import subprocess
+    out = subprocess.run(["git", "ls-tree", "-r", "--name-only", sha], cwd=repo,
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace").stdout
+    return [x for x in out.splitlines() if x.strip()]
+
+
 def _dirty(repo: str) -> list:
     import subprocess
     r = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
@@ -392,22 +421,32 @@ class TestSelectiveSnapshot:
         (tmp_path / "mine.py").write_text("v1", encoding="utf-8")
         (tmp_path / "user_wip.txt").write_text("并行工作", encoding="utf-8")
 
-        assert checkpoint(str(tmp_path), "edit mine.py",
-                          changed_file="mine.py")
-        # Agent 的文件已提交；并行工作保持未提交
-        assert "mine.py" not in _dirty(str(tmp_path))
+        sha = checkpoint(str(tmp_path), "edit mine.py", changed_file="mine.py")
+        assert sha
+        # 快照树里只有本次修改的文件；并行工作不进快照（归因提交）
+        tree = _snapshot_files(str(tmp_path), sha)
+        assert "mine.py" in tree
+        assert "user_wip.txt" not in tree
+        # 工作区保持原样（快照不动 HEAD/工作区），并行改动仍在
+        assert "mine.py" in _dirty(str(tmp_path))
         assert "user_wip.txt" in _dirty(str(tmp_path))
         assert has_pending_changes(str(tmp_path)) is True
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_checkpoint_without_changed_file_keeps_legacy(self, tmp_path):
-        """不传 changed_file：退回全量 add -A（向后兼容）。"""
+        """不传 changed_file：退回全量快照（add -A 语义，向后兼容）。"""
         from agent.snapshot import checkpoint, has_pending_changes
 
         self._ensure_repo_with_identity(tmp_path)
         (tmp_path / "a.py").write_text("v1", encoding="utf-8")
-        assert checkpoint(str(tmp_path), "edit a.py")
-        assert has_pending_changes(str(tmp_path)) is False
+        (tmp_path / "b.txt").write_text("另一个改动", encoding="utf-8")
+        sha = checkpoint(str(tmp_path), "edit a.py")
+        assert sha
+        # 全量模式：两个文件都进快照
+        tree = _snapshot_files(str(tmp_path), sha)
+        assert "a.py" in tree and "b.txt" in tree
+        # 但工作区依旧保持未提交（快照只挂 refs/snapshots/*）
+        assert has_pending_changes(str(tmp_path)) is True
 
 
 class TestDiffMetadataFallback:
