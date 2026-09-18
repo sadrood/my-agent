@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from config import ROLLOUT_CONFIG
+from config import ROLLOUT_CONFIG, resolve_under_root
 
 COMPACT_SYSTEM_PROMPT = """你是一个对话压缩器。请把下面的执行过程压缩成一份精炼的摘要。
 
@@ -144,9 +144,11 @@ class Rollout:
 
     def _open_log(self):
         try:
-            os.makedirs(self.config.get("dir", "./rollouts"), exist_ok=True)
+            os.makedirs(resolve_under_root(self.config.get("dir", "./rollouts")),
+                    exist_ok=True)
             self._log_path = os.path.join(
-                self.config.get("dir", "./rollouts"), f"{self.run_id}.jsonl"
+                resolve_under_root(self.config.get("dir", "./rollouts")),
+            f"{self.run_id}.jsonl"
             )
             self._log_file = open(self._log_path, "a", encoding="utf-8")
         except Exception:
@@ -272,7 +274,7 @@ class Rollout:
     def cleanup_old_logs(self):
         """清理旧追踪文件，仅保留最近 N 个。"""
         try:
-            d = self.config.get("dir", "./rollouts")
+            d = resolve_under_root(self.config.get("dir", "./rollouts"))
             files = sorted(
                 (os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")),
                 key=os.path.getmtime,

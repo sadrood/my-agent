@@ -22,7 +22,7 @@ import subprocess
 from datetime import datetime
 from typing import List, Optional
 
-from config import VIDEO_EDIT_CONFIG
+from config import VIDEO_EDIT_CONFIG, resolve_under_root
 
 # static-ffmpeg 探测结果缓存（该调用有开销，且可能触发下载）
 _STATIC_BIN_CACHE: dict = {}
@@ -105,7 +105,8 @@ class VideoEditor:
         self.width = int(width or cfg.get("width", 1280))
         self.height = int(height or cfg.get("height", 720))
         self.fps = int(fps or cfg.get("fps", 25))
-        self.save_dir = save_dir or cfg.get("save_dir", "./generated_videos")
+        self.save_dir = resolve_under_root(
+            save_dir or cfg.get("save_dir", "./generated_videos"))
         self.timeout = float(timeout or cfg.get("timeout", 600))
 
     # ------------------------------------------------------------

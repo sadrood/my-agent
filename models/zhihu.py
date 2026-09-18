@@ -24,7 +24,7 @@ import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
-from config import ZHIHU_CONFIG
+from config import ZHIHU_CONFIG, resolve_under_root
 
 
 class ZhihuError(RuntimeError):
@@ -115,7 +115,8 @@ class ZhihuClient:
         self.poll_interval = float(poll_interval if poll_interval is not None
                                    else cfg.get("poll_interval", 3))
         self.max_chars = int(max_chars or cfg.get("max_chars", 12000))
-        self.save_dir = str(save_dir or cfg.get("save_dir", "output/zhihu"))
+        self.save_dir = resolve_under_root(
+            save_dir or cfg.get("save_dir", "output/zhihu"))
         # 本机时钟与服务端的偏差（秒），从响应 Date 头学习
         self._skew = 0.0
 

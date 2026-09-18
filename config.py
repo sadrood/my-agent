@@ -20,6 +20,34 @@ load_dotenv()
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+def resolve_under_root(path) -> str:
+    """把相对路径锚定到项目根（绝对路径原样返回）。
+
+    同一个坑在这个仓库里被踩了三次，所以收成一个函数、只在配置加载时做一次：
+      · 浏览器持久 profile：cwd 一变就换一份空 profile，表现为"自动化浏览器每次
+        打开都没有记录"；
+      · memory / session 存储：cwd 漂移会把记忆/会话写到 output/ 子目录造成分叉；
+      · 经验库缓存 / rollout 目录 / 各 save_dir：云经验库看起来"凭空变空"、
+        运行日志找不到、产物落到启动目录。
+
+    实测：从 C:\\Users\\Administrator 启动时，`./memory/experience_lib` 会解析到
+    `C:\\Users\\Administrator\\memory\\experience_lib`——一个不存在的新目录，
+    于是 experience search 什么都搜不到。
+
+    Args:
+        path: 配置里的路径值；空值返回项目根（表示"就用项目根"）。
+
+    Returns:
+        绝对路径字符串。
+    """
+    expanded = os.path.expanduser(str(path if path is not None else "").strip())
+    if not expanded:
+        return PROJECT_ROOT
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(PROJECT_ROOT, expanded))
+
+
 def resolve_minimal_mode(env: dict) -> bool:
     """极简模式解析（纯函数，便于测试）：禁用一切非必要功能。"""
     return str(env.get("MY_AGENT_MINIMAL", "")).lower() in ("1", "true", "yes")
@@ -108,7 +136,8 @@ BROWSER_CONFIG = {
     # 等）先手动登录一次，agent 之后复用会话。false = 每次全新上下文（旧行为）
     "persistent": os.getenv("BROWSER_PERSISTENT", "true").lower() == "true",
     # 持久 profile 目录（登录态落盘点）；memory/ 已被 gitignore，不入库
-    "profile_dir": os.getenv("BROWSER_PROFILE_DIR", "./memory/browser_profile"),
+    "profile_dir": resolve_under_root(
+        os.getenv("BROWSER_PROFILE_DIR", "./memory/browser_profile")),
     # 内嵌浏览器桥地址（仅桌面端模式由 Electron 主进程注入，如 http://127.0.0.1:8091/browser）。
     # 非空时 ToolManager 用 EmbeddedBrowserTool 替代独立 Playwright 浏览器：
     # Agent 操控的页面就是桌面端侧栏里内嵌的 <webview>（所见即所控）。
@@ -153,7 +182,8 @@ IMAGE_GEN_CONFIG = {
     "base_url": os.getenv("IMAGE_GEN_BASE_URL", "https://token.sensenova.cn/v1"),
     "model": os.getenv("IMAGE_GEN_MODEL", "sensenova-u1.5-lite"),
     "size": os.getenv("IMAGE_GEN_SIZE", "1024x1024"),
-    "save_dir": os.getenv("IMAGE_GEN_SAVE_DIR", "./generated_images"),
+    "save_dir": resolve_under_root(
+        os.getenv("IMAGE_GEN_SAVE_DIR", "./generated_images")),
     "timeout": float(os.getenv("IMAGE_GEN_TIMEOUT", "120")),
     # 官方公测期间免费开放去水印（watermark=false）；默认关闭水印
     "watermark": os.getenv("IMAGE_GEN_WATERMARK", "false").lower() == "true",
@@ -182,7 +212,8 @@ VIDEO_GEN_CONFIG = {
     "seconds_max": float(os.getenv("VIDEO_GEN_SECONDS_MAX", "12")),
     "size": os.getenv("VIDEO_GEN_SIZE", "720P"),           # Flash 仅支持 720P
     "aspect_ratio": os.getenv("VIDEO_GEN_ASPECT_RATIO", "16:9"),
-    "save_dir": os.getenv("VIDEO_GEN_SAVE_DIR", "./generated_videos"),
+    "save_dir": resolve_under_root(
+        os.getenv("VIDEO_GEN_SAVE_DIR", "./generated_videos")),
     # 单次 HTTP 请求超时（创建/查询）
     "timeout": float(os.getenv("VIDEO_GEN_TIMEOUT", "120")),
     # 工具内等待上限（秒）：超过则返回 task_id 让模型稍后用 status 查询。
@@ -207,7 +238,8 @@ TTS_CONFIG = {
     "voice": os.getenv("TTS_VOICE", "xiaoxiao"),
     "rate": os.getenv("TTS_RATE", "+0%"),      # 语速（仅 edge 支持），如 +20%
     "volume": os.getenv("TTS_VOLUME", "+0%"),  # 音量（仅 edge 支持），如 +20%
-    "save_dir": os.getenv("TTS_SAVE_DIR", "./generated_audio"),
+    "save_dir": resolve_under_root(
+        os.getenv("TTS_SAVE_DIR", "./generated_audio")),
     "timeout": float(os.getenv("TTS_TIMEOUT", "60")),
     # --- openrouter 供应商 ---
     # 专用 key 优先；也接受通用的 OPENROUTER_API_KEY
@@ -280,7 +312,8 @@ ZHIHU_CONFIG = {
     # 单次回给模型的字符上限（搜索/全文接口单条就可能很长）
     "max_chars": int(os.getenv("ZHIHU_MAX_CHARS", "12000")),
     # PDF 解析结果 / PPT 成品的落盘目录（项目规定产物统一放 output/）
-    "save_dir": os.getenv("ZHIHU_SAVE_DIR", "output/zhihu"),
+    "save_dir": resolve_under_root(
+        os.getenv("ZHIHU_SAVE_DIR", "output/zhihu")),
 }
 
 # ============================================================
@@ -293,7 +326,8 @@ VIDEO_EDIT_CONFIG = {
     "width": int(os.getenv("VIDEO_EDIT_WIDTH", "1280")),
     "height": int(os.getenv("VIDEO_EDIT_HEIGHT", "720")),
     "fps": int(os.getenv("VIDEO_EDIT_FPS", "25")),
-    "save_dir": os.getenv("VIDEO_EDIT_SAVE_DIR", "./generated_videos"),
+    "save_dir": resolve_under_root(
+        os.getenv("VIDEO_EDIT_SAVE_DIR", "./generated_videos")),
     # ffmpeg 可执行文件所在目录（留空则用 PATH / winget 常见位置自动探测）
     "ffmpeg_path": os.getenv("FFMPEG_PATH", ""),
     # 单次 ffmpeg 处理超时（秒）：拼接/重编码可能较久
@@ -471,7 +505,7 @@ GUARDIAN_CONFIG = {
 # ============================================================
 ROLLOUT_CONFIG = {
     "enabled": (not MINIMAL_MODE) and os.getenv("ROLLOUT_ENABLED", "true").lower() == "true",
-    "dir": os.getenv("ROLLOUT_DIR", "./rollouts"),
+    "dir": resolve_under_root(os.getenv("ROLLOUT_DIR", "./rollouts")),
     "max_files": int(os.getenv("ROLLOUT_MAX_FILES", "20")),     # 保留最近 N 个追踪文件
     # 旧式固定阈值已废弃（默认 0 = 不触发）：executor 传入窗口比例制阈值；
     # 仍想手动覆盖可显式设 ROLLOUT_COMPACT_TOKENS
@@ -496,7 +530,8 @@ EXPERIENCE_CONFIG = {
     "private_repo": os.getenv("EXPERIENCE_PRIVATE_REPO", ""),
     "public_repo": os.getenv("EXPERIENCE_PUBLIC_REPO", ""),
     "branch": os.getenv("EXPERIENCE_BRANCH", "main"),
-    "cache_dir": os.getenv("EXPERIENCE_CACHE_DIR", "./memory/experience_lib"),
+    "cache_dir": resolve_under_root(
+        os.getenv("EXPERIENCE_CACHE_DIR", "./memory/experience_lib")),
     "learn_max_entries": int(os.getenv("EXPERIENCE_LEARN_MAX", "3")),
     "learn_max_chars": int(os.getenv("EXPERIENCE_LEARN_CHARS", "2500")),
     "entry_max_chars": int(os.getenv("EXPERIENCE_ENTRY_MAX", "8000")),
@@ -508,7 +543,7 @@ EXPERIENCE_CONFIG = {
 # ============================================================
 SESSION_CONFIG = {
     "enabled": os.getenv("SESSION_ENABLED", "true").lower() == "true",
-    "dir": os.getenv("SESSION_DIR", "./memory/sessions"),
+    "dir": resolve_under_root(os.getenv("SESSION_DIR", "./memory/sessions")),
     "max_sessions": int(os.getenv("SESSION_MAX", "50")),
     # 单个对话文件超过该体积就提示压缩（会话每轮整份重写，且是唯一副本）
     "warn_size_mb": float(os.getenv("SESSION_WARN_SIZE_MB", "20")),
@@ -606,7 +641,8 @@ TOOL_CONFIG = {
     # 桌面操控（computer 工具）：无障碍树规模与截图保存目录
     "computer_a11y_max_elements": int(os.getenv("COMPUTER_A11Y_MAX_ELEMENTS", "120")),
     "computer_a11y_max_depth": int(os.getenv("COMPUTER_A11Y_MAX_DEPTH", "8")),
-    "computer_screenshot_dir": os.getenv("COMPUTER_SCREENSHOT_DIR", ""),   # 空=generated_images/computer
+    "computer_screenshot_dir": (resolve_under_root(os.getenv("COMPUTER_SCREENSHOT_DIR", ""))
+                                if os.getenv("COMPUTER_SCREENSHOT_DIR", "").strip() else ""),   # 空=generated_images/computer
 }
 
 # ============================================================
