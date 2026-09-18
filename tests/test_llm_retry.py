@@ -356,3 +356,55 @@ class TestMinuteQuotaAlignment:
         assert _is_minute_quota_error(Exception("inference exceeds tpm/rpm limit"))
         assert not _is_minute_quota_error(Exception("too many requests"))
         assert not _is_minute_quota_error(Exception("internal server error"))
+
+
+class TestRateLimitVisibility:
+    """限流等待必须"看得见 + 留得下记录"。
+
+    实测问题（分析 run-20260918-163309 时踩到）：client 层的限流提示只写 stderr，
+    桌面端/内嵌 UI/dashboard 渲染的是富文本 stdout，那行没人看得到；而且**等待时长
+    没进 rollout**——事后只知道"发生过 5 次 429"，不知道一共等了 10 秒还是 2 分钟。
+    配额等待单次上限 65s、默认重试 2 次，最长可达约 2 分钟静默。
+    """
+
+    def test_notifier_defaults_to_none(self):
+        assert LLM().retry_notifier is None, "默认必须是 None：models 层不依赖 UI 层"
+
+    def test_no_notifier_is_fine(self):
+        llm = make_llm([make_429(), FakeResponse(content="ok")])
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "ok"
+
+    def test_injected_callback_receives_wait_seconds_and_attempt(self):
+        llm = make_llm([make_429(), make_429(), FakeResponse(content="ok")])
+        seen = []
+        llm.retry_notifier = lambda seconds, attempt: seen.append((seconds, attempt))
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "ok"
+        assert len(seen) == 2, "两次限流各通知一次"
+        assert [a for _, a in seen] == [0, 1], "attempt 从 0 起（展示时 +1）"
+        assert all(s > 0 for s, _ in seen), "必须带等待时长，否则复盘仍不知等了多久"
+
+    def test_notifier_exception_never_breaks_retry(self):
+        llm = make_llm([make_429(), FakeResponse(content="ok")])
+
+        def boom(seconds, attempt):
+            raise RuntimeError("UI 层炸了")
+
+        llm.retry_notifier = boom
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "ok", \
+            "提示失败不能影响重试"
+
+    def test_long_wait_writes_stderr_and_reports_real_seconds(self, monkeypatch, capsys):
+        """≥5s 的长等待：stderr 兜底提示 + 回调拿到真实秒数（不真的睡）。"""
+        import models.llm as llm_mod
+        slept = []
+        monkeypatch.setattr(llm_mod.time, "sleep", lambda s: slept.append(s))
+
+        llm = make_llm([make_429(), FakeResponse(content="ok")])
+        llm.retry_base_delay = 10.0          # quota 起步 = 30s，超过 5s 阈值
+        seen = []
+        llm.retry_notifier = lambda seconds, attempt: seen.append(seconds)
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "ok"
+
+        assert "[限流]" in capsys.readouterr().err, "纯 CLI 下 stderr 仍要有兜底提示"
+        assert seen and seen[0] >= 30, "回调要拿到真实等待秒数，实际 %s" % seen
+        assert slept and slept[0] >= 30, "确实按该时长等待（此处被替换成记录）"
