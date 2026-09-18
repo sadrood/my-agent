@@ -527,5 +527,13 @@ class TestBackwardCompat:
                      "review_feedback", "total_time"):
             assert hasattr(result, attr)
         assert result.final_answer == "最终答案"
-        # Worker 解析仍走各自角色的系统提示
-        assert llm.worker_chats[0][0]["content"] == ALL_ROLES["writer"].system_prompt
+        # Worker 解析仍走各自角色的系统提示。
+        # ⚠️ 不能按下标断言：两个 independent 子任务是**并行**执行的（同文件其它用例
+        # 用 Barrier 证明真并发），worker_chats 的写入顺序取决于线程调度——全量测试有
+        # CPU 压力时先后会反转，表现为偶发失败（实测：全量里挂过，单独跑 15 次全过）。
+        # 这里改成与顺序无关的断言，且比原来更严格：两个角色的提示都必须出现。
+        prompts = [c[0]["content"] for c in llm.worker_chats]
+        assert ALL_ROLES["writer"].system_prompt in prompts
+        assert ALL_ROLES["researcher"].system_prompt in prompts
+        assert set(prompts) <= {role.system_prompt for role in ALL_ROLES.values()}, \
+            "worker 的系统提示必须来自角色定义，不能是别的"
