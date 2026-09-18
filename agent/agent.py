@@ -28,6 +28,8 @@ from agent.ui_theme import (
     print_final_result, print_plan, print_warning, print_error, print_evolution,
     print_info, PERSONALITY,
 )
+# 落盘文本的截断统一走 rollout 的 clip_*（上限可配：追踪文件是事后诊断依据）
+from agent.rollout import clip_text
 
 
 # 未完成判定：结果/摘要里出现这些标记 = 任务没跑完（上限/停止/中断）
@@ -1144,7 +1146,7 @@ class Agent:
         """运行收尾：关闭 Rollout、保存会话、输出统计与审批信息。"""
         if self.rollout is not None:
             try:
-                self.rollout.emit("run_end", {"status": status, "result": (result_text or "")[:300]})
+                self.rollout.emit("run_end", {"status": status, "result": clip_text(result_text or "")})
                 self.rollout.close()
                 self.rollout.cleanup_old_logs()
             except Exception:

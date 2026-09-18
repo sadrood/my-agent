@@ -45,6 +45,28 @@ def estimate_tokens(text: str) -> int:
     return cjk + other // 4
 
 
+def clip_text(text: Any, limit: int = None) -> str:
+    """截断要落盘的**模型输出**（最终回答、每轮文本）。
+
+    追踪文件是事后诊断的唯一依据，**截得太狠等于没有记录**。实测踩坑（2026-09-18）：
+    agent 的最终自审报告被截到 300 字、断在半句，想复盘"它到底提了哪些问题"只能去
+    memory/sessions/*.json 里翻——而 prompt 里明确让人"看运行日志"。
+    上限由 ROLLOUT_TEXT_LIMIT 控制（0 = 不截断）；截断时附原文长度，避免把
+    "被截断"误读成"就这么多"。
+    """
+    s = "" if text is None else str(text)
+    n = int(limit if limit is not None else ROLLOUT_CONFIG.get("text_limit", 4000))
+    if n <= 0 or len(s) <= n:
+        return s
+    return s[:n] + "\n…（落盘截断：原文 %d 字，调大 ROLLOUT_TEXT_LIMIT 可见全文）" % len(s)
+
+
+def clip_result(text: Any, limit: int = None) -> str:
+    """截断要落盘的**工具返回**（上限由 ROLLOUT_RESULT_LIMIT 控制）。"""
+    n = limit if limit is not None else ROLLOUT_CONFIG.get("result_limit", 2000)
+    return clip_text(text, n)
+
+
 @dataclass
 class RolloutEvent:
     """一条事件记录。"""

@@ -473,6 +473,11 @@ ROLLOUT_CONFIG = {
     # 仍想手动覆盖可显式设 ROLLOUT_COMPACT_TOKENS
     "compact_tokens": int(os.getenv("ROLLOUT_COMPACT_TOKENS", "0")),
     "keep_recent_messages": int(os.getenv("ROLLOUT_KEEP_RECENT", "8")),
+    # 落盘文本上限。追踪文件是事后诊断的唯一依据，截得太狠等于没有记录：
+    # 实测 agent 的最终报告被截到 300 字、断在半句，复盘时只能去翻会话文件。
+    # 0 = 不截断（不建议：单次 run 的 JSONL 会长得很快）。
+    "text_limit": int(os.getenv("ROLLOUT_TEXT_LIMIT", "4000")),      # 模型输出/最终回答
+    "result_limit": int(os.getenv("ROLLOUT_RESULT_LIMIT", "2000")),  # 工具返回
 }
 
 # ============================================================
