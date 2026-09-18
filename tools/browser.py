@@ -17,6 +17,30 @@ from config import BROWSER_CONFIG
 # 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage
 # 在 Default/ 下），但会随每次浏览器启动各长几 MB。实测该目录涨到 250MB：
 # DeferredBrowserMetrics 144MB + BrowserMetrics 48MB + Default/Cache 30MB。
+#: 项目根（与本项目其它模块一致：相对路径一律锚定这里，而不是 cwd）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _resolve_under_root(path: str) -> str:
+    """把相对路径锚定到项目根，避免 cwd 漂移。
+
+    实测故障（2026-09-18）：profile_dir 默认值 "./memory/browser_profile" 原先用
+    `os.path.abspath()` 解析，**按当前工作目录**算——从别处启动 agent 时它会落到
+    <那个目录>/memory/browser_profile，于是每次都开出一份全新的空 profile：
+    没有历史、没有 cookie、没有登录态，用户看到的现象就是"自动化浏览器每次打开
+    都没有记录"。同一份配置在桌面端却正常，因为桌面端用的是 Electron 内嵌
+    <webview>（另一套自带且位置固定的会话目录），两条路径行为不一致。
+
+    参照实现：agent/session.py 与 agent/memory.py 都锚定 PROJECT_ROOT，
+    ToolManager._local_dir() 还专门注明"相对路径锚定项目根，避免 cwd 漂移"。
+    绝对路径原样返回（调用方显式指定时不该被改写）。
+    """
+    expanded = os.path.expanduser(str(path or ""))
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(PROJECT_ROOT, expanded))
+
+
 _PROFILE_JUNK_DIRS = (
     "DeferredBrowserMetrics",
     "BrowserMetrics",
@@ -120,7 +144,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             if headless is not None
             else BROWSER_CONFIG.get("headless", False)
         )
-        self._screenshot_dir = screenshot_dir
+        self._screenshot_dir = _resolve_under_root(screenshot_dir)
         self._viewport_width = viewport_width or BROWSER_CONFIG.get("viewport_width", 1280)
         self._viewport_height = viewport_height or BROWSER_CONFIG.get("viewport_height", 720)
         # 内置浏览器：持久 profile 模式（登录态跨次启动保留，网页型分身依赖）。
@@ -130,7 +154,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             self._persistent = bool(persistent)
         else:
             self._persistent = bool(BROWSER_CONFIG.get("persistent", True))
-        self._profile_dir = os.path.abspath(
+        self._profile_dir = _resolve_under_root(
             BROWSER_CONFIG.get("profile_dir", "./memory/browser_profile"))
 
         self._playwright = None
