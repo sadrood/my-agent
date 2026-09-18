@@ -21,12 +21,15 @@ import os
 import re
 import time
 import base64
+import itertools
 import threading
 from typing import Callable, Optional
 
 from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
 # 落盘文本的截断统一走 rollout 的 clip_*（上限可配：追踪文件是事后诊断依据）
 from agent.rollout import clip_result, clip_text
+# 动态轮数预算（有进展就续期、连续无进展提前停）——见模块 docstring
+from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
     EXECUTOR_BROWSER_SYSTEM_PROMPT,
@@ -398,7 +401,10 @@ class Executor:
             goal: 用户目标
             system_prompt: 系统提示（含人格、规则、审批提示、AGENTS.md）
             context_text: 附加上下文（对话历史、经验、失败模式警告等）
-            max_ops: 整次任务最大工具操作轮数（默认取配置的 2 倍）
+            max_ops: **固定**轮数上限（旧语义，显式传入时生效，如 CLI --max-ops）。
+                     不传时走动态预算：起步 loop_base_turns 轮，每有一轮有进展就按
+                     loop_extend_per_progress 续期，连续 loop_stall_limit 轮无进展则
+                     提前停；loop_hard_cap 是安全网（0 = 不设上限）。见 agent/loop_budget.py
             event_sink: 事件回调 (event_type, data) → dashboard/打印
             temperature: 覆盖默认温度
             top_p: 覆盖默认核采样（None=不显式设置）
@@ -435,7 +441,15 @@ class Executor:
         consecutive_empty = 0   # 连续空回复次数（上游偶发只回 reasoning 就 stop）
         no_tools_fallback_used = False   # 本轮是否已尝试过纯文本回退
         thinking_mode_seen = False   # 本对话是否出现过推理字段（thinking 服务需逐条回传）
-        max_ops = max_ops or int(TOOL_CONFIG.get("max_loop_ops", 40))
+        # 轮数预算：默认**动态**——起步 loop_base_turns 轮，每有一轮有进展就续期，
+        # 连续无进展则提前停；max_ops/loop_hard_cap 只是安全网（0 = 不设上限）。
+        # 显式传 max_ops（CLI --max-ops / 测试）时退回固定语义：那个参数的含义就是
+        # "最多跑这么多轮"，可预测性优先（见 agent/loop_budget.py）。
+        # 注意：这里不能用 `max_ops or 默认值` 之后再判断真假——那样默认值也会让
+        # 分支恒为真。所以先记录"调用方有没有显式传"。
+        configured_cap = int(TOOL_CONFIG.get("max_loop_ops", 80))
+        budget = (LoopBudget.fixed(int(max_ops)) if max_ops
+                  else LoopBudget.from_config(configured_cap))
 
         self._emit("run_loop_start", {"goal": goal})
 
@@ -450,8 +464,29 @@ class Executor:
                 print(f"[Stop] 警告: 停止信号未能注入工具层（{str(e)[:120]}），"
                       "正在运行的子进程可能不会被立即终止。")
 
-        warned_near_limit = False
-        for turn in range(max_ops):
+        warned_at_extension = -1
+        pending = TurnOutcome()          # 本轮产出摘要，下一轮开头结算
+        prev_signature: tuple = ()       # 上一轮的调用签名，用于识别"原样重复"
+        # 完成度闸门配置（"让 agent 做完任务再结束"）：见下方最终答案分支
+        completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
+        completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
+        completion_nudges = 0
+        #: 只统计**本次循环开始之后**创建/更新的任务：任务清单是全局跨会话的
+        #: （memory/tasks.json），历史遗留的 todo 会造成无关的"还没做完"误判。
+        loop_started_at = time.strftime("%Y-%m-%d %H:%M")
+        #: 会话待办清单（todo_write）的**起始快照**：清单项没有时间戳，没法像任务板
+        #: 那样按时间过滤，所以记下循环开始时就已经挂着的 id——只有本次循环期间新增、
+        #: 且结束时仍未完成的待办才触发闸门，历史遗留清单不会让每次收尾都被拦。
+        pending_todos_at_start = self._pending_todo_ids()
+        # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），
+        # for 循环会自动推进 turn，while 则会漏自增导致死循环。
+        for turn in itertools.count():
+            # 结算上一轮：放在迭代开头，这样体内任何 continue 都不会漏结算
+            if turn > 0:
+                budget.observe(pending)
+                pending = TurnOutcome()
+            if not budget.allow_next():
+                break
             # 停止检查点：每轮开始前，用户点"停止"后优雅退出
             if stop_event is not None and stop_event.is_set():
                 try:
@@ -468,13 +503,15 @@ class Executor:
                     "ops": turn,
                     "stopped": True,
                 }
-            # 接近上限预警（80% 时提醒一次）
-            if not warned_near_limit and turn >= int(max_ops * 0.8):
+            # 接近预算预警：每次"续期后重新接近"都会提醒一次（动态预算下上限会变，
+            # 只提醒一次的旧写法在续期后就再也不提了）
+            if budget.near_limit() and warned_at_extension != budget.extensions:
+                warned_at_extension = budget.extensions
                 self._emit("ops_warning", {
-                    "turn": turn + 1, "max_ops": max_ops,
-                    "message": f"已用 {turn + 1}/{max_ops} 轮，接近上限。",
+                    "turn": turn + 1, "max_ops": budget.limit,
+                    "message": f"已用 {turn + 1}/{budget.limit} 轮"
+                               f"（按进展动态续期 {budget.extensions} 次）。",
                 })
-                warned_near_limit = True
 
             # 统计：模型轮数
             if self.metrics is not None:
@@ -484,7 +521,7 @@ class Executor:
             # （event_sink 由 Agent 层渲染 token 计数/沙箱/策略并转发 rollout）
             if event_sink is not None:
                 try:
-                    event_sink("turn_start", {"turn": turn + 1, "max_ops": max_ops})
+                    event_sink("turn_start", {"turn": turn + 1, "max_ops": budget.limit})
                 except Exception:
                     pass
 
@@ -594,10 +631,11 @@ class Executor:
             # 模型输出文字且不再调用工具 → 这就是最终回答
             if not response.tool_calls:
                 final = response.content.strip()
-                if not final and turn < max_ops - 1 and consecutive_empty < 2:
+                if not final and turn < budget.limit - 1 and consecutive_empty < 2:
                     # 防御：上游偶发只输出 reasoning 就 stop（空回复），
                     # 推一条提示让模型继续，最多重试 2 次
                     consecutive_empty += 1
+                    pending.empty_response = True   # 空回复计入"无进展"，但不立刻判停滞
                     self._emit("empty_turn", {"turn": turn + 1, "retry": consecutive_empty})
                     if thinking_mode_seen:
                         # 思考模式：空回复的 assistant 消息也要带推理字段（可为空串）
@@ -641,6 +679,39 @@ class Executor:
                         pass
                     final = ""
                 consecutive_empty = 0
+                # 完成度闸门：模型给出最终答案时，若它**自己的任务清单**里还有本次
+                # 工作产生的未完成项，就把它推回去继续——"让 agent 做完任务再结束"。
+                # 有界（最多 loop_completion_nudges 次），不会与模型僵持；模型也可以
+                # 明确说明"那些项已不需要做"来正常收尾。
+                if final and completion_gate and completion_nudges < completion_nudge_max:
+                    pending_titles = self._unfinished_items(loop_started_at,
+                                                            pending_todos_at_start)
+                    if pending_titles:
+                        completion_nudges += 1
+                        nudge_data = {
+                            "turn": turn + 1, "pending": len(pending_titles),
+                            "attempt": completion_nudges,
+                            "titles": pending_titles[:3],
+                        }
+                        self._emit("completion_nudge", nudge_data)
+                        # 也要走 event_sink：_emit 只进 rollout 日志，用户/前端看不到
+                        # "为什么还没结束"——闸门是用户可感知的决策，必须可见。
+                        if self._event_sink is not None:
+                            try:
+                                self._event_sink("completion_nudge", nudge_data)
+                            except Exception:
+                                pass
+                        messages.append({"role": "assistant", "content": final})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "（先别收尾：你自己列的清单里还有 %d 项没做完——%s。"
+                                "请继续把它们做完再给最终答案；若其中某项确实已不需要做，"
+                                "明确说明原因即可结束。）"
+                                % (len(pending_titles), "、".join(pending_titles[:3]))
+                            ),
+                        })
+                        continue
                 # 成功 = 有最终回答 且 没有未补救的失败
                 # （空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
                 success = bool(final) and last_success_idx >= last_failure_idx
@@ -697,6 +768,12 @@ class Executor:
                     "stopped": True,
                 }
             batch = list(response.tool_calls)
+            # 逐操作签名：与上一轮完全一致 → 视为"原样重复"（空转信号）。
+            # 注意用"参数排序后的签名"，模型打乱参数顺序不算换了新办法。
+            sig = tool_signature(batch)
+            pending.repeated = bool(prev_signature) and sig == prev_signature
+            prev_signature = sig
+            pending.tool_calls += len(batch)
             # 先解包嵌套 _raw（模型/供应商把参数再包一层 JSON 字符串）：
             # 解开的还原为真正命名参数正常派发；解不开的（真截断/坏 JSON）
             # 保持 _raw，走下方"参数解析失败"拦截。
@@ -746,15 +823,24 @@ class Executor:
                 executed = merged
 
             for tc, (result, blocked_reason, seconds) in zip(batch, executed):
+                # 进展信号（预算判定依赖它，所以不能只在 metrics 开启时才算）：
+                # 文件被改动是最硬的"有进展"证据。
+                changed = self._changed_file(tc.name, tc.arguments) if result.success else None
+                if changed:
+                    pending.files_changed += 1
+                if result.success:
+                    pending.succeeded += 1
+                elif not blocked_reason:
+                    # 被审批/Guardian 拦截不算失败（要换做法），但也不构成进展；
+                    # 反复调同一个被拦命令由 pending.repeated 兜住。
+                    pending.failed += 1
                 if self.metrics is not None:
                     self.metrics.tool_seconds += seconds
                     # think 是伪工具（无副作用），不计入"步数"，避免状态栏步数虚高
                     if tc.name != "think":
                         self.metrics.steps += 1
-                    if result.success:
-                        changed = self._changed_file(tc.name, tc.arguments)
-                        if changed:
-                            self.metrics.add_file_change(changed)
+                    if changed:
+                        self.metrics.add_file_change(changed)
                 idx = len(tool_calls_log)
                 call_id = tc.id or f"call_{idx}"
 
@@ -798,18 +884,91 @@ class Executor:
                     "content": result_text,
                 })
 
-        # 达到最大操作轮数
-        self._emit("run_loop_end", {"success": False, "output": ""})
+        # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。
+        # 两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），
+        # "无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
+        self._emit("run_loop_end", {"success": False, "output": "",
+                                    "budget": budget.summary()})
         return {
             "success": False,
-            "output": (
-                f"已达到任务最大操作轮数（{max_ops}）。任务可能比预期复杂，"
-                f"已完成的操作已记录：可用 --max-ops 提高上限后重试。"
-            ),
+            "output": budget.stop_message(),
             "tool_calls": tool_calls_log,
             "errors": errors,
-            "ops": max_ops,
+            "ops": budget.used,
+            "budget": budget.summary(),
         }
+
+    @staticmethod
+    def _pending_tasks(since: str = "") -> list:
+        """读 agent 自己的任务清单里未完成的项（todo / in_progress）。
+
+        用于"完成度闸门"：模型想收尾但任务清单还有活时，把它推回去继续。
+
+        设计要点：
+          · `since`（"YYYY-MM-DD HH:MM"）只统计本次循环开始之后创建/更新的任务——
+            任务清单是**全局跨会话**的，历史遗留 todo 会造成无关误判；
+          · 任何异常都返回空列表：闸门是加分项，绝不能因为它自身出错而阻断正常收尾。
+        """
+        try:
+            from agent.tasks import load_tasks
+            out = []
+            for t in load_tasks() or ():
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("status", "")).strip().lower() not in ("todo", "in_progress"):
+                    continue
+                stamp = str(t.get("updated") or t.get("created") or "")
+                if since and stamp and stamp < since:
+                    continue          # 时间戳字符串同格式可比；早于本次循环的忽略
+                title = str(t.get("title") or t.get("id") or "").strip()
+                if title:
+                    out.append(title)
+            return out
+        except Exception:       # noqa: BLE001
+            return []
+
+    def _pending_todo_ids(self) -> set:
+        """当前会话待办清单里**未完成**项的 id 集合（起始快照 / 现状对比都用它）。
+
+        清单归属靠 TodoTool 自己的会话 key（Agent 层注入），所以直接问工具实例即可，
+        不用把 session id 再穿一层进来。任何异常都当空集合。
+        """
+        try:
+            tool = self.tool_manager.get_tool("todo_write")
+            pending = tool.pending() if tool is not None and hasattr(tool, "pending") else []
+            return {str(t.get("id")) for t in pending if isinstance(t, dict) and t.get("id")}
+        except Exception:       # noqa: BLE001
+            return set()
+
+    def _unfinished_items(self, since: str, todo_snapshot: set) -> list:
+        """模型想收尾时，它自己列的清单里还剩哪些活（两个来源合并）。
+
+        1. 全局任务板（agent.tasks）：按时间过滤，只算本次循环动过的；
+        2. 会话待办（todo_write）：按 id 快照过滤，只算本次循环新增且仍未完成的。
+
+        之所以要第 2 项：`todo_write` 才是模型实际用来规划任务的清单（写进系统提示，
+        实测 21 份 rollout 里任务板 0 次调用、待办清单是常态），只看任务板等于闸门
+        基本不会触发。返回标题列表，顺序稳定、已去重。
+        """
+        titles = list(self._pending_tasks(since=since))
+        try:
+            tool = self.tool_manager.get_tool("todo_write")
+            for t in (tool.pending() if tool is not None and hasattr(tool, "pending") else []):
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("id")) in todo_snapshot:
+                    continue          # 本次循环开始前就挂着的：历史遗留，不拦收尾
+                title = str(t.get("title") or t.get("id") or "").strip()
+                if title:
+                    titles.append(title)
+        except Exception:       # noqa: BLE001
+            pass
+        seen, out = set(), []
+        for title in titles:
+            if title not in seen:
+                seen.add(title)
+                out.append(title)
+        return out
 
     def _stream_turn(
         self,

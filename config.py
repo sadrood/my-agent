@@ -610,7 +610,23 @@ SANDBOX_EXEC_CONFIG = {
 TOOL_CONFIG = {
     "output_max_chars": int(os.getenv("TOOL_OUTPUT_MAX_CHARS", "8000")),
     "max_step_ops": int(os.getenv("MAX_STEP_OPS", "12")),   # 单个计划步骤内最多工具操作数
-    "max_loop_ops": int(os.getenv("MAX_LOOP_OPS", "80")),   # 单循环整次任务最大操作轮数
+    # 单循环整次任务的轮数。注意语义已升级（见 agent/loop_budget.py）：
+    # 它现在是**安全网硬上限**，不再是"跑到这个数就断"的工作限额——起步轮数由
+    # loop_base_turns 决定，每出现一轮有进展就按 loop_extend_per_progress 续期，
+    # 连续 loop_stall_limit 轮无进展则提前停（空转才是真正该拦的）。
+    # 历史语义即"最大轮数"，所以缺省值仍取它，保证没有配置新旋钮的机器行为不劣化。
+    "max_loop_ops": int(os.getenv("MAX_LOOP_OPS", "80")),
+    "loop_base_turns": int(os.getenv("LOOP_BASE_TURNS", "30")),          # 起步轮数
+    "loop_extend_per_progress": int(os.getenv("LOOP_EXTEND_PER_PROGRESS", "10")),
+    "loop_stall_limit": int(os.getenv("LOOP_STALL_LIMIT", "5")),         # 连续无进展即停
+    # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。
+    # 留空则回退到 max_loop_ops（即升级前的行为）。
+    "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))
+                      if os.getenv("LOOP_HARD_CAP", "").strip() else None),
+    # 完成度闸门（"让 agent 做完任务再结束"）：模型给出最终答案时，若它自己的任务
+    # 清单里还有本次工作产生的未完成项，就把它推回去继续。有界，不会与模型僵持。
+    "loop_completion_gate": os.getenv("LOOP_COMPLETION_GATE", "true").lower() == "true",
+    "loop_completion_nudges": int(os.getenv("LOOP_COMPLETION_NUDGES", "2")),
     # edit 验证式应用（apply_patch preflight 思路）：修改 .py 后自动跑测试，
     # 失败自动回滚（.bak 恢复）并把测试尾部回喂模型。默认关闭，EDIT_PREFLIGHT=true 开启。
     "edit_preflight": os.getenv("EDIT_PREFLIGHT", "false").lower() == "true",

@@ -683,3 +683,207 @@ class TestUnparseableArgumentGuard:
                   if t == "tool_result" and not d.get("success")]
         assert any("JSON" in e and "格式" in e for e in errors), errors
         assert result["success"] is True
+
+
+class TestCompletionGate:
+    """完成度闸门：模型想收尾，但它自己列的清单里还有没做完的活 → 推回去继续。
+
+    用户诉求原话："那就让agent做完任务再结束"。
+
+    两个清单来源必须都算数：全局任务板（task，带时间戳）和会话待办
+    （todo_write，模型实际在用的那个——实测 21 份 rollout 里任务板 0 次调用）。
+    """
+
+    def _env(self, monkeypatch, tmp_path, todos=None, tasks=None, **knobs):
+        """隔离两个清单的落盘位置，避免测试写到真实 memory/ 里去。"""
+        import agent.tasks as tasks_mod
+        import tools.todo as todo_mod
+        monkeypatch.setattr(todo_mod, "_TODO_DIR", str(tmp_path / "todos"))
+        monkeypatch.setattr(tasks_mod, "_TASKS_FILE", str(tmp_path / "tasks.json"))
+        monkeypatch.setattr(tasks_mod, "_MEM_DIR", str(tmp_path))
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "loop_completion_gate",
+                            knobs.get("gate", True))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_completion_nudges",
+                            knobs.get("nudges", 2))
+        if todos:
+            (tmp_path / "todos").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "todos" / "default.json").write_text(
+                json.dumps(todos, ensure_ascii=False), encoding="utf-8")
+        if tasks:
+            (tmp_path / "tasks.json").write_text(
+                json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+
+    def _run(self, script, monkeypatch, tmp_path, **knobs):
+        self._env(monkeypatch, tmp_path, **knobs)
+        llm = FakeLLM(script)
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        events = []
+        result = ex.execute_goal_loop(**_loop_args(),
+                                      event_sink=lambda t, d: events.append((t, d)))
+        return result, [d for t, d in events if t == "completion_nudge"]
+
+    def test_new_pending_todo_pushes_model_back_to_work(self, monkeypatch, tmp_path):
+        """循环中新加的待办还没勾掉就想收尾 → 被推回；勾掉后才放行。"""
+        result, nudges = self._run([
+            LLMToolResponse(content="", tool_calls=[
+                ToolCall("1", "todo_write", {"operation": "add", "title": "写报告"})]),
+            LLMToolResponse(content="做完了。"),          # 清单里还有 → 不收尾
+            LLMToolResponse(content="", tool_calls=[
+                ToolCall("2", "todo_write", {"operation": "clear"})]),
+            LLMToolResponse(content="现在真的做完了。"),
+        ], monkeypatch, tmp_path)
+
+        assert len(nudges) == 1, "只有第一次收尾该被拦"
+        assert nudges[0]["titles"] == ["写报告"]
+        assert result["success"] is True
+        assert "真的做完" in result["output"]
+        assert result["ops"] == 4
+
+    def test_pre_existing_todo_does_not_block_wrap_up(self, monkeypatch, tmp_path):
+        """循环开始前就挂着的历史待办不该拦收尾（清单项没有时间戳，靠 id 快照区分）。"""
+        result, nudges = self._run(
+            [LLMToolResponse(content="这次的事做完了。")],
+            monkeypatch, tmp_path,
+            todos=[{"id": "t_old", "title": "上周遗留的活", "status": "todo"}])
+
+        assert nudges == [], "历史遗留清单不能每次都拦收尾"
+        assert result["success"] is True and result["ops"] == 1
+
+    def test_recent_task_board_item_also_triggers_the_gate(self, monkeypatch, tmp_path):
+        """任务板（task 工具）里本次循环动过的未完成项同样算数。"""
+        import time
+        now = time.strftime("%Y-%m-%d %H:%M")
+        result, nudges = self._run(
+            [LLMToolResponse(content="收工。")],
+            monkeypatch, tmp_path,
+            tasks=[{"id": "t1", "title": "迁移数据", "status": "in_progress",
+                    "created": now, "updated": now}])
+
+        assert nudges and nudges[0]["titles"] == ["迁移数据"]
+
+    def test_gate_is_bounded_and_then_lets_the_model_finish(self, monkeypatch, tmp_path):
+        """模型坚持收尾：最多推 N 次就放行，不会无限僵持。"""
+        result, nudges = self._run([
+            LLMToolResponse(content="", tool_calls=[
+                ToolCall("1", "todo_write", {"operation": "add", "title": "永远的活"})]),
+            LLMToolResponse(content="第一次收尾。"),
+            LLMToolResponse(content="第二次收尾。"),
+            LLMToolResponse(content="第三次收尾，那些项不需要做了。"),
+        ], monkeypatch, tmp_path, nudges=2)
+
+        assert len(nudges) == 2, "上限就是 loop_completion_nudges"
+        assert result["success"] is True
+        assert "第三次收尾" in result["output"], "放行后要采用模型自己的收尾说明"
+
+    def test_gate_can_be_disabled(self, monkeypatch, tmp_path):
+        result, nudges = self._run([
+            LLMToolResponse(content="", tool_calls=[
+                ToolCall("1", "todo_write", {"operation": "add", "title": "写报告"})]),
+            LLMToolResponse(content="做完了。"),
+        ], monkeypatch, tmp_path, gate=False)
+
+        assert nudges == []
+        assert result["ops"] == 2
+
+    def test_gate_survives_a_broken_checklist_file(self, monkeypatch, tmp_path):
+        """清单文件坏掉时闸门必须自己失效，而不是阻断正常收尾。"""
+        self._env(monkeypatch, tmp_path)
+        (tmp_path / "todos").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "todos" / "default.json").write_text("{ 不是 JSON", encoding="utf-8")
+        llm = FakeLLM([LLMToolResponse(content="做完了。")])
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        result = ex.execute_goal_loop(**_loop_args())
+        assert result["success"] is True
+
+
+class TestDynamicBudget:
+    """动态轮数预算：有进展就续期，原地打转才提前停。
+
+    用户痛点原话："总是任务没完成轮数耗尽，导致任务中断"——固定上限对简单任务浪费、
+    对复杂任务必然半途被砍。这里钉住新语义（细节见 agent/loop_budget.py）。
+    """
+
+    def _exec(self, script, monkeypatch, **knobs):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "loop_base_turns", knobs.get("base", 3))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_extend_per_progress", knobs.get("extend", 2))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stall_limit", knobs.get("stall", 5))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_hard_cap", knobs.get("hard_cap", 0))
+        llm = FakeLLM(script)
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        # 不传 max_ops：走动态预算（传了就是固定上限的旧语义）
+        return ex.execute_goal_loop(**_loop_args())
+
+    def test_progress_extends_budget_beyond_base(self, monkeypatch):
+        """起步 3 轮，但每一轮都在做**不同**的成功操作 → 续期后 6 轮能跑完。"""
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "python", {"code": f"print({i})"})])
+            for i in range(6)
+        ] + [LLMToolResponse(content="六步都做完了。")]
+        result = self._exec(script, monkeypatch, base=3, extend=2)
+        assert result["success"] is True, result.get("output", "")[:200]
+        assert len(result["tool_calls"]) == 6, "六次工具调用都该被执行（旧实现会在第 3 轮被砍）"
+        assert result["ops"] >= 6
+
+    def test_identical_repeats_stop_early_as_spinning(self, monkeypatch):
+        """原样重复同一个失败调用 = 空转 → 提前停，而不是烧到预算上限。"""
+        same = ToolCall("1", "terminal", {"command": "exit 1"})
+        script = [LLMToolResponse(content="", tool_calls=[same]) for _ in range(30)]
+        result = self._exec(script, monkeypatch, base=50, stall=3)
+        assert result["success"] is False
+        assert result["budget"]["stop_reason"] == "stalled"
+        assert "打转" in result["output"]
+        assert result["ops"] <= 4, "应在 3 轮打转后停下，而不是跑满 50 轮"
+        assert result["budget"]["used"] <= 4
+
+    def test_new_approaches_that_fail_are_not_treated_as_spinning(self, monkeypatch):
+        """换了新做法但失败 → 不算打转（调试任务里连续失败是正常推进）。
+
+        预算不续期，所以最终以 "exhausted" 结束——理由是"任务比预期复杂"，
+        而不是错判成"原地打转"。
+        """
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "terminal",
+                                                 {"command": f"exit {i + 1}"})])
+            for i in range(4)
+        ] + [LLMToolResponse(content="还是不行，我放弃。")]
+        result = self._exec(script, monkeypatch, base=3, extend=10, stall=2, hard_cap=3)
+        assert result["budget"]["spinning_turns"] == 0, "新做法失败不该计入打转"
+        assert result["budget"]["stop_reason"] == "exhausted"
+        assert "已达到任务最大操作轮数" in result["output"]
+
+    def test_no_ceiling_keeps_going_until_the_model_finishes(self, monkeypatch):
+        """不设硬上限时，步数远超起步轮数也一路做完，不再"轮数耗尽"半途中断。"""
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "python", {"code": f"print({i})"})])
+            for i in range(12)
+        ] + [LLMToolResponse(content="十二步全部完成。")]
+        result = self._exec(script, monkeypatch, base=3, extend=1, hard_cap=0)
+        assert result["success"] is True, result.get("output", "")[:200]
+        assert len(result["tool_calls"]) == 12
+        assert "已达到任务最大操作轮数" not in result["output"], "不该再被轮数上限中断"
+
+    def test_legacy_marker_still_present_for_handoff(self, monkeypatch):
+        """中止文案必须仍含 INCOMPLETE_MARKERS 里的标记，交接机制才认得。"""
+        from agent.agent import INCOMPLETE_MARKERS
+        script = [LLMToolResponse(content="",
+                                  tool_calls=[ToolCall("1", "terminal", {"command": "exit 1"})])
+                  for _ in range(10)]
+        result = self._exec(script, monkeypatch, base=2, extend=0, stall=99, hard_cap=2)
+        assert any(m in result["output"] for m in INCOMPLETE_MARKERS), result["output"][:200]

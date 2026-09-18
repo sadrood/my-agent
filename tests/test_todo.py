@@ -74,3 +74,38 @@ def test_emits_todo_event(tmp_path, monkeypatch):
     t.execute_json({"operation": "add", "title": "x"})
     assert events and events[0][0] == "todo"
     assert events[0][1]["todos"][0]["title"] == "x"
+
+
+def test_todo_dir_is_anchored_to_project_root():
+    """清单目录必须是绝对路径。
+
+    原实现是硬编码相对路径 `memory/todos`，open() 按 cwd 解析——agent 在
+    output/qici_toonflow_ep1 下跑时清单就落到那儿去了，本机实测同一个会话的
+    待办被拆成三份（memory/todos、output/memory/todos、output/qici_.../memory/todos）。
+    """
+    import os
+
+    import tools.todo as mod
+    from config import resolve_under_root
+
+    assert os.path.isabs(mod._TODO_DIR)
+    assert mod._TODO_DIR == resolve_under_root(os.path.join("memory", "todos"))
+
+
+def test_pending_lists_only_unfinished(tool):
+    """完成度闸门依赖它判断"还有活没干完"。"""
+    tool.execute_json({"operation": "add", "title": "还没做的"})
+    tool.execute_json({"operation": "add", "title": "已经做的"})
+    import json
+    import os
+
+    import tools.todo as mod
+    with open(os.path.join(mod._TODO_DIR, "conv-test-001.json"), encoding="utf-8") as f:
+        todos = json.load(f)
+    tool.execute_json({"operation": "done", "id": todos[1]["id"]})
+
+    assert [t["title"] for t in tool.pending()] == ["还没做的"]
+
+
+def test_pending_is_empty_without_any_list(tool):
+    assert tool.pending() == []
