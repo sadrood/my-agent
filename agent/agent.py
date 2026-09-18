@@ -1292,7 +1292,8 @@ class Agent:
         # 1. 记忆召回（经验 + 失败模式 + 策略建议）
         # 轻量相似度排序（不调 LLM，避免主模型慢速拖累每次启动）；
         # 用 use_llm_rank=True 可显式开启语义排序。
-        experience_context = self.memory.recall_experiences(goal, n=3, llm=self.llm)
+        # 注入条数不写死在这里：由 LEARN_MAX_RECALL 决定（Memory 自己读配置）。
+        experience_context = self.memory.recall_experiences(goal, llm=self.llm)
         failure_warnings = self.memory.get_failure_warnings(goal)
         task_category = self.memory._classify_task(goal)
         strategy_hints = self.memory.get_best_strategies(task_category)
