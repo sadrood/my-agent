@@ -33,7 +33,9 @@ from agent.rollout import clip_text
 
 
 # 未完成判定：结果/摘要里出现这些标记 = 任务没跑完（上限/停止/中断）
-INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务已停止", "已停止", "中断", "max_ops")
+INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务已停止", "已停止", "中断", "max_ops",
+                      # 动态轮数预算：连续无进展被判定空转而提前停，同样是"没做完"
+                      "没有进展")
 
 def compose_handoff(goal: str, reason: str, final: str, done_hint: str = "") -> str:
     """无 LLM 可用的兜底交接文本（也用作 LLM 生成的统一外壳）。

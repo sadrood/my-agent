@@ -683,3 +683,75 @@ class TestUnparseableArgumentGuard:
                   if t == "tool_result" and not d.get("success")]
         assert any("JSON" in e and "格式" in e for e in errors), errors
         assert result["success"] is True
+
+
+class TestDynamicBudget:
+    """动态轮数预算：有进展就续期，原地打转才提前停。
+
+    用户痛点原话："总是任务没完成轮数耗尽，导致任务中断"——固定上限对简单任务浪费、
+    对复杂任务必然半途被砍。这里钉住新语义（细节见 agent/loop_budget.py）。
+    """
+
+    def _exec(self, script, monkeypatch, **knobs):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "loop_base_turns", knobs.get("base", 3))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_extend_per_progress", knobs.get("extend", 2))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stall_limit", knobs.get("stall", 5))
+        monkeypatch.setitem(TOOL_CONFIG, "loop_hard_cap", knobs.get("hard_cap", 0))
+        llm = FakeLLM(script)
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        # 不传 max_ops：走动态预算（传了就是固定上限的旧语义）
+        return ex.execute_goal_loop(**_loop_args())
+
+    def test_progress_extends_budget_beyond_base(self, monkeypatch):
+        """起步 3 轮，但每一轮都在做**不同**的成功操作 → 续期后 6 轮能跑完。"""
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "python", {"code": f"print({i})"})])
+            for i in range(6)
+        ] + [LLMToolResponse(content="六步都做完了。")]
+        result = self._exec(script, monkeypatch, base=3, extend=2)
+        assert result["success"] is True, result.get("output", "")[:200]
+        assert len(result["tool_calls"]) == 6, "六次工具调用都该被执行（旧实现会在第 3 轮被砍）"
+        assert result["ops"] >= 6
+
+    def test_identical_repeats_stop_early_as_spinning(self, monkeypatch):
+        """原样重复同一个失败调用 = 空转 → 提前停，而不是烧到预算上限。"""
+        same = ToolCall("1", "terminal", {"command": "exit 1"})
+        script = [LLMToolResponse(content="", tool_calls=[same]) for _ in range(30)]
+        result = self._exec(script, monkeypatch, base=50, stall=3)
+        assert result["success"] is False
+        assert result["budget"]["stop_reason"] == "stalled"
+        assert "打转" in result["output"]
+        assert result["ops"] <= 4, "应在 3 轮打转后停下，而不是跑满 50 轮"
+        assert result["budget"]["used"] <= 4
+
+    def test_new_approaches_that_fail_are_not_treated_as_spinning(self, monkeypatch):
+        """换了新做法但失败 → 不算打转（调试任务里连续失败是正常推进）。
+
+        预算不续期，所以最终以 "exhausted" 结束——理由是"任务比预期复杂"，
+        而不是错判成"原地打转"。
+        """
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "terminal",
+                                                 {"command": f"exit {i + 1}"})])
+            for i in range(4)
+        ] + [LLMToolResponse(content="还是不行，我放弃。")]
+        result = self._exec(script, monkeypatch, base=3, extend=10, stall=2)
+        assert result["budget"]["spinning_turns"] == 0, "新做法失败不该计入打转"
+        assert result["budget"]["stop_reason"] == "exhausted"
+        assert "已达到任务最大操作轮数" in result["output"]
+
+    def test_legacy_marker_still_present_for_handoff(self, monkeypatch):
+        """中止文案必须仍含 INCOMPLETE_MARKERS 里的标记，交接机制才认得。"""
+        from agent.agent import INCOMPLETE_MARKERS
+        script = [LLMToolResponse(content="",
+                                  tool_calls=[ToolCall("1", "terminal", {"command": "exit 1"})])
+                  for _ in range(10)]
+        result = self._exec(script, monkeypatch, base=2, extend=0, stall=99)
+        assert any(m in result["output"] for m in INCOMPLETE_MARKERS), result["output"][:200]

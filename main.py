@@ -589,7 +589,8 @@ def build_parser() -> argparse.ArgumentParser:
                             const="plan", help="经典计划模式：规划→逐步执行→总结")
     parser.set_defaults(exec_mode="loop")
     parser.add_argument("--max-ops", type=int, default=None,
-                        help="单循环模式整次任务最大操作轮数（默认 40）")
+                        help="固定轮数上限（默认不用固定值：轮数由进展动态决定——"
+                             "有进展就续期，连续无进展才停；传了本参数则退回固定上限）")
     parser.add_argument("--no-stream", action="store_true",
                         help="关闭流式输出（答案整段返回而非逐字渲染）")
 
