@@ -183,12 +183,75 @@ def test_recall_keeps_same_category_when_others_dominate(monkeypatch):
     shutil.rmtree(tmp)
 
 
-def test_experience_size_limit():
+def test_experience_store_keeps_more_than_old_100_cap():
+    """回归：经验库不再被硬编码的 100 条滑动窗口截断。
+
+    早先 save_experience 里写死 `self.experiences[-100:]`，库永远是最近 100 条、
+    老经验被静默顶掉（用户看到的现象：状态行长期停在"100 条总经验"）。
+    现在容量由 LEARN_MAX_STORE 决定，默认 2000。
+    """
     m, tmp = _make_memory()
-    for i in range(110):
+    for i in range(150):
         m.save_experience(goal=f"任务{i}", plan_steps=["s1"], success=True,
                           tool_usage={"terminal": 1})
-    assert len(m.experiences) == 100
+    assert len(m.experiences) == 150
+    assert m.experiences[0].goal == "任务0", "最早的经验不该被丢弃"
+    shutil.rmtree(tmp)
+
+
+def test_experience_store_cap_is_configurable():
+    """LEARN_MAX_STORE 生效：超限只保留最新的 cap 条。"""
+    m, tmp = _make_memory()
+    m.max_experiences = 5
+    for i in range(12):
+        m.save_experience(goal=f"任务{i}", plan_steps=["s1"], success=True,
+                          tool_usage={"terminal": 1})
+    assert len(m.experiences) == 5
+    assert [e.goal for e in m.experiences] == [f"任务{i}" for i in range(7, 12)]
+    shutil.rmtree(tmp)
+
+
+def test_experience_store_zero_means_unlimited():
+    """LEARN_MAX_STORE=0 → 文件留全量。"""
+    m, tmp = _make_memory()
+    m.max_experiences = 0
+    for i in range(120):
+        m.save_experience(goal=f"任务{i}", plan_steps=["s1"], success=True,
+                          tool_usage={"terminal": 1})
+    assert len(m.experiences) == 120
+    shutil.rmtree(tmp)
+
+
+def test_recall_count_comes_from_config(monkeypatch):
+    """注入条数由 LEARN_MAX_RECALL 决定（原先写死在调用点 n=3）。"""
+    m, tmp = _make_memory()
+    monkeypatch.setattr(m, "_classify_task", lambda goal: "same")
+    for i in range(6):
+        m.save_experience(goal=f"任务{i}", plan_steps=["s1"], success=True,
+                          summary=f"经验{i}", tool_usage={"terminal": 1})
+    m.recall_n = 2
+    assert m.recall_experiences("任务").count("### 经验") == 2
+    m.recall_n = 5
+    assert m.recall_experiences("任务").count("### 经验") == 5
+    shutil.rmtree(tmp)
+
+
+def test_recall_pool_bounds_scoring_cost(monkeypatch):
+    """候选池可配（LEARN_RECALL_POOL）：库留全量后由它压住打分范围，0 = 全量。"""
+    m, tmp = _make_memory()
+    monkeypatch.setattr(m, "_classify_task",
+                        lambda goal: "target" if str(goal).startswith("目标") else "other")
+    for i in range(4):
+        m.save_experience(goal=f"目标{i}", plan_steps=["s1"], success=True,
+                          tool_usage={"terminal": 1})
+    for i in range(4):
+        m.save_experience(goal=f"普通{i}", plan_steps=["s1"], success=True,
+                          tool_usage={"terminal": 1})
+    m.recall_n = 10                     # 不靠 n 限制，只看池子
+    m.recall_pool = 1                   # 每组只取最近 1 条 → 池子共 2 条
+    assert m.recall_experiences("目标触发").count("### 经验") == 2
+    m.recall_pool = 0                   # 0 = 全量参与
+    assert m.recall_experiences("目标触发").count("### 经验") == 8
     shutil.rmtree(tmp)
 
 

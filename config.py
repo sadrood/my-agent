@@ -377,10 +377,24 @@ LOG_CONFIG = {
 # ============================================================
 # 自我进化 / 学习配置
 # ============================================================
+# ⚠️ 这里区分两个容易混淆的概念（早先混在一起，导致经验库永远长不大）：
+#   · 库容量（max_experiences_store）——磁盘上留多少历史
+#   · 召回预算（max_experiences_recall）——每次任务往提示词里注入几条
+# 之前两个值都写死在代码里（`self.experiences[-100:]` 与 `recall_experiences(n=3)`），
+# 而这里定义的三个键**没有任何地方读取**：改 .env 静默无效，经验库实际是
+# 「只保留最近 100 条的滑动窗口」。现在两个值都由本配置驱动。
 LEARN_CONFIG = {
     "enable": os.getenv("LEARN_ENABLED", "true").lower() == "true",
+    # 每次任务注入几条经验（召回预算；调大只影响提示词长度，不影响库容量）
     "max_experiences_recall": int(os.getenv("LEARN_MAX_RECALL", "3")),
-    "max_experiences_store": int(os.getenv("LEARN_MAX_STORE", "100")),
+    # 经验库容量：0 = 不限制（文件留全量）。
+    # 默认给宽裕值而非真正的无限：experiences.json 每次保存是**整体重写**，
+    # 无上限时单次写盘成本随历史线性增长（要真无限得改成 JSONL 追加）。
+    "max_experiences_store": int(os.getenv("LEARN_MAX_STORE", "2000")),
+    # 召回打分的候选池：同一类别各取最近 N 条参与打分（0 = 全量参与）。
+    # 库变全量后由它把打分成本压住；排序仍由关键词/类别/时间打分决定。
+    "recall_pool": int(os.getenv("LEARN_RECALL_POOL", "200")),
+    # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
     "inject_failure_warnings": os.getenv("LEARN_INJECT_WARNINGS", "true").lower() == "true",
 }

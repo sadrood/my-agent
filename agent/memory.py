@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from config import LEARN_CONFIG
+
+from config import PROJECT_ROOT
+
 
 # ============================================================
 # 数据结构
@@ -132,6 +136,15 @@ class Memory:
 
         # 经验库
         self.experiences: list[ExperienceEntry] = []
+
+        # 学习相关的容量与预算（全部来自 LEARN_CONFIG，不再写死在代码里）
+        #   max_experiences  : 经验库容量，0 = 不限制
+        #   recall_n         : 每次任务注入几条
+        #   recall_pool      : 打分候选池，每类别各取最近 N 条，0 = 全量
+        self.max_experiences = int(LEARN_CONFIG.get("max_experiences_store", 2000))
+        self.recall_n = int(LEARN_CONFIG.get("max_experiences_recall", 3))
+        self.recall_pool = int(LEARN_CONFIG.get("recall_pool", 200))
+        self.max_failure_patterns = int(LEARN_CONFIG.get("max_failure_patterns", 50))
 
         # 失败模式库
         self.failure_patterns: list[FailurePattern] = []
@@ -335,8 +348,7 @@ class Memory:
                     self.experiences.append(e)
                     existing_goals.add(e.goal[:50])
                     new_count += 1
-            if len(self.experiences) > 100:
-                self.experiences = self.experiences[-100:]
+            self._trim_experiences()
             if exp_entries:
                 parts.append(f"\n### 经验库（{len(exp_entries)} 条，新增 {new_count} 条）\n")
                 for e in exp_entries[-5:]:
@@ -466,9 +478,7 @@ class Memory:
         )
 
         self.experiences.append(entry)
-        # 只保留最近 100 条经验
-        if len(self.experiences) > 100:
-            self.experiences = self.experiences[-100:]
+        self._trim_experiences()
 
         self._save_json("experiences.json", [
             {
@@ -484,7 +494,19 @@ class Memory:
 
         return entry
 
-    def recall_experiences(self, goal: str, n: int = 5, llm=None,
+    def _trim_experiences(self) -> None:
+        """按 LEARN_MAX_STORE 裁剪经验库（0 = 不限制，文件留全量）。
+
+        早先这里是硬编码的 `[-100:]`：库是滑动窗口，永远超不过 100 条，
+        老经验被静默顶掉——而配置项 LEARN_MAX_STORE 定义了却没人读。
+        容量与召回预算是两件事：库该留全量，只限制每次注入几条
+        （recall_experiences 的 n，见 LEARN_MAX_RECALL）。
+        """
+        cap = int(getattr(self, "max_experiences", 0) or 0)
+        if cap > 0 and len(self.experiences) > cap:
+            self.experiences = self.experiences[-cap:]
+
+    def recall_experiences(self, goal: str, n: int = None, llm=None,
                            use_llm_rank: bool = False) -> str:
         """
         根据当前目标，召回最相关的历史经验。
@@ -494,9 +516,12 @@ class Memory:
         - 关键词重叠越多排名越靠前
         - 同类同分时按时间倒序（最新优先）
 
+        库容量与召回预算是两件事：库默认留全量（LEARN_MAX_STORE），
+        每次只注入 n 条（LEARN_MAX_RECALL）。
+
         Args:
             goal: 当前任务目标
-            n: 返回的经验数量
+            n: 返回的经验数量；None = 用 LEARN_MAX_RECALL 配置值
             llm: 可选的 LLM 实例（仅当 use_llm_rank=True 时用于语义匹配）
             use_llm_rank: 是否用 LLM 做语义排序（慢，默认关闭；
                           开启时在主 LLM 慢速模型下会拖慢每次任务启动）
@@ -507,6 +532,7 @@ class Memory:
         if not self.experiences:
             return ""
 
+        n = int(getattr(self, "recall_n", 3) if n is None else n)
         task_category = self._classify_task(goal)
         # 先按类别过滤
         same_category = [e for e in self.experiences if e.task_category == task_category]
@@ -517,8 +543,12 @@ class Memory:
         # 于是被整段切掉——实测 3 条 coding + 97 条其它时，候选池里 coding 剩 0 条，
         # 与下面 _score 里"同类别加权"以及 docstring 声明的"同类别经验优先"
         # 完全相反（用真实 experiences.json 复现）。真正的相关度排序交给 _score。
-        pool = 30
-        candidates = same_category[-pool:] + other[-pool:]
+        # 池大小可配（LEARN_RECALL_POOL，0 = 全量参与）——库留全量后由它压住打分成本。
+        pool = int(getattr(self, "recall_pool", 0) or 0)
+        if pool > 0:
+            candidates = same_category[-pool:] + other[-pool:]
+        else:
+            candidates = same_category + other
 
         if not candidates:
             return ""
@@ -631,6 +661,13 @@ class Memory:
                 avoidance_strategy=self._generate_avoidance(error_type),
             )
             self.failure_patterns.append(pattern)
+
+        # 安全阀：按 error_type 去重的模式天然有界，这里只防极端情况；
+        # 超限时丢"最久未见"的，保留一直在踩的那些（LEARN_MAX_PATTERNS，0 = 不限）
+        cap = int(getattr(self, "max_failure_patterns", 0) or 0)
+        if cap > 0 and len(self.failure_patterns) > cap:
+            self.failure_patterns.sort(key=lambda f: f.last_seen or "")
+            self.failure_patterns = self.failure_patterns[-cap:]
 
         self._save_failure_patterns()
 
