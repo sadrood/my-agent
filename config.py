@@ -251,6 +251,35 @@ TOONFLOW_CONFIG = {
 }
 
 # ============================================================
+# 知乎数据开放平台配置（https://developer.zhihu.com/docs）
+# ============================================================
+# 鉴权走 Bearer：`Authorization: Bearer <access_secret>` +
+# `X-Request-Timestamp: <秒级 Unix 时间戳>`（与服务端相差不得超过 10 分钟）。
+# Access Secret 在开放平台「个人中心」获取：
+#   ZHIHU_ACCESS_SECRET=<your_access_secret>
+# 能力与每日限免额度（每项独立计数，可用 quota 命令实时查）：
+#   全网搜索 / 知乎搜索 / 热榜 / 问题回答 / 用户数据 / 创作能力 /
+#   直答 / 知识库 / 小工具（PDF 解析、PPT 生成）
+ZHIHU_CONFIG = {
+    "enabled": os.getenv("ZHIHU_ENABLED", "true").lower() == "true",
+    "access_secret": os.getenv("ZHIHU_ACCESS_SECRET", "").strip(),
+    "base_url": os.getenv("ZHIHU_BASE_URL", "https://developer.zhihu.com").rstrip("/"),
+    # 普通读接口超时
+    "timeout": float(os.getenv("ZHIHU_TIMEOUT", "30")),
+    # 直答（大模型生成）与文件上传需要更久
+    "llm_timeout": float(os.getenv("ZHIHU_LLM_TIMEOUT", "180")),
+    "upload_timeout": float(os.getenv("ZHIHU_UPLOAD_TIMEOUT", "300")),
+    # PDF 解析 / PPT 生成是异步任务：创建后轮询，这里是总等待上限
+    "task_timeout": float(os.getenv("ZHIHU_TASK_TIMEOUT", "600")),
+    # 异步任务轮询间隔（秒）
+    "poll_interval": float(os.getenv("ZHIHU_POLL_INTERVAL", "3")),
+    # 单次回给模型的字符上限（搜索/全文接口单条就可能很长）
+    "max_chars": int(os.getenv("ZHIHU_MAX_CHARS", "12000")),
+    # PDF 解析结果 / PPT 成品的落盘目录（项目规定产物统一放 output/）
+    "save_dir": os.getenv("ZHIHU_SAVE_DIR", "output/zhihu"),
+}
+
+# ============================================================
 # 视频剪辑配置（ffmpeg：图→运镜、拼接、配音合成、字幕）
 # ============================================================
 # "图 + 运镜 + 配音"路线：不消耗视频生成配额，画面可控（漫剧/图文视频）。

@@ -156,6 +156,15 @@ class ToolManager:
         except Exception:
             pass
 
+        # 知乎数据开放平台（检索/直答/创作数据/知识库/小工具；需 ZHIHU_ACCESS_SECRET）
+        try:
+            from config import ZHIHU_CONFIG
+            if ZHIHU_CONFIG.get("enabled", True):
+                from tools.zhihu import ZhihuTool
+                self.register(ZhihuTool())
+        except Exception:
+            pass
+
     def register(self, tool: BaseTool):
         """
         注册一个工具。
