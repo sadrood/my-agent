@@ -165,6 +165,73 @@ class ToolManager:
         except Exception:
             pass
 
+        # 本地工具目录（tools/local/，已 gitignore）：agent 自造的工具/技能放这里，
+        # 只在本机生效、不随仓库推送。约定：模块内定义 BaseTool 子类即可。
+        self._local_tools: list = []
+        if TOOL_CONFIG.get("local_enabled", True):
+            self._local_tools = self._load_local_tools()
+
+    # ------------------------------------------------------------
+    # 本地工具（agent 自造技能）
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _local_dir() -> str:
+        """本地工具目录的绝对路径（相对路径锚定项目根，避免 cwd 漂移）。"""
+        raw = str(TOOL_CONFIG.get("local_dir") or "./tools/local")
+        if os.path.isabs(raw):
+            return raw
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.abspath(os.path.join(root, raw))
+
+    def _load_local_tools(self) -> list:
+        """扫描并加载本地工具目录里的 BaseTool 子类。
+
+        - 单个模块出错只跳过它（打一行警告），绝不影响其它工具与启动；
+        - 以 ``_`` 开头的文件视为私有/临时，跳过；
+        - 约定：工具类必须能无参实例化。
+        """
+        import importlib.util
+        import sys
+
+        directory = self._local_dir()
+        loaded: list = []
+        if not os.path.isdir(directory):
+            return loaded
+        for fname in sorted(os.listdir(directory)):
+            if not fname.endswith(".py") or fname.startswith("_"):
+                continue
+            path = os.path.join(directory, fname)
+            mod_name = "my_agent_local_" + os.path.splitext(fname)[0]
+            try:
+                spec = importlib.util.spec_from_file_location(mod_name, path)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[mod_name] = module
+                spec.loader.exec_module(module)
+            except Exception as e:                      # noqa: BLE001
+                print(f"[local_tools] 跳过 {fname}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+                continue
+            for attr in vars(module).values():
+                if (isinstance(attr, type) and issubclass(attr, BaseTool)
+                        and attr is not BaseTool
+                        and getattr(attr, "__module__", "") == mod_name):
+                    try:
+                        tool = attr()
+                        self.register(tool)
+                        loaded.append(tool.name)
+                    except Exception as e:              # noqa: BLE001
+                        print(f"[local_tools] {fname}:{attr.__name__} 实例化失败: {e}",
+                              file=sys.stderr)
+        self._local_tools = loaded          # 与 list_local_tools() 保持自洽
+        return loaded
+
+    def list_local_tools(self) -> list:
+        """本次启动加载进来的本地工具名（供 doctor/自检展示）。"""
+        return list(getattr(self, "_local_tools", []))
+
     def register(self, tool: BaseTool):
         """
         注册一个工具。

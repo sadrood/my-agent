@@ -22,6 +22,8 @@ generated_images/
 generated_audio/
 generated_videos/
 skills/
+# agent 自造的本地工具（本地技能，永不推送）
+tools/local/
 *.log
 
 # 调试/临时脚本与输出（开发过程产生的一次性文件）

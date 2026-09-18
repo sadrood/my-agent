@@ -573,6 +573,10 @@ TOOL_CONFIG = {
     # python 代码工具执行超时（秒）：exec 无法中断，超时后工具立即返回明确错误
     # （此前该工具体没有任何超时，sleep 轮询/长循环会挂到 tool_timeout 才返回）
     "python_timeout": float(os.getenv("PYTHON_TOOL_TIMEOUT", "30")),
+    # 本地工具目录（agent 自己新增的工具放这里：只在本机生效，已在 .gitignore
+    # 中忽略，永不推送；仓库只保留产品自带的核心工具与配置）
+    "local_dir": os.getenv("LOCAL_TOOLS_DIR", "./tools/local"),
+    "local_enabled": os.getenv("LOCAL_TOOLS_ENABLED", "true").lower() == "true",
     # 终端前台命令超时（秒）：实战发现 60s 会掐断负载下的全量测试，
     # 默认 120s。后台命令（background=true）不受此限。
     "terminal_fg_timeout": float(os.getenv("TERMINAL_FOREGROUND_TIMEOUT", "120")),

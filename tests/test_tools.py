@@ -38,8 +38,10 @@ class TestFileTool:
     def test_schema_enum(self):
         s = FileTool().schema
         assert s["properties"]["operation"]["enum"] == [
-            "read", "write", "append", "copy", "move", "list", "exists", "info",
+            "read", "write", "append", "copy", "move", "delete",
+            "list", "exists", "info",
         ]
+        assert "recursive" in s["properties"]        # delete 的目录整树开关
 
     def test_write_read_roundtrip(self, tmp_path):
         t = FileTool()
@@ -82,6 +84,45 @@ class TestPythonTool:
 
 
 class TestBrowserTool:
+    def test_profile_dir_anchored_to_project_root_not_cwd(self, monkeypatch, tmp_path):
+        """回归：换个 cwd 启动不能得到一份全新的空 profile。
+
+        实测故障（2026-09-18）：profile_dir 默认值是相对路径 "./memory/browser_profile"，
+        原先用 os.path.abspath() 解析 → 按 cwd 算。从别处启动 agent 时会落到
+        <那个目录>/memory/browser_profile，开出一份没有历史/cookie/登录态的空白
+        profile，用户看到的就是"自动化浏览器每次打开都没有记录"；而桌面端内嵌
+        浏览器正常（那是 Electron <webview> 另一套固定位置的会话目录）。
+        """
+        from tools import browser as browser_mod
+
+        monkeypatch.setitem(browser_mod.BROWSER_CONFIG, "profile_dir",
+                            "./memory/browser_profile")
+        monkeypatch.chdir(tmp_path)                  # 模拟从别的目录启动
+        b = browser_mod.BrowserTool()
+        assert b._profile_dir == os.path.join(browser_mod.PROJECT_ROOT,
+                                             "memory", "browser_profile")
+        assert str(tmp_path) not in b._profile_dir, "不该跟着 cwd 漂移"
+
+    def test_absolute_profile_dir_is_respected(self, monkeypatch, tmp_path):
+        """显式配置绝对路径时原样使用（自定义部署依赖这点）。"""
+        from tools import browser as browser_mod
+
+        target = str(tmp_path / "custom_profile")
+        monkeypatch.setitem(browser_mod.BROWSER_CONFIG, "profile_dir", target)
+        monkeypatch.chdir(browser_mod.PROJECT_ROOT)
+        assert browser_mod.BrowserTool()._profile_dir == target
+
+    def test_relative_screenshot_dir_anchored_to_root(self, monkeypatch, tmp_path):
+        """截图目录同样锚定项目根（否则截图会散落到启动目录）。"""
+        from tools import browser as browser_mod
+
+        monkeypatch.chdir(tmp_path)
+        b = BrowserTool(screenshot_dir="./shots")
+        assert b._screenshot_dir == os.path.join(browser_mod.PROJECT_ROOT, "shots")
+
+    def test_absolute_screenshot_dir_is_respected(self, tmp_path):
+        assert BrowserTool(screenshot_dir=str(tmp_path))._screenshot_dir == str(tmp_path)
+
     def test_schema_has_commands(self):
         s = BrowserTool().schema
         enum = s["properties"]["command"]["enum"]
