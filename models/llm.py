@@ -195,6 +195,9 @@ class LLM:
 
         # 自动重试配置（OpenRouter 等供应商限流时指数退避）
         self.max_retries = int(LLM_CONFIG.get("max_retries", 2))
+        #: 限流等待回调（可选）：Agent 注入 cb(seconds, attempt)，用于把"正在等配额"
+        #: 显示给用户并记进 rollout。见 _notify_rate_limit。
+        self.retry_notifier = None
         self.retry_base_delay = float(LLM_CONFIG.get("retry_base_delay", 2.0))
 
         # 运行时统计（由 Agent 注入 RunMetrics，可留空）
@@ -435,7 +438,27 @@ class LLM:
                 _sys.stderr.flush()
             except Exception:
                 pass
+        self._notify_rate_limit(delay, attempt)
         return delay
+
+    def _notify_rate_limit(self, seconds: float, attempt: int) -> None:
+        """把"正在等配额"这件事通知给上层（可选回调）。
+
+        为什么需要：上面的 stderr 提示只在纯 CLI 里看得见——桌面端 / 内嵌 UI /
+        dashboard 渲染的是富文本 stdout，stderr 里的这行没人看得到；而且**等待时长
+        没有被记录进 rollout**，事后复盘只知道"发生过 429"，不知道一共等了 10 秒
+        还是 2 分钟（实测分析一次 run 时就卡在这里）。
+
+        models 层不 import UI：只调一个由 Agent 注入的回调，没有回调就什么都不做。
+        回调抛异常绝不影响重试本身。
+        """
+        cb = getattr(self, "retry_notifier", None)
+        if cb is None:
+            return
+        try:
+            cb(seconds, attempt)
+        except Exception:      # noqa: BLE001 — 提示失败不能影响重试
+            pass
 
     def chat(
         self,

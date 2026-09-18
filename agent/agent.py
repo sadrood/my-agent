@@ -242,6 +242,7 @@ class Agent:
     ):
         self.config = config or AgentConfig()
         self.llm = llm or self._build_llm()
+        self._wire_llm_notifier()
         self.tool_manager = tool_manager or ToolManager()
         self.memory = memory or Memory()
 
@@ -397,6 +398,32 @@ class Agent:
             )
         return LLM()
 
+    def _wire_llm_notifier(self) -> None:
+        """把"正在等上游配额"接到 UI 与 rollout 上。
+
+        背景：models/llm.py 的限流提示只写 stderr——桌面端/内嵌 UI/dashboard 渲染的是
+        富文本 stdout，那行没人看得到；而且等待时长**没进 rollout**，事后复盘只知道
+        发生过 429、不知道一共等了多久（分析 run-20260918-163309 时卡在这里）。
+        """
+        try:
+            self.llm.retry_notifier = self._on_llm_rate_limit
+        except Exception:       # noqa: BLE001 — 自定义 llm 替身可能不允许设属性
+            pass
+
+    def _on_llm_rate_limit(self, seconds: float, attempt: int) -> None:
+        """限流等待的可视反馈（一行，不刷屏）+ 记进 rollout。"""
+        try:
+            print_info("⏳ 上游限流，等待 %.0f 秒后重试（第 %d 次）" % (seconds, attempt + 1),
+                       style="dim")
+        except Exception:       # noqa: BLE001 — 渲染失败不影响重试
+            pass
+        try:
+            if getattr(self, "rollout", None) is not None:
+                self.rollout.emit("llm_rate_limit_wait",
+                                  {"seconds": round(float(seconds), 1), "attempt": attempt + 1})
+        except Exception:       # noqa: BLE001
+            pass
+
     def switch_model(self, model: str = None, base_url: str = None, api_key: str = None):
         """
         会话内临时切换主模型（/model 风格）：
@@ -409,6 +436,7 @@ class Agent:
         self.config.llm_base_url = base_url or self.config.llm_base_url
         self.config.llm_api_key = api_key or self.config.llm_api_key
         self.llm = self._build_llm()
+        self._wire_llm_notifier()
         # 重建 LLM 后重接统计：否则 _record_usage 写进旧实例（或 None），
         # token 统计/上下文水位全部归零（概览"运行 tokens 0"的根因）
         if getattr(self, "metrics", None) is not None:
