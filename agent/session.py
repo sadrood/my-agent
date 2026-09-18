@@ -15,7 +15,25 @@ import secrets
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from config import SESSION_CONFIG
+from config import PROJECT_ROOT, SESSION_CONFIG
+
+
+def _resolve_session_dir(config: dict) -> str:
+    """解析会话存储目录（优先绝对路径，杜绝 cwd 漂移导致保存失败）：
+    1) SESSION_DIR 环境变量（显式指定，最高优先）
+    2) config 传入的绝对路径（测试/调用方显式指定，保持向后兼容）
+    3) 其余情况（含默认 './memory/sessions' 等相对路径）一律锚定到项目根
+    """
+    env_dir = os.getenv("SESSION_DIR")
+    if env_dir:
+        return os.path.expanduser(env_dir)
+    cfg_dir = (config or {}).get("dir")
+    if cfg_dir:
+        expanded = os.path.expanduser(cfg_dir)
+        if os.path.isabs(expanded):
+            return expanded
+        return os.path.abspath(os.path.join(PROJECT_ROOT, expanded))
+    return os.path.join(PROJECT_ROOT, "memory", "sessions")
 
 
 def generate_conversation_id() -> str:
@@ -35,6 +53,10 @@ def _atomic_dump(path: str, payload: dict) -> None:
     """原子写 JSON：紧凑序列化（长会话体积/耗时大幅下降）+ 临时文件替换，
     避免写入中断产生半损坏文件。"""
     import tempfile as _temp
+    # 兜底：写入前确保目标目录存在（防目录被误删 / cwd 漂移等极端情况）
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
@@ -46,7 +68,7 @@ class SessionStore:
 
     def __init__(self, config: dict = None):
         self.config = config or SESSION_CONFIG
-        self.dir = os.path.expanduser(self.config.get("dir", "./memory/sessions"))
+        self.dir = _resolve_session_dir(self.config)
         os.makedirs(self.dir, exist_ok=True)
 
     def _path(self, name: str) -> str:

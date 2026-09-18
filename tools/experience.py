@@ -18,6 +18,9 @@ import subprocess
 import time as _time
 from typing import Any, Dict, List, Tuple
 
+# 缓存目录必须锚定项目根：cwd 一漂，云经验库就落到别处、"看起来凭空变空"
+from config import EXPERIENCE_CONFIG, resolve_under_root
+
 from tools.base import BaseTool, ToolResult
 
 _SECRET_PATTERNS = [
@@ -58,7 +61,6 @@ def _git(args: List[str], cwd: str, check: bool = True) -> Tuple[int, str]:
 
 
 def _cfg() -> dict:
-    from config import EXPERIENCE_CONFIG
     return EXPERIENCE_CONFIG
 
 
@@ -73,7 +75,8 @@ def _cache_path(kind: str) -> str:
     url_n = url.replace("\\", "/").rstrip("/")
     name = re.sub(r"[^A-Za-z0-9_.-]+", "-",
                   url_n.rsplit("/", 1)[-1].replace(".git", ""))
-    base = os.path.abspath(str(cfg.get("cache_dir") or "./memory/experience_lib"))
+    # 相对路径必须锚定项目根：cwd 一漂，云经验库就会"看起来是空的"
+    base = resolve_under_root(cfg.get("cache_dir") or "./memory/experience_lib")
     return os.path.join(base, f"{kind}-{name}")
 
 

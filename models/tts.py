@@ -16,7 +16,7 @@ import mimetypes
 import os
 from datetime import datetime
 
-from config import TTS_CONFIG
+from config import TTS_CONFIG, resolve_under_root
 
 # 中文常用音色（edge-tts 命名：zh-CN-<名字>Neural）
 ZH_VOICES = {
@@ -115,7 +115,8 @@ class TTSModel:
             self.voice, self.voice_ignored = self._sanitize_openrouter_voice(raw_voice)
         self.rate = rate if rate is not None else cfg.get("rate", "+0%")
         self.volume = volume if volume is not None else cfg.get("volume", "+0%")
-        self.save_dir = save_dir or cfg.get("save_dir", "./generated_audio")
+        self.save_dir = resolve_under_root(
+            save_dir or cfg.get("save_dir", "./generated_audio"))
         self.timeout = float(timeout or cfg.get("timeout", 60))
 
         self.api_key = cfg.get("openrouter_api_key", "")

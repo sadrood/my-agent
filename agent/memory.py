@@ -113,14 +113,28 @@ class Memory:
         (["代码", "编程", "写.*程序", "脚本", "python", "函数"], "coding"),
     ]
 
-    def __init__(self, db_path: str = "./memory", chat_id: str = None):
+    #: 经验召回打分的权重与近期性半衰期。
+    #: 用显式权重而不是把各项塞进 lexicographic 元组：后者无法表达"近期性只占
+    #: 一部分分量"，也没法调参。关键词重叠是主因，所以权重远高于其它项。
+    W_OVERLAP = 10.0          # 每命中一个关键词
+    W_CATEGORY = 3.0          # 同一任务类别
+    W_SUCCESS = 1.0           # 成功经验（失败经验也有参考价值，故只有 1 分）
+    W_RECENCY = 2.0           # 近期性上限（乘以 0~1 的衰减系数）
+    RECENCY_HALF_LIFE_DAYS = 30.0   # 30 天衰减一半
+
+    def __init__(self, db_path: str = None, chat_id: str = None):
         """
         Args:
-            db_path: 记忆数据根目录
+            db_path: 记忆数据根目录（默认锚定项目根 memory/，不依赖进程 cwd，
+                     避免 cwd 漂移导致记忆写到 output/ 子目录造成分叉）
             chat_id: 当前对话 ID（如 conv-20260825-abc123）。
                      为 None 时使用 "default" 兼容旧行为。
                      长期记忆按 chat_id 分目录存储，实现对话间记忆隔离。
         """
+        if db_path is None:
+            db_path = os.path.join(PROJECT_ROOT, "memory")
+        elif not os.path.isabs(db_path):
+            db_path = os.path.abspath(os.path.join(PROJECT_ROOT, db_path))
         self.chat_id = chat_id or "default"
         self.db_path = db_path
         # 按 chat_id 分目录存储长期记忆

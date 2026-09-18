@@ -22,7 +22,7 @@ import subprocess
 from datetime import datetime
 from typing import List, Optional
 
-from config import VIDEO_EDIT_CONFIG
+from config import VIDEO_EDIT_CONFIG, resolve_under_root
 
 # static-ffmpeg 探测结果缓存（该调用有开销，且可能触发下载）
 _STATIC_BIN_CACHE: dict = {}
@@ -105,7 +105,8 @@ class VideoEditor:
         self.width = int(width or cfg.get("width", 1280))
         self.height = int(height or cfg.get("height", 720))
         self.fps = int(fps or cfg.get("fps", 25))
-        self.save_dir = save_dir or cfg.get("save_dir", "./generated_videos")
+        self.save_dir = resolve_under_root(
+            save_dir or cfg.get("save_dir", "./generated_videos"))
         self.timeout = float(timeout or cfg.get("timeout", 600))
 
     # ------------------------------------------------------------
@@ -205,7 +206,18 @@ class VideoEditor:
 
         fps = self.fps
         frames = max(2, int(duration * fps))
+        # 按输入图方向自动选输出规格：竖图→竖屏（720x1280），横图→默认（1280x720）。
+        # 之前写死 self.width x self.height，竖图会被压扁/裁切成横屏（漫剧全是 9:16）。
         w, h = self.width, self.height
+        try:
+            info = self.probe(image)
+            iw, ih = int(info.get("width") or 0), int(info.get("height") or 0)
+            # 竖图 + 当前配置为横屏 → 交换为竖屏规格；其余情况（横图/已竖屏/探测失败）保持原样
+            if iw > 0 and ih > 0 and ih > iw and w > h:
+                w, h = h, w  # 竖图且默认配置为横屏时，交换得到竖屏规格
+        except Exception:
+            pass  # 探测失败（如测试假图）回退默认规格
+
         cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
 
         if motion == "zoom_in":

@@ -1,7 +1,15 @@
 """
 会话持久化测试（thread/会话概念）。
 """
-from agent.session import SessionStore, sanitize_name, generate_conversation_id
+import os
+
+from agent.session import (
+    PROJECT_ROOT,
+    SessionStore,
+    _resolve_session_dir,
+    sanitize_name,
+    generate_conversation_id,
+)
 
 
 def test_sanitize_name():
@@ -15,6 +23,42 @@ def test_generate_conversation_id():
     id2 = generate_conversation_id()
     assert id1.startswith("conv-")
     assert id1 != id2
+
+
+class TestCwdAnchor:
+    """默认存储路径锚定项目根，cwd 漂移（如运行在 output/ 子目录）不再丢目录。"""
+
+    def test_default_dir_anchored_to_project_root(self):
+        d = _resolve_session_dir(None)
+        assert os.path.isabs(d)
+        assert d == os.path.join(PROJECT_ROOT, "memory", "sessions")
+
+    def test_default_store_usable_when_cwd_drifted(self, tmp_path, monkeypatch):
+        # 模拟进程 cwd 漂移到任意位置（tmp_path），默认配置下保存不失败
+        monkeypatch.delenv("SESSION_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        store = SessionStore(config={"dir": "./memory/sessions"})
+        assert os.path.isabs(store.dir)
+        assert store.dir == os.path.join(PROJECT_ROOT, "memory", "sessions")
+        path = store.save_conversation(
+            "conv-cwd-drift", messages=[{"role": "user", "content": "hi"}]
+        )
+        assert os.path.exists(path)
+        store.delete_conversation("conv-cwd-drift")
+
+    def test_absolute_config_dir_respected(self, tmp_path):
+        d = _resolve_session_dir({"dir": str(tmp_path)})
+        assert d == str(tmp_path)
+
+    def test_missing_dir_auto_created_on_save(self, tmp_path):
+        # 目录不存在（甚至父目录也没有）时保存也应成功（写入前兜底 makedirs）
+        store = SessionStore(config={"dir": str(tmp_path)})
+        nested = os.path.join(str(tmp_path), "a", "b")
+        store.dir = nested  # 模拟目录被删/从未创建
+        path = store.save_conversation(
+            "conv-mkdir", messages=[{"role": "user", "content": "hi"}]
+        )
+        assert os.path.exists(path)
 
 
 class TestConversations:
