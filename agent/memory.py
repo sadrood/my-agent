@@ -512,8 +512,13 @@ class Memory:
         same_category = [e for e in self.experiences if e.task_category == task_category]
         other = [e for e in self.experiences if e.task_category != task_category]
 
-        # 同类优先
-        candidates = (same_category + other)[-30:]
+        # 同类优先：**各组内各自限流**，不能写成 (same_category + other)[-30:]。
+        # 那个写法是"先拼接、再取末尾 30 条"，而同类别条目排在被拼接串的开头，
+        # 于是被整段切掉——实测 3 条 coding + 97 条其它时，候选池里 coding 剩 0 条，
+        # 与下面 _score 里"同类别加权"以及 docstring 声明的"同类别经验优先"
+        # 完全相反（用真实 experiences.json 复现）。真正的相关度排序交给 _score。
+        pool = 30
+        candidates = same_category[-pool:] + other[-pool:]
 
         if not candidates:
             return ""

@@ -151,6 +151,38 @@ def test_recall_experiences():
     shutil.rmtree(tmp)
 
 
+def test_recall_keeps_same_category_when_others_dominate(monkeypatch):
+    """回归：候选池不能把同类别经验整段切掉。
+
+    原实现是 `(same_category + other)[-30:]`——先拼接再取末尾 30 条，而同类别
+    条目排在拼接串开头，于是被整段丢弃。用户实际库里 3 条 coding + 97 条其它，
+    复现结果是候选池里 coding 剩 0 条：名为"相关经验"、实际全是不相干的类别，
+    与 docstring 的"同类别经验优先"和 _score 的同类加权都相反。
+    """
+    m, tmp = _make_memory()
+
+    def fake_classify(goal):
+        return "target" if str(goal).startswith("目标") else "other"
+
+    monkeypatch.setattr(m, "_classify_task", fake_classify)
+    # 注意：save_experience 有质量门槛——"无工具、无错误、且成功"视为纯问答不入库，
+    # 所以这里必须带上 tool_usage，否则一条都存不进去（本测试第一版就踩了这个）。
+    # 目标类别写在最前（旧实现下正好是被切掉的位置），随后灌入大量其它类别
+    for i in range(3):
+        m.save_experience(goal=f"目标{i}", plan_steps=["s1"], success=True,
+                          summary=f"目标经验{i}", tool_usage={"terminal": 1})
+    for i in range(40):
+        m.save_experience(goal=f"普通{i}", plan_steps=["s1"], success=True,
+                          summary=f"普通经验{i}", tool_usage={"terminal": 1})
+    assert len(m.experiences) == 43, "前置条件：经验确实入库了"
+
+    ctx = m.recall_experiences("目标触发", n=3)
+    assert "目标经验" in ctx, "同类别经验被候选池切掉了（回归）"
+    # 同类别应优先于其它类别（关键词重叠相同时按类别加权）
+    assert ctx.count("目标经验") >= 1
+    shutil.rmtree(tmp)
+
+
 def test_experience_size_limit():
     m, tmp = _make_memory()
     for i in range(110):
