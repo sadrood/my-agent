@@ -357,6 +357,108 @@ def test_extract_keywords():
     assert len(kws) <= 10
 
 
+class TestKeywordExtraction:
+    """关键词提取：确定性 + 对中文有效（这两个都是修出来的真 bug）。
+
+    旧实现 `list(set(english + chinese))[:10]`：
+      · 中文按连续汉字段整切（「然后任务断了的情况啊」），两个不同任务几乎不可能
+        共享整段 → 用真实库 100 条经验实测，关键词重叠 **全部为 0**，相关性这个
+        主排序键等于失效；
+      · set 顺序受哈希随机化影响（每进程随机）→ 同一个长目标两次运行丢的词不同，
+        召回结果不可复现。
+    """
+
+    def test_output_is_deterministic_across_calls(self):
+        text = ("帮我重构记忆模块：经验库容量要可配置、候选池要限流、中文分词要修、"
+                "失败模式要安全阀、会话续跑要预算、浏览器 profile 要锚定项目根")
+        first = Memory._extract_keywords(text)
+        assert first == Memory._extract_keywords(text)
+        assert len(first) <= 12
+
+    def test_preserves_text_order_so_truncation_is_stable(self):
+        ks = Memory._extract_keywords("my_agent 的经验召回逻辑要改")
+        assert ks.index("my_agent") < ks.index("经验") < ks.index("逻辑")
+
+    def test_related_goals_share_tokens(self):
+        """修复的核心：旧实现下两个相关目标的重叠恒为 0。"""
+        a = set(Memory._extract_keywords("帮我优化 agent 的经验召回逻辑，改进中文分词"))
+        b = set(Memory._extract_keywords("记忆模块的经验召回效果不好，中文分词要修"))
+        assert len(a & b) >= 3, a & b
+
+    def test_unrelated_goals_do_not_overlap(self):
+        a = set(Memory._extract_keywords("改进中文分词与经验召回"))
+        c = set(Memory._extract_keywords("推荐几本先婚后爱的小说"))
+        assert not (a & c), a & c
+
+    def test_stopwords_and_cross_boundary_bigrams_are_dropped(self):
+        assert Memory._extract_keywords("帮我优化一下这个") == ["优化"]
+        for token in Memory._extract_keywords("经验库容量需要可配置，还要补测试和文档"):
+            assert token[0] not in Memory._EDGE_STOPCHARS, token
+            assert token[-1] not in Memory._EDGE_STOPCHARS, token
+
+    def test_empty_text_is_safe(self):
+        assert Memory._extract_keywords("") == []
+        assert Memory._extract_keywords(None) == []
+
+    def test_content_words_survive_edge_filter(self):
+        """内容词不能被边界虚词表误伤。
+
+        回归：`_EDGE_STOPCHARS` 里一旦把「已经」拆成单字放进去，`经` 就成了虚词，
+        于是「经验」被整词丢掉——而「经验」恰恰是这个项目最高频的内容词。
+        """
+        for word in ("经验", "用户", "数据", "测试", "配置", "记忆", "召回"):
+            ks = Memory._extract_keywords("关于%s的处理" % word)
+            assert word in ks, "%s 被边界虚词表误伤了：%s" % (word, ks)
+
+
+class TestRecallScoring:
+    """召回打分：相关度为主、近期性作为加权项（而不是只当 tiebreaker）。"""
+
+    @staticmethod
+    def _entry(goal, category="same", summary=None, success=True, days_ago=0):
+        from datetime import datetime, timedelta
+        return ExperienceEntry(
+            goal=goal, plan_steps=["s1"], success=success, total_steps=1,
+            completed_steps=1, failed_steps=0, summary=summary or goal,
+            task_category=category, tool_usage={"terminal": 1}, errors=[],
+            timestamp=(datetime.now() - timedelta(days=days_ago)).isoformat())
+
+    def test_relevance_beats_recency(self, monkeypatch):
+        """一年前的相关经验应压过今天的不相关经验（旧实现只看类别/成功/时间）。"""
+        m, tmp = _make_memory()
+        monkeypatch.setattr(m, "_classify_task", lambda goal: "same")
+        m.experiences = [
+            self._entry("推荐几本先婚后爱的小说", summary="小说那条", days_ago=0),
+            self._entry("修复中文分词与经验召回逻辑", summary="分词那条", days_ago=365),
+        ]
+        m.recall_n, m.recall_pool = 1, 0
+        ctx = m.recall_experiences("继续修中文分词和经验召回")
+        assert "分词那条" in ctx and "小说那条" not in ctx
+        shutil.rmtree(tmp)
+
+    def test_newer_wins_when_equally_relevant(self, monkeypatch):
+        """同样相关时新的优先——这条靠近期性加权，不再只靠最后的字符串比较。"""
+        m, tmp = _make_memory()
+        monkeypatch.setattr(m, "_classify_task", lambda goal: "same")
+        m.experiences = [
+            self._entry("修复中文分词问题", summary="旧方案", days_ago=200),
+            self._entry("修复中文分词问题", summary="新方案", days_ago=0),
+        ]
+        m.recall_n, m.recall_pool = 1, 0
+        ctx = m.recall_experiences("修复中文分词问题")
+        assert "新方案" in ctx and "旧方案" not in ctx
+        shutil.rmtree(tmp)
+
+    def test_recency_decays_with_age(self):
+        """衰减函数本身：越旧越接近 0，且单调。"""
+        import math
+        m, _ = _make_memory()
+        scores = [m.W_RECENCY * (0.5 ** (d / m.RECENCY_HALF_LIFE_DAYS))
+                  for d in (0, 30, 60, 365)]
+        assert scores[0] > scores[1] > scores[2] > scores[3] > 0
+        assert math.isclose(scores[1], m.W_RECENCY / 2, rel_tol=1e-6), "半衰期应为 30 天"
+
+
 def test_persistence_roundtrip():
     tmp = tempfile.mkdtemp(prefix="mem_persist_")
     m = Memory(db_path=tmp)

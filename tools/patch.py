@@ -13,6 +13,7 @@ EditTool 只发"改哪里"的增量：
 - 修改前自动生成 .bak 备份（可选，默认开）
 """
 import os
+import re
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
@@ -333,18 +334,129 @@ class EditTool(BaseTool):
             return ToolResult(success=True, output=f"preflight 测试通过{scope_note}")
 
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        tail_lines = int(TOOL_CONFIG.get("edit_preflight_tail", 40))
-        tail = "\n".join(combined.splitlines()[-tail_lines:])
+        tail_lines = int(TOOL_CONFIG.get("edit_preflight_tail", 80))
+        summary = self._summarize_test_failure(combined, file_path, tail_lines)
         rolled = self._rollback_edit(file_path, backup_path)
         return ToolResult(
             success=False, output="",
             error=(
                 f"preflight 测试未通过（返回码 {proc.returncode}），"
-                f"已{'自动回滚' if rolled else '回滚失败（请手动 git 恢复）'}本次修改。测试尾部:\n{tail[:2000]}"
+                f"已{'自动回滚' if rolled else '回滚失败（请手动 git 恢复）'}本次修改。\n{summary}"
             ),
             metadata={"preflight_failed": True, "rolled_back": rolled,
-                      "test_tail": tail[:2000]},
+                      "test_summary": summary},
         )
+
+    #: 失败摘要里最多列几个用例（其余折叠成计数，别把提示词刷屏）
+    _FAILURE_LIST_MAX = 8
+
+    @staticmethod
+    def _summarize_test_failure(combined: str, edited_file: str = "",
+                                tail_lines: int = 80) -> str:
+        """把 pytest 输出压成"能判断该怪谁"的失败摘要。
+
+        为什么不只回喂尾部 N 行（早先做法，也是 agent 明确反馈过的坑）：
+        全套 pytest 失败时 FAILURES 段很长，固定行数窗口经常**只截到断言片段、
+        丢掉"哪个用例失败"**。实测后果是 agent 拿着 `assert 110 == 100` 全项目
+        搜不到对应测试名，把（并发改动引起的）失败误判成自己改坏了代码。
+
+        这里显式抽出四样东西：
+          1. 失败用例清单——取自 pytest 的 short test summary，不受窗口影响；
+          2. 每个用例的首个断言行——让模型不用猜是哪个断言；
+          3. 归因提示——失败用例与被改文件无关时明说，避免误回滚；
+          4. 截断告知——输出行数超过窗口时给出总行数，避免"没看到"当成"没有"。
+        """
+        lines = combined.splitlines()
+
+        # 1) 失败用例（去重保序）。pytest 的 short test summary 形如：
+        #      FAILED tests/test_x.py::test_y - AssertionError: ...
+        #    注意：按绝对路径跑时文件部分会是空的（`FAILED ::test_y`），
+        #    这时不能据此判断"与本次改动无关"（会误报），要从断言处的文件行补。
+        failed, seen = [], set()
+        for ln in lines:
+            m = re.match(r"^(?:FAILED|ERROR)\s+(\S+)", ln.strip())
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                failed.append(m.group(1))
+
+        # 2) 每个用例的断言行与所在文件（pytest 的 FAILURES 段）
+        #    分隔符随版本不同（下划线/横线/破折号），都认
+        _bar = r"[_\-\u2500\u2501]{3,}"
+        _head = re.compile(r"^%s\s+(\S+)\s+%s$" % (_bar, _bar))
+        info, headers, cur = {}, [], None
+        for ln in lines:
+            s = ln.strip()
+            m = _head.match(s)
+            if m:
+                cur = m.group(1)
+                headers.append(cur)
+                info.setdefault(cur, {"e": [], "file": ""})
+                continue
+            if cur is None:
+                continue
+            rec = info.setdefault(cur, {"e": [], "file": ""})
+            if s.startswith("E ") and len(rec["e"]) < 3:
+                rec["e"].append(s[2:].strip()[:200])
+            fm = re.match(r"^([A-Za-z]:\\[^\s:]+|\S+\.py):\d+:", s)
+            if fm and not rec["file"]:
+                rec["file"] = fm.group(1)
+
+        def _best_assert(name):
+            """优先给带 assert 的那行——它才是判断失败原因的关键。"""
+            es = info.get(name, {}).get("e") or []
+            for e in es:
+                if "assert" in e:
+                    return e
+            return es[0] if es else ""
+
+        if not failed:                      # 没有 short summary（如收集阶段就失败）
+            failed = headers[:EditTool._FAILURE_LIST_MAX]
+
+        parts = []
+        if failed:
+            parts.append("失败用例（%d 个）:" % len(failed))
+            for node in failed[:EditTool._FAILURE_LIST_MAX]:
+                short = node.split("::")[-1]
+                msg = _best_assert(short) or _best_assert(node)
+                parts.append("  - %s" % node)
+                if msg:
+                    parts.append("      %s" % msg)
+            if len(failed) > EditTool._FAILURE_LIST_MAX:
+                parts.append("  …还有 %d 个未列出" % (len(failed) - EditTool._FAILURE_LIST_MAX))
+        else:
+            parts.append("未能从输出解析出失败用例（pytest 输出可能被参数裁剪）；"
+                         "请看下方原始尾部自行判断。")
+
+        # 3) 归因：失败用例是否与被改文件相关。只有在**确实知道失败文件**时才下结论，
+        #    否则宁可不提示，也不误导模型去回滚无关改动。
+        base = os.path.basename(edited_file or "")
+        stem = base[:-3] if base.endswith(".py") else base
+        if failed and stem:
+            known, related = 0, 0
+            for node in failed:
+                path = node.split("::")[0]
+                if not path or path.startswith("::"):
+                    path = info.get(node.split("::")[-1], {}).get("file", "")
+                if not path:
+                    continue
+                known += 1
+                if os.path.basename(path) == base or stem in path:
+                    related += 1
+            if known and not related:
+                parts.append(
+                    "⚠️ 能定位到文件的 %d 个失败用例都跟本次改动的 %s 无关，可能是并发改动或"
+                    "既有失败——不要急着认定是自己改坏的，更不要为此回滚无关改动。"
+                    % (known, base))
+            elif related:
+                parts.append("其中 %d 个失败用例与被改文件 %s 相关。"
+                             % (related, base))
+
+        # 4) 原始尾部 + 截断告知
+        if len(lines) > tail_lines:
+            parts.append("（pytest 输出共 %d 行，下面只是末尾 %d 行）"
+                         % (len(lines), tail_lines))
+        parts.append("\n".join(lines[-tail_lines:])[:2000])
+        return "\n".join(parts)[:3000]
 
     def _rollback_edit(self, file_path: str, backup_path: str) -> bool:
         """用 .bak 备份恢复文件内容；恢复成功后删除已用完的备份。"""
