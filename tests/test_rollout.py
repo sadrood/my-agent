@@ -3,7 +3,7 @@ Rollout 事件追踪与压缩测试。
 """
 import os
 
-from agent.rollout import Rollout, estimate_tokens
+from agent.rollout import Rollout, clip_result, clip_text, estimate_tokens
 
 
 def test_estimate_tokens():
@@ -145,3 +145,44 @@ def test_compact_drops_leading_orphan_tool(tmp_path):
     assert roles[0] == "system"
     # 要么补回了 assistant(tool_calls)，要么把孤立 tool 裁掉了
     _check_tool_protocol(out[1:])
+
+
+class TestClipLimits:
+    """落盘截断：追踪文件是事后诊断的唯一依据，截太狠等于没有记录。
+
+    实测事故（2026-09-18）：agent 的最终自审报告在 rollout 里被截到 300 字、断在
+    半句，复盘"它提了哪些问题"只能去 memory/sessions/*.json 里翻。现在上限可配，
+    且截断时附原文长度——避免把"被截断"误读成"就这么多"。
+    """
+
+    def test_short_text_passes_through_untouched(self):
+        assert clip_text("你好，世界") == "你好，世界"
+        assert clip_result("短结果") == "短结果"
+
+    def test_none_becomes_empty_string(self):
+        assert clip_text(None) == ""
+        assert clip_result(None) == ""
+
+    def test_long_text_is_cut_with_a_visible_note(self):
+        out = clip_text("x" * 9000)
+        assert out.startswith("x" * 100)
+        assert "落盘截断" in out and "9000" in out, "要能看出被截断以及原文多长"
+        assert len(out) < 9000
+
+    def test_model_output_limit_is_much_larger_than_the_old_300(self):
+        """回归：默认不能再把最终回答截到 300 字。"""
+        assert len(clip_text("y" * 3000)) > 300, "3000 字的回答不该被截"
+        assert "落盘截断" not in clip_text("y" * 3000)
+
+    def test_result_limit_is_separate_and_smaller(self):
+        # 工具返回默认 2000：3000 字要截，但截出来的比模型输出上限短
+        assert "落盘截断" in clip_result("y" * 3000)
+        assert len(clip_result("y" * 3000)) < len(clip_text("y" * 3000))
+
+    def test_explicit_limit_overrides_config(self):
+        assert clip_text("z" * 500, limit=100).startswith("z" * 100)
+        assert "落盘截断" in clip_text("z" * 500, limit=100)
+
+    def test_zero_limit_means_no_truncation(self):
+        big = "q" * 20000
+        assert clip_text(big, limit=0) == big

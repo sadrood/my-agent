@@ -25,6 +25,8 @@ import threading
 from typing import Callable, Optional
 
 from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
+# 落盘文本的截断统一走 rollout 的 clip_*（上限可配：追踪文件是事后诊断依据）
+from agent.rollout import clip_result, clip_text
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
     EXECUTOR_BROWSER_SYSTEM_PROMPT,
@@ -273,7 +275,7 @@ class Executor:
             if getattr(response, "reasoning_present", False) or getattr(response, "reasoning", ""):
                 thinking_mode_seen = True
             self._emit("model_turn", {
-                "content": response.content[:300],
+                "content": clip_text(response.content),
                 "tool_calls": [tc.name for tc in response.tool_calls],
                 "finish_reason": response.finish_reason,
                 # 诊断埋点：思考模式的 reasoning 是否被捕获（未捕获会导致下一轮 400）
@@ -317,7 +319,7 @@ class Executor:
                     "name": tc.name,
                     "arguments": tc.arguments,
                     "success": result.success,
-                    "output": (result.output or result.error)[:300],
+                    "output": clip_result(result.output or result.error),
                     "blocked_reason": blocked_reason,
                 })
                 if not result.success and not blocked_reason:
@@ -347,7 +349,7 @@ class Executor:
             "step": current_step,
             "success": success,
             "tool_call_count": len(tool_calls_log),
-            "final_text": final_text[:300],
+            "final_text": clip_text(final_text),
         })
 
         return {
@@ -582,7 +584,7 @@ class Executor:
                 thinking_mode_seen = True
 
             self._emit("model_turn", {
-                "content": response.content[:300],
+                "content": clip_text(response.content),
                 "tool_calls": [tc.name for tc in response.tool_calls],
                 "finish_reason": response.finish_reason,
                 # 诊断埋点：思考模式的 reasoning 是否被捕获（未捕获会导致下一轮 400）
@@ -642,7 +644,7 @@ class Executor:
                 # 成功 = 有最终回答 且 没有未补救的失败
                 # （空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
                 success = bool(final) and last_success_idx >= last_failure_idx
-                self._emit("run_loop_end", {"success": success, "output": final[:300]})
+                self._emit("run_loop_end", {"success": success, "output": clip_text(final)})
                 return {
                     "success": success,
                     "output": final,
@@ -760,7 +762,7 @@ class Executor:
                     "name": tc.name,
                     "arguments": tc.arguments,
                     "success": result.success,
-                    "output": (result.output or result.error)[:300],
+                    "output": clip_result(result.output or result.error),
                     "blocked_reason": blocked_reason,
                 })
                 if not result.success and not blocked_reason:
@@ -1163,7 +1165,7 @@ class Executor:
             self._emit("tool_result", {
                 "tool": tool_name,
                 "success": False,
-                "output": msg[:300],
+                "output": clip_result(msg),
                 "truncated": False,
             })
             # 注意：第二个返回值是 blocked_reason，**必须留空**。
@@ -1203,7 +1205,7 @@ class Executor:
         self._emit("tool_result", {
             "tool": tool_name,
             "success": result.success,
-            "output": (result.output or result.error)[:300],
+            "output": clip_result(result.output or result.error),
             "truncated": result.truncated,
         })
 
