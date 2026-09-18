@@ -571,7 +571,7 @@ TOOL_CONFIG = {
     # 失败自动回滚（.bak 恢复）并把测试尾部回喂模型。默认关闭，EDIT_PREFLIGHT=true 开启。
     "edit_preflight": os.getenv("EDIT_PREFLIGHT", "false").lower() == "true",
     "edit_preflight_timeout": int(os.getenv("EDIT_PREFLIGHT_TIMEOUT", "180")),
-    "edit_preflight_tail": int(os.getenv("EDIT_PREFLIGHT_TAIL", "40")),   # 回喂的失败日志行数
+    "edit_preflight_tail": int(os.getenv("EDIT_PREFLIGHT_TAIL", "80")),   # 回喂的失败日志行数
     # preflight 测试范围：related=只跑与被改模块相关的测试（默认；全套 600+
     # 个测试会超过超时，导致文件已改却报失败）；full=始终跑全套
     "edit_preflight_scope": os.getenv("EDIT_PREFLIGHT_SCOPE", "related"),

@@ -563,16 +563,32 @@ class Memory:
         # 轻量相似度排序：按与目标的关键词重叠打分（无需 LLM）
         goal_keywords = set(self._extract_keywords(goal))
 
+        def _recency(exp) -> float:
+            """近期性：按半衰期指数衰减（0~1）。
+
+            早先 timestamp 只当 tiebreaker，于是"半年前的经验"和"昨天的"在同类
+            同分时只差在最后的字符串比较上——经历过一次坑的经验，三个月后仍然
+            和刚踩过的等价。主流记忆系统（如 Generative Agents）都把近期性作为
+            显式的加权项，这里照做。
+            """
+            try:
+                then = datetime.fromisoformat(getattr(exp, "timestamp", "") or "")
+            except (TypeError, ValueError):
+                return 0.0
+            days = max(0.0, (datetime.now() - then).total_seconds() / 86400.0)
+            return 0.5 ** (days / self.RECENCY_HALF_LIFE_DAYS)
+
         def _score(exp) -> tuple:
             exp_keywords = set(self._extract_keywords(exp.goal))
             overlap = len(goal_keywords & exp_keywords)
-            # 类别相同加权；成功经验加权；再按时间倒序
-            return (
-                overlap,
-                1 if exp.task_category == task_category else 0,
-                1 if exp.success else 0,
-                exp.timestamp or "",
-            )
+            # 关键词重叠是主因（权重最高），其次同类、成功，最后叠加近期性；
+            # 权重是显式的常量，便于调参而不是埋在 lexicographic 元组顺序里。
+            score = (self.W_OVERLAP * overlap
+                     + self.W_CATEGORY * (1 if exp.task_category == task_category else 0)
+                     + self.W_SUCCESS * (1 if exp.success else 0)
+                     + self.W_RECENCY * _recency(exp))
+            # 分数相同时按时间倒序（新经验优先）——保留原有的确定性 tiebreak
+            return (round(score, 6), exp.timestamp or "")
 
         if goal_keywords:
             candidates = sorted(candidates, key=_score, reverse=True)
@@ -804,13 +820,67 @@ class Memory:
                     return label
         return "general"
 
+    #: 出现在 bigram 首/尾就说明它跨了词边界（「的经」「并给」「我优」），丢掉。
+    #: ⚠️ 只能放**单字虚词**，而且要避开高频内容词的首/尾字，两类坑都踩过：
+    #:   · 「已经」拆成单字会让 `经` 变虚词 → 内容词「经验」被整词丢掉；
+    #:   · `用` 会让「用户」被丢掉（`使用` 也会）。
+    #: 现在只保留明确无害的虚词；「需要/重要/存在/对比」这类词会被顺带滤掉，
+    #: 这是有意的取舍——它们在目标描述里几乎没有区分度。
+    #: 由 TestKeywordExtraction.test_content_words_survive_edge_filter 看守。
+    _EDGE_STOPCHARS = frozenset("的了吗呢啊吧呀嘛哦和与及或并而但这那我你他她它们"
+                                "请帮一下现在先再还也就都是正在到从对把被让给做"
+                                "应该怎什为何如已要不想没")
+
+    #: 中文虚词/连接词：它们几乎出现在任何目标里，当关键词只会制造"假重叠"
+    _STOPWORDS = frozenset("""
+        的 了 吗 呢 啊 吧 呀 和 与 及 或 以及 然后 而且 但是 不过 因为 所以 如果 那么
+        这个 那个 我们 你们 他们 请 帮我 一下 现在 先 再 还 也 就 都 有 是 在 到 从
+        对 把 被 让 给 用 做 需要 可以 应该 怎么 什么 为什么 如何 一个 进行 已经 没有
+        the and for are was were been with that this from have has had not you your
+    """.split())
+
     @staticmethod
-    def _extract_keywords(text: str) -> list[str]:
-        """从文本中提取关键词。"""
-        # 提取中英文词
-        english = re.findall(r'[a-zA-Z_]+', text)
-        chinese = re.findall(r'[\u4e00-\u9fff]{2,}', text)
-        return list(set(english + chinese))[:10]
+    def _extract_keywords(text: str, limit: int = 12) -> list[str]:
+        """提取用于相似度打分的关键词——**确定性且对中文有效**。
+
+        早先实现是 `list(set(english + chinese))[:10]`，有两个真问题：
+        1. 中文按 `[\\u4e00-\\u9fff]{2,}` 整段切，切出来的是「然后任务断了的情况啊」
+           这种连续汉字段，不是词。两个不同任务几乎不可能共享整段——用真实库里
+           100 条经验实测，关键词重叠 **100 条全为 0**。于是"相关性"这个主排序键
+           等于失效，排序实际退化成 (类别, 成功, 时间)。
+        2. `set` 顺序受 Python 哈希随机化影响（每进程随机，未设 PYTHONHASHSEED），
+           `[:10]` 会**丢掉不同的词**：同一个长目标两次运行保留的关键词不是同一批，
+           召回结果不可复现。
+
+        现在：切段 → 英文小写 → 中文 2-gram（经典廉价 CJK 切分）+ 整段保留
+        （≤6 字，让完全相同的短语精确命中）→ 丢掉跨词边界的 bigram 与停用词
+        → **保序去重**，因此同一输入在任何进程都得到同一结果。
+        """
+        if not text:
+            return []
+        low = str(text).lower()
+        tokens = list(re.findall(r"[a-z][a-z0-9_]+", low))
+        for run in re.findall(r"[\u4e00-\u9fff]+", low):
+            if len(run) <= 2:
+                tokens.append(run)
+                continue
+            if len(run) <= 6:
+                tokens.append(run)          # 短词组整段保留，便于精确匹配
+            for i in range(len(run) - 1):
+                bigram = run[i:i + 2]
+                if bigram[0] in Memory._EDGE_STOPCHARS or bigram[1] in Memory._EDGE_STOPCHARS:
+                    continue
+                tokens.append(bigram)
+        out, seen = [], set()
+        for t in tokens:
+            # 单字符（含中文单字）信息量太低，不参与打分
+            if len(t) < 2 or t in seen or t in Memory._STOPWORDS:
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= limit:
+                break
+        return out
 
     # ================================================================
     # 持久化
