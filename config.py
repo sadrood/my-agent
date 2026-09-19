@@ -623,6 +623,10 @@ TOOL_CONFIG = {
     # 留空则回退到 max_loop_ops（即升级前的行为）。
     "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))
                       if os.getenv("LOOP_HARD_CAP", "").strip() else None),
+    # 完成度闸门（"让 agent 做完任务再结束"）：模型给出最终答案时，若它自己的任务
+    # 清单里还有本次工作产生的未完成项，就把它推回去继续。有界，不会与模型僵持。
+    "loop_completion_gate": os.getenv("LOOP_COMPLETION_GATE", "true").lower() == "true",
+    "loop_completion_nudges": int(os.getenv("LOOP_COMPLETION_NUDGES", "2")),
     # edit 验证式应用（apply_patch preflight 思路）：修改 .py 后自动跑测试，
     # 失败自动回滚（.bak 恢复）并把测试尾部回喂模型。默认关闭，EDIT_PREFLIGHT=true 开启。
     "edit_preflight": os.getenv("EDIT_PREFLIGHT", "false").lower() == "true",

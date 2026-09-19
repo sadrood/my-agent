@@ -14,8 +14,13 @@ import time
 from typing import Any, Dict, List
 
 from tools.base import BaseTool, ToolResult
+from config import resolve_under_root
 
-_TODO_DIR = os.path.join("memory", "todos")
+# 必须锚定项目根：这是**硬编码的相对路径**，open() 按 cwd 解析——agent 在 output/xxx
+# 下跑时清单就落到那里去了。实测本机已被拆成三份（memory/todos、
+# output/memory/todos、output/qici_toonflow_ep1/memory/todos 各一份），
+# 界面看到的进度和"完成度闸门"读到的都不是同一份。详见 config.resolve_under_root。
+_TODO_DIR = resolve_under_root(os.path.join("memory", "todos"))
 
 
 def _safe_name(key: str) -> str:
@@ -97,6 +102,20 @@ class TodoTool(BaseTool):
         with open(self._path(), "w", encoding="utf-8") as f:
             json.dump(todos, f, ensure_ascii=False, indent=2)
         self._emit(todos)
+
+    def pending(self) -> List[dict]:
+        """当前仍未完成的待办（status 不是 done 的都算）。
+
+        Executor 的"完成度闸门"用它判断模型是不是活儿没干完就想收尾
+        （清单里没有时间戳，时间维度的过滤由调用方用 id 快照做）。
+        读失败一律当空清单：闸门是加分项，不能因为它自己出错阻断正常收尾。
+        """
+        try:
+            return [t for t in self._load()
+                    if isinstance(t, dict)
+                    and str(t.get("status", "todo")).strip().lower() != "done"]
+        except Exception:       # noqa: BLE001
+            return []
 
     def _emit(self, todos: List[dict]) -> None:
         if self._emit_fn:

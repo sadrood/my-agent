@@ -163,10 +163,18 @@ class LoopBudget:
         return True
 
     def allow_next(self) -> bool:
-        """能否再跑一轮；不能则设置 stop_reason。"""
+        """能否再跑一轮；不能则设置 stop_reason。
+
+        `hard_cap <= 0` 表示**不设绝对上限**：此时不看 limit，只由"原地打转"、
+        用户按停止、或致命错误来结束——这正是"让 agent 做完任务再结束"的语义。
+        （只看 limit 是不够的：不续期的轮次——换了新做法但失败——会把 limit 耗光，
+         于是任务照样被"轮数用尽"打断，那正是要根治的现象。）
+        """
         if self.spinning_turns >= self.stall_limit:
             self.stop_reason = "stalled"
             return False
+        if self.hard_cap <= 0:
+            return True
         if self.used >= self.limit:
             self.stop_reason = "exhausted"
             return False
@@ -190,8 +198,11 @@ class LoopBudget:
     # ------------------------------------------------------------
 
     def near_limit(self, warn_fraction: float = 0.8) -> bool:
-        """是否已接近当前预算（用于预警；动态预算下"接近"的判据随续期变化）。"""
-        if self.limit <= 0:
+        """是否已接近当前预算（用于预警）。
+
+        无限模式（hard_cap=0）下没有"接近上限"这回事，恒返回 False。
+        """
+        if self.hard_cap <= 0 or self.limit <= 0:
             return False
         return self.used >= int(self.limit * warn_fraction)
 

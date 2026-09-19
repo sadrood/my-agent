@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional
 from tools.base import BaseTool, ToolResult
 
 _MEM_DIR = "memory"
+# 任务清单落盘路径必须锚定项目根：这是**硬编码的相对路径**，open() 会按 cwd 解析——
+# 换个目录启动就会读到另一份（看起来"任务清单凭空清空"），而完成任务判定依赖它。
+# 同一类坑在本仓库已出现多次，详见 config.resolve_under_root。
+from config import resolve_under_root as _resolve_under_root
+
+_MEM_DIR = _resolve_under_root(_MEM_DIR)
 _TASKS_FILE = os.path.join(_MEM_DIR, "tasks.json")
 _THOUGHTS_FILE = os.path.join(_MEM_DIR, "thoughts.json")
 

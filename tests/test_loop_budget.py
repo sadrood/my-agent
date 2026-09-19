@@ -79,6 +79,33 @@ class TestExtension:
             b.observe(TurnOutcome(succeeded=1))
         assert b.limit == 2 + 30, "0 = 不设上限，只由进展/停止条件决定"
 
+    def test_infinite_mode_never_exhausts(self):
+        """"让 agent 做完任务再结束"：hard_cap=0 时永远放行下一轮。
+
+        旧行为是固定 80/120 轮封顶——复杂任务跑到一半被砍，用户原话
+        "任务没完成轮数耗尽，导致任务中断"。
+        """
+        b = LoopBudget(base=2, extend=0, stall_limit=5, hard_cap=0)
+        for _ in range(200):
+            assert b.allow_next() is True
+            b.observe(TurnOutcome(tool_calls=1, failed=1))    # 失败的**新**尝试
+        assert b.stop_reason == ""
+        assert b.near_limit() is False, "无限模式下不存在'接近上限'"
+
+    def test_infinite_mode_still_stops_when_spinning(self):
+        """没有上限不等于没有刹车：原地打转仍然要停（否则会一直烧钱）。"""
+        b = LoopBudget(base=2, extend=0, stall_limit=3, hard_cap=0)
+        for _ in range(3):
+            b.observe(TurnOutcome(repeated=True))
+        assert b.allow_next() is False
+        assert b.stop_reason == "stalled"
+
+    def test_infinite_mode_summary_says_unlimited(self):
+        b = LoopBudget(base=2, extend=0, stall_limit=5, hard_cap=0)
+        b.observe(TurnOutcome(succeeded=1))
+        assert b.summary()["hard_cap"] == 0
+        assert "安全网上限 无" in b.stop_message()
+
     def test_hard_cap_below_base_still_wins(self):
         """显式 max_ops=5 时必须恰好 5 轮——不能被起步轮数顶掉。"""
         assert LoopBudget.fixed(5).limit == 5

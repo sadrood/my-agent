@@ -467,6 +467,17 @@ class Executor:
         warned_at_extension = -1
         pending = TurnOutcome()          # 本轮产出摘要，下一轮开头结算
         prev_signature: tuple = ()       # 上一轮的调用签名，用于识别"原样重复"
+        # 完成度闸门配置（"让 agent 做完任务再结束"）：见下方最终答案分支
+        completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
+        completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
+        completion_nudges = 0
+        #: 只统计**本次循环开始之后**创建/更新的任务：任务清单是全局跨会话的
+        #: （memory/tasks.json），历史遗留的 todo 会造成无关的"还没做完"误判。
+        loop_started_at = time.strftime("%Y-%m-%d %H:%M")
+        #: 会话待办清单（todo_write）的**起始快照**：清单项没有时间戳，没法像任务板
+        #: 那样按时间过滤，所以记下循环开始时就已经挂着的 id——只有本次循环期间新增、
+        #: 且结束时仍未完成的待办才触发闸门，历史遗留清单不会让每次收尾都被拦。
+        pending_todos_at_start = self._pending_todo_ids()
         # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），
         # for 循环会自动推进 turn，while 则会漏自增导致死循环。
         for turn in itertools.count():
@@ -668,6 +679,39 @@ class Executor:
                         pass
                     final = ""
                 consecutive_empty = 0
+                # 完成度闸门：模型给出最终答案时，若它**自己的任务清单**里还有本次
+                # 工作产生的未完成项，就把它推回去继续——"让 agent 做完任务再结束"。
+                # 有界（最多 loop_completion_nudges 次），不会与模型僵持；模型也可以
+                # 明确说明"那些项已不需要做"来正常收尾。
+                if final and completion_gate and completion_nudges < completion_nudge_max:
+                    pending_titles = self._unfinished_items(loop_started_at,
+                                                            pending_todos_at_start)
+                    if pending_titles:
+                        completion_nudges += 1
+                        nudge_data = {
+                            "turn": turn + 1, "pending": len(pending_titles),
+                            "attempt": completion_nudges,
+                            "titles": pending_titles[:3],
+                        }
+                        self._emit("completion_nudge", nudge_data)
+                        # 也要走 event_sink：_emit 只进 rollout 日志，用户/前端看不到
+                        # "为什么还没结束"——闸门是用户可感知的决策，必须可见。
+                        if self._event_sink is not None:
+                            try:
+                                self._event_sink("completion_nudge", nudge_data)
+                            except Exception:
+                                pass
+                        messages.append({"role": "assistant", "content": final})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "（先别收尾：你自己列的清单里还有 %d 项没做完——%s。"
+                                "请继续把它们做完再给最终答案；若其中某项确实已不需要做，"
+                                "明确说明原因即可结束。）"
+                                % (len(pending_titles), "、".join(pending_titles[:3]))
+                            ),
+                        })
+                        continue
                 # 成功 = 有最终回答 且 没有未补救的失败
                 # （空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
                 success = bool(final) and last_success_idx >= last_failure_idx
@@ -853,6 +897,78 @@ class Executor:
             "ops": budget.used,
             "budget": budget.summary(),
         }
+
+    @staticmethod
+    def _pending_tasks(since: str = "") -> list:
+        """读 agent 自己的任务清单里未完成的项（todo / in_progress）。
+
+        用于"完成度闸门"：模型想收尾但任务清单还有活时，把它推回去继续。
+
+        设计要点：
+          · `since`（"YYYY-MM-DD HH:MM"）只统计本次循环开始之后创建/更新的任务——
+            任务清单是**全局跨会话**的，历史遗留 todo 会造成无关误判；
+          · 任何异常都返回空列表：闸门是加分项，绝不能因为它自身出错而阻断正常收尾。
+        """
+        try:
+            from agent.tasks import load_tasks
+            out = []
+            for t in load_tasks() or ():
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("status", "")).strip().lower() not in ("todo", "in_progress"):
+                    continue
+                stamp = str(t.get("updated") or t.get("created") or "")
+                if since and stamp and stamp < since:
+                    continue          # 时间戳字符串同格式可比；早于本次循环的忽略
+                title = str(t.get("title") or t.get("id") or "").strip()
+                if title:
+                    out.append(title)
+            return out
+        except Exception:       # noqa: BLE001
+            return []
+
+    def _pending_todo_ids(self) -> set:
+        """当前会话待办清单里**未完成**项的 id 集合（起始快照 / 现状对比都用它）。
+
+        清单归属靠 TodoTool 自己的会话 key（Agent 层注入），所以直接问工具实例即可，
+        不用把 session id 再穿一层进来。任何异常都当空集合。
+        """
+        try:
+            tool = self.tool_manager.get_tool("todo_write")
+            pending = tool.pending() if tool is not None and hasattr(tool, "pending") else []
+            return {str(t.get("id")) for t in pending if isinstance(t, dict) and t.get("id")}
+        except Exception:       # noqa: BLE001
+            return set()
+
+    def _unfinished_items(self, since: str, todo_snapshot: set) -> list:
+        """模型想收尾时，它自己列的清单里还剩哪些活（两个来源合并）。
+
+        1. 全局任务板（agent.tasks）：按时间过滤，只算本次循环动过的；
+        2. 会话待办（todo_write）：按 id 快照过滤，只算本次循环新增且仍未完成的。
+
+        之所以要第 2 项：`todo_write` 才是模型实际用来规划任务的清单（写进系统提示，
+        实测 21 份 rollout 里任务板 0 次调用、待办清单是常态），只看任务板等于闸门
+        基本不会触发。返回标题列表，顺序稳定、已去重。
+        """
+        titles = list(self._pending_tasks(since=since))
+        try:
+            tool = self.tool_manager.get_tool("todo_write")
+            for t in (tool.pending() if tool is not None and hasattr(tool, "pending") else []):
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("id")) in todo_snapshot:
+                    continue          # 本次循环开始前就挂着的：历史遗留，不拦收尾
+                title = str(t.get("title") or t.get("id") or "").strip()
+                if title:
+                    titles.append(title)
+        except Exception:       # noqa: BLE001
+            pass
+        seen, out = set(), []
+        for title in titles:
+            if title not in seen:
+                seen.add(title)
+                out.append(title)
+        return out
 
     def _stream_turn(
         self,
