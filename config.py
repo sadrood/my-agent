@@ -501,6 +501,27 @@ GUARDIAN_CONFIG = {
 }
 
 # ============================================================
+# Guardian 人工放行（授权）配置
+# ============================================================
+# 用户诉求："agent 来求助说某一步被 Guardian 拦截时，我可以跟 Guardian 说放行，
+# 或者我跟 agent 说可以执行，agent 拿着这个就能让 Guardian 放行。"
+#
+# 防伪是这里唯一重要的事：授权**只能由人类输入产生**（REPL/CLI 的人类输入、
+# 或拦截当场的人工确认），模型输出与工具结果永远不会被解析成授权——否则提示注入
+# 就能自我放行，而那正是 Guardian 要拦的东西。授权默认一次性、有 TTL，且只跳过
+# Guardian 盲审这一层（审批黑名单与沙箱检查在它之前，碰不到）。
+GUARDIAN_CONSENT_CONFIG = {
+    "enabled": os.getenv("GUARDIAN_CONSENT", "true").lower() == "true",
+    # 授权/被拦记录的有效期（秒）：过期自动失效，避免长期驻留
+    "ttl": float(os.getenv("GUARDIAN_CONSENT_TTL", "1800")),
+    # 保留最近几次被拦记录（人话点名时用来绑定具体哪一次）
+    "max_pending": int(os.getenv("GUARDIAN_CONSENT_MAX_PENDING", "5")),
+    "max_grants": int(os.getenv("GUARDIAN_CONSENT_MAX_GRANTS", "20")),
+    # 拦截当场就问人（仅交互式会话；无人值守时不会问，仍然拦）
+    "interactive_prompt": os.getenv("GUARDIAN_CONSENT_PROMPT", "true").lower() == "true",
+}
+
+# ============================================================
 # Rollout 事件追踪配置（借鉴同类实现的 rollout-trace）
 # ============================================================
 ROLLOUT_CONFIG = {

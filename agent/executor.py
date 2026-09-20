@@ -91,6 +91,8 @@ class Executor:
         llm_retry_delay: float = 1.5,
         snapshot_checkpoints: bool = False,   # 逐操作式：edit/write 前 git 检查点
         snapshot_dir: str = "",               # 检查点的 git 工作目录
+        consents=None,                        # ConsentStore：人工放行（Guardian 授权）
+        consent_ask=None,                     # 拦截当场问人的回调（仅交互式会话注入）
     ):
         self.tool_manager = tool_manager or ToolManager()
         self.llm = llm or LLM()
@@ -101,6 +103,10 @@ class Executor:
         )
         self.approval = approval_policy          # ApprovalPolicy | None（None=全部放行）
         self.guardian = guardian                 # Guardian | None
+        # 人工放行：consents 记录被拦调用与人类授权；consent_ask 只在交互式会话里注入
+        # （无人值守时为 None → 拦截仍然是拦截，不会因为"没人可问"就放行）
+        self.consents = consents
+        self.consent_ask = consent_ask
         self.rollout = rollout                   # Rollout | None
         self._event_sink = None                  # execute_goal_loop 期间的事件回调（→ dashboard）
         self.instructions_text = instructions_text
@@ -433,6 +439,16 @@ class Executor:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        # 人工放行提示（宿主生成，模型无法伪造）：系统提示里写着"被 Guardian 拒绝的
+        # 操作不要反复重试"，不明确告诉它"这个已经被授权了"，人授权了它也不会去重试。
+        if self._consents_enabled():
+            try:
+                consent_note = self.consents.hint_for_agent()
+            except Exception:                   # noqa: BLE001
+                consent_note = ""
+            if consent_note:
+                messages.append({"role": "user", "content": consent_note})
+                self._emit("consent_hint", {"text": consent_note[:300]})
 
         tool_calls_log: list = []
         errors: list = []
@@ -1218,6 +1234,30 @@ class Executor:
         )
         return (resp or "").strip() or "(历史已压缩)"
 
+    def _consents_enabled(self) -> bool:
+        try:
+            return bool(self.consents is not None and self.consents.enabled)
+        except Exception:                       # noqa: BLE001
+            return False
+
+    def _ask_consent(self, tool_name: str, arguments: dict, reason: str) -> str:
+        """拦截当场问人是否放行 → "once" / "session" / ""（不放行）。
+
+        回调由宿主注入（交互式 CLI / 桌面端）；返回空串或抛异常都视为"不放行"——
+        问不出来就等于没授权：无人值守时绝不能因为"没人可问"而默许。
+        """
+        try:
+            answer = self.consent_ask({"tool": tool_name, "arguments": arguments,
+                                       "reason": reason})
+        except Exception:                       # noqa: BLE001
+            return ""
+        ans = str(answer or "").strip().lower()
+        if ans in ("always", "all", "session", "以后", "都", "永久"):
+            return "session"
+        if ans in ("y", "yes", "是", "允许", "ok", "once", "本次", "可以"):
+            return "once"
+        return ""
+
     def _dispatch_tool_call(self, tool_name: str, arguments: dict, goal: str,
                             checkpoint: bool = True, stream_output: bool = True):
         """
@@ -1263,10 +1303,38 @@ class Executor:
         if self.guardian is not None:
             request = self.tool_manager.build_approval_request(tool_name, arguments)
             if request is not None and self.guardian.should_review(request.risk_level):
-                verdict = self.guardian.review(request, goal)
-                self._emit("guardian", {"tool": tool_name, "verdict": verdict.verdict, "reason": verdict.reason})
-                if verdict.verdict == "block":
-                    return ToolResult(success=False, output="", error=f"Guardian 拦截: {verdict.reason}"), f"Guardian 拦截: {verdict.reason}"
+                # 2.1 人工放行优先：用户已就**这一次完全相同**的调用明确授权
+                #     （授权只能由人类输入产生，见 agent/consent.py），不再让盲审否决。
+                #     只跳过 Guardian 这一层——审批黑名单/沙箱在上面第 1 步，管不到。
+                if self.consents is not None and self.consents.allows(tool_name, arguments):
+                    self._emit_visible("guardian_overridden", {"tool": tool_name,
+                                                               "reason": "用户已授权放行"})
+                else:
+                    verdict = self.guardian.review(request, goal)
+                    self._emit_visible("guardian", {"tool": tool_name, "verdict": verdict.verdict,
+                                                    "reason": verdict.reason})
+                    if verdict.verdict == "block":
+                        blocked = f"Guardian 拦截: {verdict.reason}"
+                        if self._consents_enabled():
+                            self.consents.record_block(tool_name, arguments, verdict.reason,
+                                                       command=getattr(request, "command", "") or "")
+                            # 2.2 人就在现场时，就地问他一句——这是"跟 Guardian 说放行"
+                            #     最短的路径：绑定精确、当场生效，不用等下一轮对话。
+                            if self.consent_ask is not None:
+                                scope = self._ask_consent(tool_name, arguments, verdict.reason)
+                                if scope:
+                                    grant = self.consents.grant_pending(
+                                        scope=scope,
+                                        note=f"拦截时人工确认（{'本会话内同一条调用' if scope == 'session' else '本次'}）")
+                                    if grant is not None:
+                                        self._emit_visible("guardian_override_granted", {
+                                            "tool": tool_name, "scope": scope,
+                                            "reason": verdict.reason,
+                                        })
+                                        # 放行：继续走下面的执行流程
+                                        blocked = ""
+                        if blocked:
+                            return ToolResult(success=False, output="", error=blocked), blocked
 
         # 3. 执行（带硬超时：任何工具卡死都不冻结 Agent）
         self._emit("tool_call", {"tool": tool_name, "args": arguments})
@@ -1515,6 +1583,19 @@ class Executor:
     def _emit(self, event_type: str, data: dict):
         if self.rollout is not None:
             self.rollout.emit(event_type, data)
+
+    def _emit_visible(self, event_type: str, data: dict):
+        """同时进 rollout 与 event_sink。
+
+        `_emit` 只写 rollout 日志（见其注释），但"Guardian 拦了什么/谁放行的"是
+        用户必须能看到的决策——只进日志的话，前端与 agent 都无从知道该找谁授权。
+        """
+        self._emit(event_type, data)
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event_type, data)
+            except Exception:                   # noqa: BLE001
+                pass
 
     # ================================================================
     # 旧协议回退（legacy：文本 JSON 决策）
