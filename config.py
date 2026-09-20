@@ -166,6 +166,15 @@ VISION_CONFIG = {
     # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
     # browser visionclick 仅 60s），必须显式收紧
     "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
+    # 备用视觉模型：主模型超时/报错/不支持图片时按顺序接着试
+    # （实测商汤 sensenova-6.8-flash-lite 能读图，Agnes 抖动时可顶上）。
+    # 逗号分隔多个模型；base_url/api_key 留空 = 用主 LLM 端点（商汤）。
+    "fallback_models": [m.strip() for m in
+                        os.getenv("VISION_FALLBACK_MODELS",
+                                  "sensenova-6.8-flash-lite").split(",") if m.strip()],
+    "fallback_base_url": os.getenv("VISION_FALLBACK_BASE_URL", "") or LLM_CONFIG["base_url"],
+    "fallback_api_key": os.getenv("VISION_FALLBACK_API_KEY", "") or LLM_CONFIG["api_key"],
+    "fallback_timeout": float(os.getenv("VISION_FALLBACK_TIMEOUT", "60")),
 }
 
 # ============================================================
@@ -187,6 +196,16 @@ IMAGE_GEN_CONFIG = {
     "timeout": float(os.getenv("IMAGE_GEN_TIMEOUT", "120")),
     # 官方公测期间免费开放去水印（watermark=false）；默认关闭水印
     "watermark": os.getenv("IMAGE_GEN_WATERMARK", "false").lower() == "true",
+    # 备用生图端点：主端点超时/报错时按顺序接着试（实测商汤 u1.5-lite/u1-fast/u1.5-fast
+    # 都能出图，返回 b64_json）。默认指向商汤——若主端点本来就是商汤，
+    # 把这里改成 Agnes（或留空关闭）才有意义；与主端点完全相同的条目会被自动跳过。
+    "fallback_models": [m.strip() for m in
+                        os.getenv("IMAGE_GEN_FALLBACK_MODELS",
+                                  "sensenova-u1.5-lite").split(",") if m.strip()],
+    "fallback_base_url": os.getenv(
+        "IMAGE_GEN_FALLBACK_BASE_URL", "https://token.sensenova.cn/v1"),
+    "fallback_api_key": os.getenv("IMAGE_GEN_FALLBACK_API_KEY", "") or LLM_CONFIG["api_key"],
+    "fallback_timeout": float(os.getenv("IMAGE_GEN_FALLBACK_TIMEOUT", "180")),
 }
 
 # ============================================================
@@ -519,6 +538,29 @@ GUARDIAN_CONSENT_CONFIG = {
     "max_grants": int(os.getenv("GUARDIAN_CONSENT_MAX_GRANTS", "20")),
     # 拦截当场就问人（仅交互式会话；无人值守时不会问，仍然拦）
     "interactive_prompt": os.getenv("GUARDIAN_CONSENT_PROMPT", "true").lower() == "true",
+}
+
+# ============================================================
+# 本地 OCR 配置（截图取字，不依赖视觉大模型）
+# ============================================================
+# 用户痛点："agent 缺少截图识别文字的能力，总是依赖视觉模型，视觉模型无响应就废了。"
+# 视觉模型能理解版面与语义，但有超时/配额/"该模型不支持图片"的坑；而这些时候
+# **文字本身是能拿到的**——系统自带 OCR 就能读。所以文字提取优先走本地 OCR，
+# 视觉模型不可用时也自动降级到它（见 models/ocr.py）。
+OCR_CONFIG = {
+    "enabled": os.getenv("OCR_ENABLED", "true").lower() == "true",
+    # 指定后端（windows / rapidocr / tesseract）；留空 = 按优先级自动挑
+    "backend": os.getenv("OCR_BACKEND", ""),
+    # Windows OCR 的识别语言（逗号分隔，按顺序尝试）；留空用系统当前语言
+    "languages": os.getenv("OCR_LANGUAGES", "zh-Hans-CN,en-US"),
+    "timeout": float(os.getenv("OCR_TIMEOUT", "60")),
+    # 识别前放大倍数：实测 2 倍对小字号截图明显更准（20px 图 83%→93%，
+    # 34px 图 87%→89%），3 倍不再提升还会切碎英文单词。1 = 不放大。
+    "scale": int(os.getenv("OCR_SCALE", "2")),
+    # 视觉模型失败/不可用时自动降级到本地 OCR（"就废了"的根治）
+    "auto_fallback": os.getenv("OCR_AUTO_FALLBACK", "true").lower() == "true",
+    # 用户明确要"提取文字/识字"时直接用 OCR（快、离线、不花配额），不必先问视觉模型
+    "prefer_for_text": os.getenv("OCR_PREFER_FOR_TEXT", "true").lower() == "true",
 }
 
 # ============================================================

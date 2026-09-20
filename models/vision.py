@@ -62,6 +62,71 @@ class VisionModel:
         )
         self.vision_model = vision_model or VISION_CONFIG.get("vision_model") or self._auto_detect_model()
         self.screenshot_dir = VISION_CONFIG.get("screenshot_path", "./screenshots")
+        #: 上一次成功应答用的模型（备用顶上时，调用方/日志要知道是谁答的）
+        self.last_model = self.vision_model
+        self.last_detail = ""
+        self.last_fallback_reason = ""
+        self.base_url = base_url or VISION_CONFIG.get("base_url") or LLM_CONFIG["base_url"]
+
+    # ------------------------------------------------------------
+    # 备用端点（主模型超时/报错时接着试）
+    # ------------------------------------------------------------
+
+    def _fallback_clients(self):
+        """按配置构建备用视觉端点 [(模型名, client), ...]（与主端点相同的跳过）。"""
+        out = []
+        models = VISION_CONFIG.get("fallback_models") or []
+        if not models:
+            return out
+        base = VISION_CONFIG.get("fallback_base_url") or VISION_CONFIG.get("base_url")
+        key = VISION_CONFIG.get("fallback_api_key") or VISION_CONFIG.get("api_key")
+        timeout = float(VISION_CONFIG.get("fallback_timeout", 60))
+        for model in models:
+            if not model:
+                continue
+            # 与主端点+主模型完全相同的条目没有意义（重试同一个东西）
+            if model == self.vision_model and str(base) == str(self.base_url):
+                continue
+            try:
+                client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
+            except Exception:                   # noqa: BLE001
+                continue
+            out.append((model, client))
+        return out
+
+    def fallback_note(self) -> str:
+        """备用模型顶上时的说明（供工具输出给用户/模型看，避免误以为主模型正常）。"""
+        if str(self.last_detail).startswith("备用"):
+            why = (self.last_fallback_reason or "").strip()
+            return (f"\n（本次由**备用模型** {self.last_model} 应答；主模型失败："
+                    f"{why[:120] or '未知原因'}）")
+        return ""
+
+    def _analyze_once(self, client, model: str, messages: list, max_tokens: int,
+                      reasoning_effort: str) -> str:
+        """单次调用 + 响应加固（空 choices / 空内容都转成可读错误）。"""
+        kwargs = dict(model=model, messages=messages, max_tokens=max_tokens)
+        if reasoning_effort:
+            # 网关把 reasoning_effort 作为顶层参数（OpenAI SDK 需 extra_body 透传）
+            kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            raise RuntimeError(f"视觉模型调用失败: {str(e)}")
+
+        # 纯文本模型收到图片、或被安全拦截时，常见返回空 choices/空 content，
+        # 直接下标访问会抛晦涩的 NoneType 错误——这里转成可读的明确提示
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise RuntimeError(
+                "视觉模型返回空 choices：该模型可能不支持图片输入，或请求被服务端拒绝。")
+        content = getattr(getattr(choices[0], "message", None), "content", None)
+        if not content:
+            reason = getattr(choices[0], "finish_reason", "") or ""
+            raise RuntimeError(
+                f"视觉模型返回空内容（finish_reason={reason or '未知'}）："
+                "该模型可能不支持图片输入，或内容被安全策略拦截。")
+        return content
 
     def _auto_detect_model(self) -> str:
         """自动选择可用的视觉模型。"""
@@ -120,29 +185,26 @@ class VisionModel:
             })
         messages.append({"role": "user", "content": content_parts})
 
-        try:
-            kwargs = dict(model=self.vision_model, messages=messages, max_tokens=max_tokens)
-            if reasoning_effort:
-                # 网关把 reasoning_effort 作为顶层参数（OpenAI SDK 需 extra_body 透传）
-                kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
-            response = self.client.chat.completions.create(**kwargs)
-        except Exception as e:
-            raise RuntimeError(f"视觉模型调用失败: {str(e)}")
-
-        # 响应加固：纯文本模型收到图片、或被安全拦截时，常见返回空 choices/空 content，
-        # 直接下标访问会抛晦涩的 NoneType 错误——这里转成可读的明确提示
-        choices = getattr(response, "choices", None)
-        if not choices:
-            raise RuntimeError(
-                "视觉模型返回空 choices：该模型可能不支持图片输入，或请求被服务端拒绝。"
-                "请换一个多模态（视觉）模型。")
-        content = getattr(getattr(choices[0], "message", None), "content", None)
-        if not content:
-            reason = getattr(choices[0], "finish_reason", "") or ""
-            raise RuntimeError(
-                f"视觉模型返回空内容（finish_reason={reason or '未知'}）："
-                "该模型可能不支持图片输入，或内容被安全策略拦截。请换多模态模型。")
-        return content
+        # 主模型 → 备用模型依次尝试：视觉上游抖动/超时/不支持图片时，
+        # 换一家继续（用户要求："当模型超时就换这些"）。全失败才抛错，
+        # 错误里带上每一次的失败原因，便于判断是"都不支持"还是"网络问题"。
+        attempts = [(self.vision_model, self.client)] + self._fallback_clients()
+        errors = []
+        for idx, (model, client) in enumerate(attempts):
+            try:
+                content = self._analyze_once(client, model, messages, max_tokens,
+                                             reasoning_effort)
+                self.last_model = model
+                self.last_detail = "主模型" if idx == 0 else f"备用模型（第 {idx} 个）"
+                if idx > 0:
+                    # 让上层知道这次是备用顶上的（工具输出里会显示，避免误以为主模型正常）
+                    self.last_fallback_reason = errors[-1] if errors else ""
+                return content
+            except Exception as e:              # noqa: BLE001
+                errors.append(f"{model}: {str(e)[:160]}")
+                continue
+        raise RuntimeError("视觉调用全部失败（主模型 + "
+                           f"{len(attempts) - 1} 个备用）：" + "；".join(errors))
 
     # ================================================================
     # 高级封装：常用分析场景

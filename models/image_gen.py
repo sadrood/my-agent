@@ -54,12 +54,17 @@ class ImageGenModel:
         self.timeout = timeout or cfg["timeout"]
         # 官方公测期免费开放去水印：false = 不带水印
         self.watermark = cfg["watermark"] if watermark is None else bool(watermark)
+        #: 上一次成功的模型/端点（备用顶上时要能说清是谁出的图）
+        self.last_model = self.model
+        self.last_endpoint = self.base_url
+        self.last_fallback_reason = ""
 
     # ------------------------------------------------------------
     # 底层请求
     # ------------------------------------------------------------
 
-    def _post(self, payload: dict) -> dict:
+    def _post(self, payload: dict, base_url: str = None, api_key: str = None,
+              timeout: float = None) -> dict:
         """发送生成请求；提供方不认的可选字段自动剔除后重试一次。
 
         各家专有字段不同：商汤认 `watermark`，Agnes 会以
@@ -68,21 +73,24 @@ class ImageGenModel:
         避免换提供方就要改代码。
         """
         try:
-            return self._post_raw(payload)
+            return self._post_raw(payload, base_url=base_url, api_key=api_key,
+                                  timeout=timeout)
         except RuntimeError as e:
             msg = str(e)
             for field in _OPTIONAL_FIELDS:
                 if field in payload and field in msg:
                     retry = {k: v for k, v in payload.items() if k != field}
-                    return self._post_raw(retry)
+                    return self._post_raw(retry, base_url=base_url, api_key=api_key,
+                                          timeout=timeout)
             raise
 
-    def _post_raw(self, payload: dict) -> dict:
-        url = f"{self.base_url}/images/generations"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+    def _post_raw(self, payload: dict, base_url: str = None, api_key: str = None,
+                  timeout: float = None) -> dict:
+        url = f"{(base_url or self.base_url).rstrip('/')}/images/generations"
+        headers = {"Authorization": f"Bearer {api_key or self.api_key}"}
         try:
             resp = httpx.post(url, json=payload, headers=headers,
-                              timeout=self.timeout)
+                              timeout=timeout or self.timeout)
         except httpx.HTTPError as e:
             raise RuntimeError(f"图像生成请求失败: {str(e)[:200]}") from e
         if resp.status_code >= 400:
@@ -99,27 +107,61 @@ class ImageGenModel:
 
     def generate_b64(self, prompt: str, size: str = None, n: int = 1,
                      model: str = None) -> List[str]:
-        """生成图片，返回 b64_json 列表（若提供方返回 url 则原样返回 url）。"""
-        payload = {
-            "model": model or self.model,
-            "prompt": prompt,
-            "n": max(1, min(int(n), 4)),
-            "size": size or self.default_size,
-            "response_format": "b64_json",
-            # 官方公测期免费开放去水印（watermark=false）
-            "watermark": self.watermark,
-        }
-        data = self._post(payload)
-        items = data.get("data") or []
-        out = []
-        for item in items:
-            if item.get("b64_json"):
-                out.append(item["b64_json"])
-            elif item.get("url"):
-                out.append(item["url"])
-        if not out:
-            raise RuntimeError(f"图像生成响应异常: {str(data)[:300]}")
-        return out
+        """生成图片，返回 b64_json 列表（若提供方返回 url 则原样返回 url）。
+
+        主端点失败（超时/报错/额度）时按配置换**备用端点**接着试——实测商汤
+        sensenova-u1.5-lite / u1-fast / u1.5-fast 都能出图（b64_json），
+        而 Agnes 偶发超时；跨提供方兜底比"原地重试同一个挂掉的端点"有用得多。
+        """
+        errors = []
+        for cfg in self._endpoint_chain(model):
+            payload = {
+                "model": cfg["model"],
+                "prompt": prompt,
+                "n": max(1, min(int(n), 4)),
+                "size": size or self.default_size,
+                "response_format": "b64_json",
+                # 官方公测期免费开放去水印（watermark=false）
+                "watermark": self.watermark,
+            }
+            try:
+                data = self._post(payload, base_url=cfg["base_url"], api_key=cfg["api_key"],
+                                  timeout=cfg["timeout"])
+            except RuntimeError as e:
+                errors.append(f"{cfg['model']}@{cfg['base_url']}: {str(e)[:140]}")
+                continue
+            items = data.get("data") or []
+            out = []
+            for item in items:
+                if item.get("b64_json"):
+                    out.append(item["b64_json"])
+                elif item.get("url"):
+                    out.append(item["url"])
+            if out:
+                self.last_model = cfg["model"]
+                self.last_endpoint = cfg["base_url"]
+                self.last_fallback_reason = errors[-1] if errors else ""
+                return out
+            errors.append(f"{cfg['model']}: 响应里没有图片数据")
+        raise RuntimeError("图像生成全部失败（主端点 + 备用端点）：" + "；".join(errors))
+
+    def _endpoint_chain(self, model: str = None):
+        """主端点 + 备用端点（与主端点完全相同的条目跳过）。"""
+        chain = [{"model": model or self.model, "base_url": self.base_url,
+                  "api_key": self.api_key, "timeout": self.timeout}]
+        for fm in (IMAGE_GEN_CONFIG.get("fallback_models") or []):
+            if not fm:
+                continue
+            base = (IMAGE_GEN_CONFIG.get("fallback_base_url") or "").rstrip("/")
+            key = IMAGE_GEN_CONFIG.get("fallback_api_key") or self.api_key
+            if not base:
+                continue
+            if fm == (model or self.model) and base == self.base_url:
+                continue                        # 重试同一个端点没有意义
+            chain.append({"model": fm, "base_url": base, "api_key": key,
+                          "timeout": float(IMAGE_GEN_CONFIG.get("fallback_timeout",
+                                                               self.timeout))})
+        return chain
 
     def generate(self, prompt: str, size: str = None, n: int = 1,
                  save: bool = True, save_dir: str = None,
@@ -151,10 +193,12 @@ class ImageGenModel:
                 images.append(self._save_image(item, i, save_dir))
         return {
             "images": images,
-            "model": model or self.model,
+            # 报**实际出图**的模型（备用顶上时不能谎报成主模型）
+            "model": self.last_model,
             "size": size or self.default_size,
             "saved": save,
             "prompt": prompt,
+            "fallback_from": self.last_fallback_reason,
         }
 
     def _download_image(self, url: str, index: int,

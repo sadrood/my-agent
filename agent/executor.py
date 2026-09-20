@@ -1813,9 +1813,34 @@ class Executor:
             return screenshot_result
 
         except Exception as e:
+            # 视觉模型挂掉不等于"看不见"：本地 OCR 至少能把屏幕上的字读出来，
+            # 让循环继续（用户痛点：视觉模型无响应就整个废掉）。
+            ocr_text = self._ocr_screenshot_text(base64_data)
+            if ocr_text:
+                screenshot_result["vision_analysis"] = ocr_text
+                screenshot_result["output"] = (
+                    f"【本地 OCR 识别结果】（视觉分析失败: {str(e)[:120]}；"
+                    f"已降级到本地 OCR——只有文字，没有版面与元素坐标）\n{ocr_text}\n\n"
+                    f"请基于以上文字，决定下一步操作。"
+                )
+                screenshot_result["status"] = "continue"
+                screenshot_result["degraded"] = "ocr"
+                return screenshot_result
             screenshot_result["status"] = "failed"
             screenshot_result["error"] = f"视觉分析失败: {str(e)}"
             return screenshot_result
+
+    @staticmethod
+    def _ocr_screenshot_text(base64_data: str) -> str:
+        """视觉失败时的兜底：本地 OCR 读字（不可用/无文字则返回空串）。"""
+        try:
+            from models.ocr import auto_fallback_enabled, recognize_image
+            if not auto_fallback_enabled() or not base64_data:
+                return ""
+            result = recognize_image(image_base64=base64_data)
+            return result.text.strip()
+        except Exception:                       # noqa: BLE001
+            return ""
 
     def analyze_page_visually(self, goal: str = "") -> str:
         """

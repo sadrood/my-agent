@@ -105,6 +105,13 @@ class ToolManager:
         except Exception:
             pass
 
+        # 本地 OCR（截图识字，不依赖视觉模型）：视觉链路的降级通道
+        try:
+            from tools.ocr import OcrTool
+            self.register(OcrTool())
+        except Exception:
+            pass
+
         # 桌面操控工具（Windows）：截图/无障碍树/鼠标键盘，高危走审批门
         try:
             from tools.computer_use import DesktopTool
