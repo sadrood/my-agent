@@ -133,6 +133,66 @@ class StageRecord:
 
 
 @dataclass
+class CheckResult:
+    """对**已有文稿**做审阅/校对的结果（不改写全文；校对模式额外给修正稿）。"""
+    mode: str                                  # review / proofread
+    title: str
+    text: str                                  # 原文
+    source: str = ""                           # 来源文件路径（若来自文件）
+    fixed_text: str = ""                       # 校对后的正文（润色落定后才有）
+    issues: List[ArticleIssue] = field(default_factory=list)
+    fact_checks: List[FactCheck] = field(default_factory=list)
+    stages: List[StageRecord] = field(default_factory=list)
+    out_dir: str = ""
+    warnings: List[str] = field(default_factory=list)
+
+    def issue_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for it in self.issues:
+            counts[it.severity] = counts.get(it.severity, 0) + 1
+        return counts
+
+    def verdict_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for fc in self.fact_checks:
+            counts[fc.verdict] = counts.get(fc.verdict, 0) + 1
+        return counts
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode, "title": self.title, "source": self.source,
+            "out_dir": self.out_dir, "text_chars": len(self.text),
+            "fixed_chars": len(self.fixed_text),
+            "issues": [i.to_dict() for i in self.issues],
+            "factchecks": [f.to_dict() for f in self.fact_checks],
+            "stages": [s.to_dict() for s in self.stages],
+            "warnings": self.warnings,
+        }
+
+    def summary(self) -> str:
+        label = "审阅" if self.mode == "review" else "校对"
+        lines = [f"{label}完成：{self.title}"]
+        if self.source:
+            lines.append(f"原文：{self.source}（{len(self.text)} 字）")
+        if self.out_dir:
+            lines.append(f"产物目录：{self.out_dir}")
+        models = " · ".join(f"{s.stage}={s.endpoint}:{s.model}" for s in self.stages)
+        if models:
+            lines.append(f"阶段模型：{models}")
+        counts = self.issue_counts()
+        lines.append("问题：" + (" · ".join(f"{k} {v}" for k, v in counts.items())
+                                if counts else "未发现问题"))
+        verdicts = self.verdict_counts()
+        if verdicts:
+            lines.append("事实核查：" + " · ".join(f"{k} {v}" for k, v in verdicts.items()))
+        if self.mode == "proofread" and self.fixed_text:
+            lines.append(f"修正稿已生成（{len(self.fixed_text)} 字，见 final.md）")
+        if self.warnings:
+            lines.append("注意：" + "；".join(self.warnings))
+        return "\n".join(lines)
+
+
+@dataclass
 class ArticleResult:
     topic: str
     final_text: str
@@ -419,6 +479,95 @@ def _looks_rate_limited(message: str) -> bool:
     return any(h in m for h in _RATE_LIMIT_HINTS)
 
 
+#: 中文正文里不该出现的半角标点 → 对应的全角写法
+_HALF_PUNCT = {",": "，", ".": "。", "?": "？", "!": "！", ";": "；", ":": "："}
+_CJK_RE = "\\u4e00-\\u9fff"
+#: 几乎不会被正当叠用的虚词（叠用即错别字的高置信信号）
+_DOUBLE_SUSPECT = set("的了在是和与我你他她它不也就都还而但很把被给让从对为以及或")
+
+
+def _strip_code(text: str) -> str:
+    """去掉代码围栏与行内代码：那里的半角标点是合法的，不该被当成中文标点问题。"""
+    without_fence = re.sub(r"```.*?```", "", text or "", flags=re.DOTALL)
+    return re.sub(r"`[^`\n]*`", "", without_fence)
+
+
+def mechanical_issues(text: str) -> List[ArticleIssue]:
+    """确定性机械校对：半角标点、引号配对、叠字、省略号写法。
+
+    为什么要用规则补模型：实测模型校对会漏掉"全文都用了半角逗号"这种惯例问题
+    （它更关注语义与措辞），而这恰恰是最该被逐条指出来的。规则部分不花 token、
+    可复现、可测试；语义问题仍交给另一个模型。
+    """
+    body = _strip_code(text)
+    if not body.strip():
+        return []
+    out: List[ArticleIssue] = []
+
+    # 1) 中文语境里的半角标点（要求前后都是汉字，避免误报英文/数字场景）
+    counts: Dict[str, int] = {}
+    samples: Dict[str, str] = {}
+    pattern = rf"([{_CJK_RE}])([{re.escape(''.join(_HALF_PUNCT))}])(?=[{_CJK_RE}])"
+    for m in re.finditer(pattern, body):
+        ch = m.group(2)
+        counts[ch] = counts.get(ch, 0) + 1
+        samples.setdefault(ch, m.group(0))
+    for ch, n in counts.items():
+        out.append(ArticleIssue(
+            severity="轻微", kind="标点", quote=samples[ch],
+            problem=f"中文正文里用了半角 {ch}（全文共 {n} 处）",
+            suggestion=f"改成全角「{_HALF_PUNCT[ch]}」"))
+
+    # 2) 中文引号不配对
+    for open_q, close_q in (("“", "”"), ("‘", "’")):
+        a, b = body.count(open_q), body.count(close_q)
+        if a != b:
+            out.append(ArticleIssue(
+                severity="中等", kind="标点", quote=f"{open_q}×{a} / {close_q}×{b}",
+                problem="中文引号不配对（成对符号数量不等）",
+                suggestion="补齐或删除多余的引号"))
+
+    # 3) 高置信度叠字（的的 / 了了 / 是是 …）
+    for m in re.finditer(rf"([{_CJK_RE}])\1", body):
+        if m.group(1) not in _DOUBLE_SUSPECT:
+            continue
+        start = max(0, m.start() - 6)
+        out.append(ArticleIssue(
+            severity="轻微", kind="错别字", quote=body[start:m.end() + 6],
+            problem=f"疑似叠字错误：「{m.group(1)}{m.group(1)}」",
+            suggestion=f"确认是否多打了一个「{m.group(1)}」"))
+        if len(out) > 12:
+            break
+
+    # 4) 省略号写法（中文用「……」，不是三个句点）
+    if re.search(rf"[{_CJK_RE}](\.\.\.|。。。)", body):
+        out.append(ArticleIssue(
+            severity="轻微", kind="标点", quote="…",
+            problem="中文省略号写成了三个句点/半角点",
+            suggestion="改用「……」"))
+
+    seen, uniq = set(), []
+    for it in out:
+        key = (it.kind, it.quote, it.problem)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(it)
+    return uniq[:10]
+
+
+def merge_issues(*groups: List[ArticleIssue]) -> List[ArticleIssue]:
+    """合并多来源意见并去重（机械规则在前：它们是确定的，模型意见在后）。"""
+    seen, out = set(), []
+    for group in groups:
+        for it in (group or []):
+            key = (it.kind, it.quote, it.problem)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(it)
+    return out
+
+
 #: 值得"重试/换端点"的暂时性故障。配额耗尽的端点除了回 429，**还会回空正文**
 #: （实测商汤：第一次 429，紧接着一次 HTTP 200 但 content 为空）——只认 429
 #: 会漏掉这半数的限流表现，导致明明另一家能用却直接失败。
@@ -671,11 +820,96 @@ class ArticlePipeline:
         except Exception as e:                  # noqa: BLE001
             self.warnings.append(f"写入 {name} 失败：{str(e)[:120]}")
 
-    def _make_out_dir(self, topic: str) -> str:
+    def _make_out_dir(self, topic: str, suffix: str = "") -> str:
         base = resolve_under_root(self.save_dir)
-        path = os.path.join(base, f"{slugify(topic)}-{time.strftime('%Y%m%d-%H%M%S')}")
+        tag = slugify(topic) + (f"-{suffix}" if suffix else "")
+        path = os.path.join(base, f"{tag}-{time.strftime('%Y%m%d-%H%M%S')}")
         os.makedirs(path, exist_ok=True)
         return path
+
+    # ---------------- 已有文稿：审阅 / 校对 ----------------
+
+    def check_text(self, text: str, mode: str = "proofread", title: str = "",
+                   source: str = "") -> CheckResult:
+        """对**已有文稿**做审阅或校对。
+
+        mode="review"     ：只提意见（事实/逻辑/结构），有事实类问题时顺带核查
+        mode="proofread"  ：只挑错（错别字/标点/术语/语法/格式），并把修正落成 final.md
+
+        与 write() 的区别：不写大纲、不重写全文——用户要的是"看看我这篇有什么问题"，
+        不是"照这个主题另写一篇"。改动只以修正稿形式给出，是否覆盖原文件由调用方决定。
+        """
+        body = (text or "").strip()
+        if not body:
+            raise ArticleError("没有可检查的正文（text / file 都为空）")
+        mode = (mode or "proofread").strip().lower()
+        if mode not in ("review", "proofread"):
+            raise ArticleError(f"未知检查模式 {mode!r}（review / proofread）")
+        title = (title or "").strip() or "未命名文稿"
+
+        self.out_dir = self._make_out_dir(title, suffix=mode)
+        self._emit("article_start", {"topic": title, "out_dir": self.out_dir,
+                                     "mode": mode, "models": stage_models(self.cfg)})
+        if self.verbose:
+            print(f"[文章工坊·{'审阅' if mode == 'review' else '校对'}] {title}"
+                  f"（{len(body)} 字）")
+            print(f"[文章工坊] 产物目录: {self.out_dir}")
+        try:
+            if mode == "review":
+                raw = self._call("review", ARTICLE_REVIEW_SYSTEM_PROMPT,
+                                 ARTICLE_REVIEW_USER_PROMPT_TEMPLATE.format(
+                                     topic=title,
+                                     requirements="（这是**已有文稿**：只指出问题、给修改建议，"
+                                                  "不要代写或重写全文）",
+                                     article=body))
+                issues = parse_issues(raw)
+                self._write("review.md", raw)
+                self._write_json("review.json", [i.to_dict() for i in issues])
+                checks: List[FactCheck] = []
+                if self.cfg.get("factcheck", True) and issues:
+                    checks = self._factcheck(title, body, issues)
+                    if checks:
+                        self._write("factcheck.md", "## 事实核查结论\n" + "\n".join(
+                            f"- {fc.line()}" for fc in checks))
+                fixed = ""
+            else:
+                raw = self._call("proofread", ARTICLE_PROOFREAD_SYSTEM_PROMPT,
+                                 ARTICLE_PROOFREAD_USER_PROMPT_TEMPLATE.format(
+                                     topic=title, article=body))
+                issues = merge_issues(mechanical_issues(body), parse_issues(raw))
+                self._write("proofread.md", raw)
+                self._write_json("proofread.json", [i.to_dict() for i in issues])
+                checks = []
+                fixed = ""
+                if issues:
+                    fixed = self._call("finalize", ARTICLE_FINALIZE_SYSTEM_PROMPT,
+                                       ARTICLE_FINALIZE_USER_PROMPT_TEMPLATE.format(
+                                           topic=title, article=body,
+                                           fixes=json.dumps(
+                                               [i.to_dict() for i in issues],
+                                               ensure_ascii=False, indent=2)))
+                    self._write("final.md", fixed)
+        except ArticleError as e:
+            self._write_json("meta.json", {
+                "title": title, "mode": mode, "source": source, "error": str(e),
+                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "stages": [s.to_dict() for s in self.stages], "warnings": self.warnings,
+            })
+            raise ArticleError(f"{e}；已完成的部分已保存在 {self.out_dir}") from e
+
+        result = CheckResult(mode=mode, title=title, text=body, source=source,
+                             fixed_text=fixed, issues=issues, fact_checks=checks,
+                             stages=self.stages, out_dir=self.out_dir,
+                             warnings=self.warnings)
+        self._write_json("meta.json", {
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "models": stage_models(self.cfg), **result.to_dict(),
+        })
+        self._emit("article_done", {"mode": mode, "title": title,
+                                    "out_dir": self.out_dir,
+                                    "issues": result.issue_counts(),
+                                    "verdicts": result.verdict_counts()})
+        return result
 
     # ---------------- 事实核查 ----------------
 
@@ -899,7 +1133,8 @@ class ArticlePipeline:
         proof_raw = self._call("proofread", ARTICLE_PROOFREAD_SYSTEM_PROMPT,
                                ARTICLE_PROOFREAD_USER_PROMPT_TEMPLATE.format(
                                    topic=topic, article=article))
-        proof_issues = parse_issues(proof_raw)
+        # 机械规则 + 模型意见：规则抓半角标点/引号/叠字这类"全文性"问题，模型抓语义
+        proof_issues = merge_issues(mechanical_issues(article), parse_issues(proof_raw))
         self._write("proofread.md", proof_raw)
         self._write_json("proofread.json", [i.to_dict() for i in proof_issues])
 

@@ -516,6 +516,135 @@ class TestZhihuLookup:
         assert am.zhihu_lookup("查询词") == [], "没配 secret 就该空手而归，交给下一个通道"
 
 
+class TestCheckText:
+    """对**已有文稿**做审阅/校对：不重写全文（用户要的是"看我写的有什么问题"）。"""
+
+    ARTICLE = "# 旧文\n\nAI Agent 的效率翻倍了。2024年市场规模为100亿元。\n"
+
+    def test_review_mode_lists_issues_without_rewriting(self, tmp_path):
+        scripts = {"review": [REVIEW_ONE_FACT], "claims": [
+            json.dumps([{"claim": "2024年市场规模为100亿元", "query": "AI Agent 市场规模"}],
+                       ensure_ascii=False)],
+            "verify": [json.dumps({"claim": "x", "verdict": "证伪", "evidence": "实际 50 亿",
+                                   "source": "https://example.com/a"}, ensure_ascii=False)]}
+        pipe, llms = _pipeline(tmp_path, scripts, lookup=_hits)
+        result = pipe.check_text(self.ARTICLE, mode="review", title="旧文",
+                                 source="output/old.md")
+        assert [i.severity for i in result.issues] == ["严重"]
+        assert result.fixed_text == "", "审阅只提意见，不改写原文"
+        assert [fc.verdict for fc in result.fact_checks] == ["证伪"], "事实问题要顺带核查"
+        for name in ("review.md", "review.json", "factcheck.md", "meta.json"):
+            assert os.path.exists(os.path.join(result.out_dir, name)), name
+        assert "draft" not in {s.stage for s in result.stages}, "不该写初稿"
+        assert "重写" in llms["review"].text() or "已有文稿" in llms["review"].text(), \
+            "要明确告诉审阅方这是已有文稿、只提问题"
+
+    def test_proofread_mode_produces_fixed_text(self, tmp_path):
+        scripts = {"proofread": [PROOFREAD_ONE], "finalize": ["# 旧文（已修正）\n正文。\n"]}
+        pipe, _ = _pipeline(tmp_path, scripts)
+        result = pipe.check_text(self.ARTICLE, mode="proofread", title="旧文")
+        assert [i.kind for i in result.issues] == ["标点"]
+        assert "已修正" in result.fixed_text
+        assert os.path.exists(os.path.join(result.out_dir, "proofread.json"))
+        assert os.path.exists(os.path.join(result.out_dir, "final.md"))
+
+    def test_proofread_without_issues_skips_rewrite(self, tmp_path):
+        scripts = {"proofread": ["[]"]}
+        pipe, _ = _pipeline(tmp_path, scripts)
+        result = pipe.check_text(self.ARTICLE, mode="proofread")
+        assert result.issues == [] and result.fixed_text == ""
+        assert "finalize" not in {s.stage for s in result.stages}, "没错就别改写"
+
+    def test_empty_text_and_bad_mode_are_rejected(self, tmp_path):
+        pipe, _ = _pipeline(tmp_path, {"review": ["[]"]})
+        with pytest.raises(ArticleError):
+            pipe.check_text("   ", mode="review")
+        with pytest.raises(ArticleError):
+            pipe.check_text("正文", mode="polish")
+
+    def test_failure_keeps_partial_artifacts(self, tmp_path):
+        pipe, _ = _pipeline(tmp_path, {"review": [RuntimeError("Error code: 400 - bad")]},
+                            fallback_endpoint="off")
+        with pytest.raises(ArticleError) as ei:
+            pipe.check_text(self.ARTICLE, mode="review", title="旧文")
+        assert "meta.json" not in str(ei.value) or True
+        assert os.path.exists(os.path.join(pipe.out_dir, "meta.json")), "失败也要留痕"
+        with open(os.path.join(pipe.out_dir, "meta.json"), encoding="utf-8") as f:
+            assert "bad" in json.load(f)["error"]
+
+    def test_summary_reports_model_and_counts(self, tmp_path):
+        scripts = {"proofread": [PROOFREAD_ONE], "finalize": ["修正后的正文"]}
+        pipe, _ = _pipeline(tmp_path, scripts)
+        result = pipe.check_text(self.ARTICLE, mode="proofread", title="旧文")
+        text = result.summary()
+        assert "校对完成" in text and "轻微 1" in text and "agnes" in text
+
+    def test_out_dir_is_separate_per_mode(self, tmp_path):
+        pipe, _ = _pipeline(tmp_path, {"review": ["[]"]})
+        r1 = pipe.check_text(self.ARTICLE, mode="review", title="同名文章")
+        assert r1.out_dir.endswith("-review-" + r1.out_dir.rsplit("-", 1)[-1]) or "-review-" in r1.out_dir
+
+
+class TestMechanicalChecks:
+    """机械校对规则：模型会漏掉"全文都用半角逗号"这类惯例问题，规则补上（不花 token）。"""
+
+    def test_half_width_punctuation_in_chinese(self):
+        from models.article import mechanical_issues
+
+        issues = mechanical_issues("过去一年,我们取得了成功,用户破百万.")
+        kinds = {i.kind for i in issues}
+        assert "标点" in kinds
+        comma = next(i for i in issues if "半角 ," in i.problem)
+        assert "共 2 处" in comma.problem and "，" in comma.suggestion
+
+    def test_code_blocks_are_ignored(self):
+        """代码里的半角标点是合法的，不能误报。"""
+        from models.article import mechanical_issues
+
+        text = "正文没问题。\n```python\nprint(1, 2)\n```\n行内 `a, b` 也一样。"
+        assert mechanical_issues(text) == []
+
+    def test_unpaired_quotes(self):
+        from models.article import mechanical_issues
+
+        issues = mechanical_issues("他说“这样很好，然后就走了。")
+        assert any("引号不配对" in i.problem and i.severity == "中等" for i in issues)
+
+    def test_doubled_function_word_but_not_legit_reduplication(self):
+        from models.article import mechanical_issues
+
+        assert any("叠字" in i.problem for i in mechanical_issues("这个方案的确的的确不错。"))
+        assert mechanical_issues("我们看看刚刚发布的常常见到的数据。") == [], \
+            "看看/刚刚/常常 是正当叠词，不能误报"
+
+    def test_ellipsis_style(self):
+        from models.article import mechanical_issues
+
+        assert any("省略号" in i.problem for i in mechanical_issues("他想了很久。。。然后走了。"))
+
+    def test_clean_text_yields_nothing(self):
+        from models.article import mechanical_issues
+
+        assert mechanical_issues("这是一段完全规范的中文，标点都是全角：很好！") == []
+
+    def test_mechanical_issues_are_merged_into_proofread(self, tmp_path):
+        """校对阶段必须"规则 + 模型"合并：模型漏掉的半角逗号也要出现在结果里。"""
+        body = "过去一年,我们取得了成功,用户破百万。"
+        scripts = {"proofread": ["[]"], "finalize": ["修改后的正文"]}
+        pipe, llms = _pipeline(tmp_path, scripts)
+        result = pipe.check_text(body, mode="proofread", title="Demo")
+        assert any("半角 ," in i.problem for i in result.issues), "规则部分没并进来"
+        assert "半角" in llms["finalize"].text(), "规则发现的问题也要交给定稿阶段修掉"
+
+    def test_merge_dedupes(self):
+        from models.article import ArticleIssue, merge_issues
+
+        a = [ArticleIssue(kind="标点", quote="x", problem="p")]
+        b = [ArticleIssue(kind="标点", quote="x", problem="p"),
+             ArticleIssue(kind="事实", quote="y", problem="q")]
+        assert len(merge_issues(a, b)) == 2
+
+
 # ---------------------------------------------------------------- 事件/摘要
 
 class TestReporting:

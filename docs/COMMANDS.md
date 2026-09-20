@@ -45,6 +45,8 @@ $env:MY_AGENT_MINIMAL="1"; my-agent                  # 极简模式（关掉 Gua
 ```cmd
 my-agent --loop "任务"             # 单循环模式（默认，主循环式）
 my-agent --plan "任务"             # 经典计划模式（规划→逐步执行→总结）
+my-agent --research "主题"         # 深度研究（单模型：搜索→抓页→提事实→综合报告）
+my-agent --article "主题"          # 文章工坊（跨厂商双模型互审写作流水线）
 my-agent --auto-mode "任务"        # 意图自动路由：调研/报告类→研究；团队/并行类→团队
 my-agent --approval never "任务"   # 审批策略: untrusted | on-failure | on-request | never
 my-agent --sandbox read-only "任务" # 沙箱: read-only | workspace-write | danger-full-access
@@ -66,6 +68,7 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 | `/tools` | 查看工具列表 |
 | `/team <任务>` | 团队协作（可连写：`/team任务`） |
 | `/research <主题>` | 深度研究（可连写：`/research主题`） |
+| `/article <主题> [\| 要求]` | **文章工坊**：多模型互审写作（一家写、另一家审 + 事实核查 + 逐条修订 + 校对定稿） |
 | `/image <描述>` | 文生图（SenseNova U1.5 Lite，生成并保存到 `generated_images/`） |
 | `/memory` | 记忆总览（各层条数 + 完成/失败步骤）；`/memory prune 100` 清理长期记忆 |
 | `/help` | 查看全部可用命令 |
@@ -282,7 +285,54 @@ toonflow(command="call", method="POST", path="/api/xxx", body={...})  # 直连�
   FFMPEG_PATH=                    # 留空自动探测
   ```
 
-## 三·十、运行中卡住的排查
+## 三·十、文章工坊（写作 / 审阅 / 校对）
+
+**为什么要两个模型**：同一个模型审自己写的稿子，知识边界、行文偏好、盲点完全重合，
+"互审"会退化成自我复述（同厂不同名的模型也基本重合）。所以默认**商汤写、Agnes 审**。
+
+### 在对话里直接用（agent 会自己判断）
+
+| 你说 | agent 会做 |
+|---|---|
+| "帮我校对一下 xxx.md，看看有没有错别字/标点问题" | `article(operation="proofread", file=...)`（另一家模型只挑错 + 出修正稿） |
+| "审阅一下这篇，提提意见" / "帮我看看逻辑和事实有没有问题" | `article(operation="review", file=...)`（提意见 + 对可疑事实联网核查） |
+| "写一篇关于 X 的文章" / "写份报告" | `article(operation="write", topic=...)`（大纲→初稿→审阅→核查→修订→校对→定稿） |
+
+> 校对/审阅**默认不改原文件**（修正稿落在产物目录）。要让 agent 就地替换原文件，
+> 明确说一句"直接改原文件"，它会带 `apply=true`（写回前自动留 `.bak` 备份）。
+> 只是"顺手改几个字"的小事不必走这条流水线，agent 直接用 `edit` 更快。
+
+### 命令行入口
+
+```cmd
+my-agent --article "AI Agent 的记忆机制"        # 写一篇
+/article 为什么需要长期记忆 | 给非技术读者,400字  # 交互模式（| 后是写作要求）
+article models                                   # 看各阶段用了哪个模型（谁写、谁审）
+```
+
+### 产物与配置
+
+产物在 `output/articles/<名字>-<时间>/`：
+
+- `write`：`outline.md` / `draft.md` / `review-rN.md`+`json` / `factcheck-rN.md` /
+  `revise-rN.md` / `proofread.md`+`json` / `final.md` / `changes.md`（逐条修改台账）/ `meta.json`
+- `review`：`review.md`+`json`（+ 有事实问题时 `factcheck.md`，带来源）
+- `proofread`：`proofread.md`+`json` / `final.md`（修正稿）
+
+```cmd
+ARTICLE_MODEL_DRAFT=main            # main=主模型（LLM_*）；agnes=Agnes；也可写 agnes:模型名
+ARTICLE_MODEL_REVIEW=agnes          # 审阅：默认另一家
+ARTICLE_MODEL_PROOFREAD=agnes       # 校对：默认另一家
+ARTICLE_MAX_REVISE_ROUNDS=2         # 审阅→修订最多几轮（到顶带着剩余意见定稿）
+ARTICLE_FACTCHECK=true              # 只核查审阅方点名的可疑说法
+ARTICLE_LOOKUP_SOURCES=zhihu,browser # 核查检索通道（zhihu 需配 ZHIHU_ACCESS_SECRET）
+ARTICLE_FALLBACK_ENDPOINT=auto      # 某阶段被限流时自动换另一家把这一步跑完
+```
+
+> 机械类问题（半角标点、引号不配对、叠字、省略号写法）由**规则**直接判定，不花 token、
+> 可复现；语义与措辞问题才交给审阅模型——实测模型会漏掉"全文都用半角逗号"这种惯例问题。
+
+## 三·十一、运行中卡住的排查
 
 **症状**：程序跑着跑着不动了，但进程还在（CPU 为 0）。
 
