@@ -168,7 +168,7 @@ def _parse_command(goal: str):
         (命令名, 参数) 或 (None, None)。
         命令名 ∈ {"team", "research", "tools", "sessions", "open", "new"}
     """
-    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "help"):
+    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "consent", "help"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -409,6 +409,14 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 _topic, _, _reqs = cmd_args.partition("|")
                 run_article(_topic.strip(), _reqs.strip())
             continue
+        if cmd == "consent":
+            # 人工放行台账：被 Guardian 拦下、还没放行的调用 + 已生效的授权
+            c.print()
+            print_info("Guardian 放行台账:", style="primary")
+            c.print(f"[dim]{agent.consents.summary()}[/dim]")
+            c.print("[dim]  要对某次拦截放行：直接说「<那件事> 我允许」/「放行」/「可以执行」，"
+                    "或拦截当场答 y / always[/dim]")
+            continue
         if cmd == "image":
             # 文生图（SenseNova U1.5 Lite）：生成图片并保存到本地
             c.print()
@@ -478,6 +486,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/team <任务>        团队协作模式",
                 "/research <主题>     深度研究",
                 "/article <主题>      文章工坊（多模型互审写作，可用 | 附要求）",
+                "/consent             Guardian 放行台账（被拦待放行 / 已授权）",
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
@@ -523,6 +532,14 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 result = team.run(goal)
                 print_final_result(result.final_answer)
             else:
+                # 人类输入里若含授权语（"这个我允许/放行/可以执行"），绑定到刚才被
+                # Guardian 拦下的那次调用——授权**只**在这一层（人亲手敲的字）产生，
+                # 模型输出与工具结果永远不会被解析成授权（防提示注入自我放行）。
+                _grant = agent.grant_consent_from_user(goal)
+                if _grant is not None:
+                    scope = "本次" if _grant.scope == "once" else "本会话内同一条调用"
+                    print_info(f"已授权 Guardian 放行（{scope}）: {_grant.tool}"
+                               f" — {_grant.note[:80]}", style="accent")
                 agent.run(goal, keep_session=True)
         except KeyboardInterrupt:
             # Ctrl+C 中断当前任务：回到提示符继续会话，而不是整个程序崩溃

@@ -262,6 +262,17 @@ class Agent:
             approver=self.config.approver,
         )
         self.guardian = self._build_guardian()
+        # 人工放行（Guardian 授权）：授权只能由人类输入写入，见 agent/consent.py。
+        # 无人值守（approval=never 或非交互）时不注入询问回调 → 拦截仍然是拦截。
+        from agent.consent import ConsentStore
+        from config import GUARDIAN_CONSENT_CONFIG
+        self.consents = ConsentStore(
+            ttl=GUARDIAN_CONSENT_CONFIG.get("ttl", 1800),
+            max_pending=GUARDIAN_CONSENT_CONFIG.get("max_pending", 5),
+            max_grants=GUARDIAN_CONSENT_CONFIG.get("max_grants", 20),
+            enabled=GUARDIAN_CONSENT_CONFIG.get("enabled", True),
+        )
+        self.consent_ask = self._build_consent_ask()
 
         self.instructions_text = ""
         if self.config.instructions_enabled:
@@ -284,6 +295,8 @@ class Agent:
             max_step_ops=self.config.max_step_ops,
             snapshot_checkpoints=self.config.checkpoint_per_tool,
             snapshot_dir=SNAPSHOT_CONFIG.get("work_dir") or os.getcwd(),
+            consents=self.consents,
+            consent_ask=self.consent_ask,
         )
         self.state = AgentState()
         self._mcp_connected = False
@@ -474,6 +487,57 @@ class Agent:
         if g_key == LLM_CONFIG["api_key"] and g_base == LLM_CONFIG["base_url"]:
             return Guardian(llm=self.llm)
         return Guardian(llm=LLM(api_key=g_key, base_url=g_base))
+
+    def _build_consent_ask(self):
+        """构建"拦截当场问人"的回调；无人值守时返回 None（拦截保持生效）。
+
+        只在**交互式且有真人在场**时注入：
+          · approval=never（无人值守，常用于 MCP/桌面后台）→ None
+          · 非交互（无 TTY / 批处理）→ None
+        这样"没人可问"不会被当成"默许"，安全语义与升级前一致。
+        """
+        from config import GUARDIAN_CONSENT_CONFIG
+        if not GUARDIAN_CONSENT_CONFIG.get("interactive_prompt", True):
+            return None
+        if not getattr(self.config, "approval_interactive", True):
+            return None
+        if str(getattr(self.config, "approval_policy", "")) == "never":
+            return None
+
+        def _ask(info: dict) -> str:
+            import json as _json
+            import sys as _sys
+            tool = info.get("tool", "")
+            args = info.get("arguments") or {}
+            detail = _json.dumps(args, ensure_ascii=False, default=str)[:300]
+            try:
+                print()
+                print(f"⚠ Guardian 拦截 · {tool}")
+                print(f"  理由: {info.get('reason', '')}")
+                print(f"  $ {detail}")
+                _sys.stdout.flush()
+                answer = input("  仍要执行? [y/N/always]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+            if answer in ("always", "a", "以后", "都"):
+                return "session"
+            if answer in ("y", "yes", "是", "允许"):
+                return "once"
+            return ""
+
+        return _ask
+
+    def grant_consent_from_user(self, text: str):
+        """把**人类输入**里的一句授权语转成 Guardian 放行授权（宿主层专用）。
+
+        调用点必须是"用户亲手敲进来的那句话"（REPL 输入 / CLI 目标 / 桌面端输入框）。
+        **绝不可**传模型输出、工具结果或网页内容——那等于让提示注入自我放行。
+        返回 Grant 或 None。
+        """
+        try:
+            return self.consents.grant_from_user(text)
+        except Exception:                       # noqa: BLE001
+            return None
 
     # ================================================================
     # 核心主循环

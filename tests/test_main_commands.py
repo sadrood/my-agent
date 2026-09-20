@@ -41,6 +41,11 @@ class TestParseCommand:
         parser = build_parser()
         assert parser.parse_args(["--article", "主题"]).article is True
 
+    def test_consent_command(self):
+        """Guardian 放行台账：/consent 看被拦待放行与已生效授权。"""
+        assert _parse_command("/consent") == ("consent", "")
+        assert _parse_command("/consent list") == ("consent", "list")
+
     def test_command_args_concatenated_chinese(self):
         # /team任务（无空格，中文连写）——用户实际输入场景
         assert _parse_command("/team你觉得你自身还有什么需要升级的") == (
