@@ -41,7 +41,9 @@ class SeeTool(BaseTool):
             "视觉分析工具。截取当前浏览器页面并交给视觉模型分析，"
             "返回页面内容、状态、可交互元素及位置等结构化描述。"
             "当你需要理解页面内容、定位按钮/输入框坐标、判断操作是否成功时使用。"
-            "需要先确保浏览器已启动（browser launch）。"
+            "需要先确保浏览器已启动（browser launch）。\n"
+            "只要**文字内容**（报错信息、表格、按钮文案）时优先用 ocr 工具：本地引擎、"
+            "离线、不耗视觉配额；本工具在视觉模型不可用或超时时也会自动降级到 OCR。"
         )
 
     @property
@@ -99,20 +101,78 @@ class SeeTool(BaseTool):
 
         base64_data = match.group(1)
 
-        # 2. 视觉分析
+        # 2. 文字类请求优先本地 OCR：识字是本地引擎的强项（离线、免费、不超时），
+        #    没必要为了"读出图里有什么字"去赌一次多模态调用（用户痛点：视觉模型
+        #    无响应就整个废掉）。
+        if self._wants_text(question):
+            ocr_text = self._ocr_fallback(base64_data)
+            if ocr_text:
+                return ToolResult(
+                    success=True,
+                    output=f"【本地 OCR 识别结果】（未调用视觉模型）\n{ocr_text}",
+                    metadata={"screenshot_base64": base64_data, "via": "ocr"},
+                )
+
+        # 3. 视觉分析
         vision = self._get_vision_model()
         if vision is None:
-            return ToolResult(
-                success=False, output="",
-                error="视觉模型不可用。请确保配置了支持多模态的 LLM（如 GPT-4o），或改用 browser text/html 命令。",
-            )
+            return self._ocr_or_error(base64_data, "视觉模型不可用")
         try:
             analysis = vision.analyze(base64_data, question, max_tokens=1500)
         except Exception as e:
-            return ToolResult(success=False, output="", error=f"视觉分析失败: {e}")
+            # 视觉模型挂掉时不再"就废了"：降级到本地 OCR，至少把字读出来
+            return self._ocr_or_error(base64_data, f"视觉分析失败: {str(e)[:160]}")
 
         return ToolResult(
             success=True,
-            output=f"【视觉分析结果】\n{analysis}",
-            metadata={"screenshot_base64": base64_data},
+            output=f"【视觉分析结果】{getattr(vision, 'fallback_note', lambda: '')()}\n{analysis}",
+            metadata={"screenshot_base64": base64_data,
+                      "vision_model": getattr(vision, "last_model", "")},
+        )
+
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _wants_text(question: str) -> bool:
+        """这个问题是不是"只要文字"（而非理解版面/找元素）。"""
+        try:
+            from models.ocr import auto_fallback_enabled
+            from config import OCR_CONFIG
+            if not auto_fallback_enabled() or not OCR_CONFIG.get("prefer_for_text", True):
+                return False
+        except Exception:                       # noqa: BLE001
+            return False
+        q = (question or "").lower()
+        keys = ("提取文字", "识别文字", "读取文字", "所有文字", "有哪些文字", "文字内容",
+                "ocr", "识字", "念出来", "识别一下文字", "读出")
+        return any(k in q for k in keys)
+
+    @staticmethod
+    def _ocr_fallback(base64_data: str) -> str:
+        """本地 OCR（失败返回空串，不抛）。"""
+        try:
+            from models.ocr import auto_fallback_enabled, recognize_image
+            if not auto_fallback_enabled():
+                return ""
+            result = recognize_image(image_base64=base64_data)
+            if not result.text.strip():
+                return ""
+            return f"{result.summary()}\n{result.text}"
+        except Exception:                       # noqa: BLE001
+            return ""
+
+    def _ocr_or_error(self, base64_data: str, why: str) -> ToolResult:
+        """视觉不可用 → 尽量用 OCR 兜住；连 OCR 都没有才报错。"""
+        ocr_text = self._ocr_fallback(base64_data)
+        if ocr_text:
+            return ToolResult(
+                success=True,
+                output=(f"【本地 OCR 识别结果】（{why}，已自动降级到本地 OCR——"
+                        f"只有文字，没有版面/元素坐标判断）\n{ocr_text}"),
+                metadata={"screenshot_base64": base64_data, "via": "ocr_fallback"},
+            )
+        return ToolResult(
+            success=False, output="",
+            error=(f"{why}；本地 OCR 也不可用或没识别到文字。"
+                   f"可改用 browser text/html（读 DOM 文本），或用 ocr 工具单独识别图片。"),
         )

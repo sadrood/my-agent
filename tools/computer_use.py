@@ -760,21 +760,46 @@ class DesktopTool(BaseTool):
             return ToolResult(success=False, output="", error="截图失败（ImageGrab 不可用？）")
         title = _active_window_title()
         question = str(args.get("question", "") or "").strip() or _COMPUTER_SCREEN_QUESTION
+
+        # 视觉模型不可用/失败时降级到本地 OCR：桌面截图的价值大半就是"屏幕上写了什么"，
+        # 因为一次多模态调用超时就整个放弃（用户痛点）是不可接受的。
+        def _ocr_fallback(why: str) -> Optional[ToolResult]:
+            try:
+                from models.ocr import auto_fallback_enabled, recognize_image
+                if not auto_fallback_enabled():
+                    return None
+                result = recognize_image(image_path=path)
+                if not result.text.strip():
+                    return None
+                return ToolResult(success=True, output=(
+                    f"前台窗口: {title or '（未知）'}\n"
+                    f"【本地 OCR 识别结果】（{why}）\n{result.summary()}\n{result.text}\n"
+                    f"[截图: {path}]"))
+            except Exception:                   # noqa: BLE001
+                return None
+
         vision = self._get_vision_model()
         if vision is None:
+            fallback = _ocr_fallback("视觉模型不可用，已用本地 OCR 读屏")
+            if fallback is not None:
+                return fallback
             return ToolResult(success=True, output=(
                 f"截图已保存: {path}\n前台窗口: {title or '（未知）'}\n"
-                "（视觉模型不可用，无法分析内容；建议改用 a11y 动作读取界面元素）"))
+                "（视觉模型与本地 OCR 都不可用，无法读取屏幕内容；建议改用 a11y 动作）"))
         try:
             with open(path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("ascii")
             analysis = vision.analyze(b64, question, max_tokens=1500)
         except Exception as e:
+            fallback = _ocr_fallback(f"视觉分析失败: {str(e)[:100]}")
+            if fallback is not None:
+                return fallback
             return ToolResult(success=True, output=(
                 f"截图已保存: {path}\n前台窗口: {title or '（未知）'}\n"
                 f"（视觉分析失败: {str(e)[:120]}；建议改用 a11y 动作）"))
         return ToolResult(success=True, output=(
-            f"前台窗口: {title or '（未知）'}\n【屏幕分析】\n{analysis}\n[截图: {path}]"))
+            f"前台窗口: {title or '（未知）'}\n【屏幕分析】"
+            f"{getattr(vision, 'fallback_note', lambda: '')()}\n{analysis}\n[截图: {path}]"))
 
     def _act_a11y(self, args: Dict[str, Any]) -> ToolResult:
         try:

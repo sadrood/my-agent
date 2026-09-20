@@ -112,6 +112,9 @@ class ImageGenTool(BaseTool):
         lines = [
             f"已生成 {len(paths)} 张图片（{result.get('model')} · {result.get('size')}）:"
         ]
+        if result.get("fallback_from"):
+            lines.append(f"（主端点失败，已自动换用备用端点；原因："
+                         f"{str(result['fallback_from'])[:120]}）")
         lines += [f"- {p}" for p in paths]
         return ToolResult(
             success=True,

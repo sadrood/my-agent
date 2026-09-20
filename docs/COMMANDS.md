@@ -363,7 +363,84 @@ Guardian 是**独立于审批门的第二道盲审**（`审批门 → Guardian �
 
 相关配置：`GUARDIAN_CONSENT` / `GUARDIAN_CONSENT_TTL` / `GUARDIAN_CONSENT_PROMPT`。
 
-## 三·十二、运行中卡住的排查
+## 三·十二、截图识字（本地 OCR，不依赖视觉模型）
+
+视觉模型（多模态 LLM）负责"看懂版面、找元素坐标"，但**识字**这件事本地引擎就能做：
+快、离线、免费，也不会因为上游超时/"该模型不支持图片"而整个卡死。
+
+```cmd
+ocr D:\path\shot.png      # 识别图片里的文字（也可写相对路径）
+ocr                       # 识别最近一张截图（自动找 screenshots/ 等目录下最新的图）
+ocr engines               # 看本机可用的后端
+ocr lang                  # Windows OCR 支持的语言
+```
+
+**后端优先级（自动挑，谁可用用谁）**：
+
+| 后端 | 说明 |
+|---|---|
+| `windows` | Windows.Media.Ocr，Win10/11 **自带、零安装**，实测本机支持 `zh-Hans-CN`（中英混排可读） |
+| `rapidocr` | `pip install rapidocr-onnxruntime` 后自动启用（跨平台，精度通常更好） |
+| `tesseract` | 需装 tesseract 可执行文件 + `pip install pytesseract` |
+
+**agent 什么时候会自动用它**：
+- 你让它"读图里的字/看看屏幕上报什么错" → `see` 只想要文字时**直接走 OCR**，不调用视觉模型；
+- **视觉模型超时/不可用/不支持图片时自动降级到 OCR**（`see`、`computer screenshot`、
+  浏览器视觉分析三处都接了兜底）——以前这种时候是整个失败；
+- 桌面应用截图（`computer screenshot`）在视觉不可用时也会用 OCR 把屏幕文字读出来。
+
+**准确率（本机实测，同一张现造的图）**：中文 20px 字号约 96%、34px 约 92-97%；
+英文混排基本正确。已知的错法：个别汉字被拆（"无法"→"无氵去"）、下划线/点号可能被读成
+「·」「．」（数字里的小数点已归一成 `.`）。要更准就装 `rapidocr`。
+
+```cmd
+OCR_ENABLED=true                 # 总开关
+OCR_BACKEND=                     # windows / rapidocr / tesseract；留空自动挑
+OCR_LANGUAGES=zh-Hans-CN,en-US   # Windows OCR 识别语言（按顺序尝试）
+OCR_SCALE=2                      # 识别前放大倍数（实测 2 倍更准；1=不放大）
+OCR_AUTO_FALLBACK=true           # 视觉失败自动降级到 OCR
+OCR_PREFER_FOR_TEXT=true         # 要文字时直接用 OCR，不先问视觉模型
+```
+
+## 三·十三、备用模型（主模型超时就换一家）
+
+上游抖动很常见：视觉模型超时、生图端点 502、某个模型"rpm exhausted"。所以视觉与生图
+都接了**跨提供方备用链**——主模型失败就按顺序换备用的，全失败才报错（错误里列出每次
+尝试的原因）。
+
+**本机实测（商汤 token.sensenova.cn，用现有 key）**：
+
+| 用途 | 可用的模型 | 备注 |
+|---|---|---|
+| 视觉（能读图） | `sensenova-6.8-flash-lite` | 实测答对了测试图里的暗号；`sensenova-6.7-flash-lite` 对多模态返回 404 |
+| 生图 | `sensenova-u1.5-lite`、`sensenova-u1.5-fast`、`sensenova-u1-fast` | `/images/generations` 均可用，返回 b64_json |
+| 纯文本 | `deepseek-v4-pro`、`glm-5.2`、`kimi-k3` 等 | 见下方"列出可用模型" |
+
+```cmd
+# 列出这把 key 能用的全部模型（权威，直接问端点）
+python -c "import json,urllib.request;from config import LLM_CONFIG as c;req=urllib.request.Request(c['base_url'].rstrip('/')+'/models',headers={'Authorization':'Bearer '+c['api_key']});print([m['id'] for m in json.load(urllib.request.urlopen(req))['data']])"
+```
+
+```cmd
+# ---- 视觉备用（默认：Agnes 主 → 商汤备）
+VISION_FALLBACK_MODELS=sensenova-6.8-flash-lite
+VISION_FALLBACK_BASE_URL=https://token.sensenova.cn/v1
+VISION_FALLBACK_API_KEY=            # 留空 = 用主 LLM(商汤) 的 key
+VISION_FALLBACK_TIMEOUT=60
+
+# ---- 生图备用（默认：Agnes 主 → 商汤备）
+IMAGE_GEN_FALLBACK_MODELS=sensenova-u1.5-lite
+IMAGE_GEN_FALLBACK_BASE_URL=https://token.sensenova.cn/v1
+IMAGE_GEN_FALLBACK_TIMEOUT=180
+```
+
+要点：
+- 备用链**跳过与主端点+主模型完全相同的条目**（重试同一个挂掉的东西没意义）；
+- 换了备用时，工具输出会**明确标注**（"本次由**备用模型** X 应答"），生图产物也标实际
+  出图的模型——不会把备用的功劳记在主模型头上；
+- 视觉还叠了一层**本地 OCR** 兜底（见上一节）：模型链全挂时，至少把字读出来。
+
+## 三·十四、运行中卡住的排查
 
 **症状**：程序跑着跑着不动了，但进程还在（CPU 为 0）。
 

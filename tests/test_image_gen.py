@@ -165,7 +165,11 @@ class TestOptionalFieldDowngrade:
         assert r["images"][0].endswith(".png")
 
     def test_unrelated_400_still_raises(self, tmp_path, monkeypatch):
-        """不是字段问题（如 401 鉴权）时不应吞掉错误反复重试。"""
+        """不是字段问题（如 401 鉴权）时不应**对同一端点**吞掉错误反复重试。
+
+        注意：这里显式关掉备用端点——跨提供方兜底是另一回事（见
+        tests/test_model_fallback.py：主端点 401 时会去试配了别的 key 的备用端点）。
+        """
         import models.image_gen as ig
 
         class Err:
@@ -173,12 +177,13 @@ class TestOptionalFieldDowngrade:
             text = "unauthorized"
 
         calls = []
+        monkeypatch.setitem(ig.IMAGE_GEN_CONFIG, "fallback_models", [])
         monkeypatch.setattr(ig.httpx, "post",
                             lambda url, json=None, headers=None, timeout=None:
                             (calls.append(1), Err())[1])
         with pytest.raises(RuntimeError, match="401"):
             make_model(tmp_path).generate_b64("猫")
-        assert len(calls) == 1, "无关错误不应重试"
+        assert len(calls) == 1, "同一端点上的无关错误不应重试"
 
     def test_http_error_raises(self, tmp_path, monkeypatch):
         import models.image_gen as ig
