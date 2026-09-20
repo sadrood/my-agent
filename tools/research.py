@@ -120,6 +120,26 @@ class DeepResearcher:
 
         return report
 
+    def lookup_snippets(self, query: str, limit: int = 3) -> List[Dict[str, str]]:
+        """轻量检索：搜一次并取前 N 个来源的正文摘要。
+
+        与 research() 的区别：不做关键词规划、不提炼事实、不写报告——只回答
+        "这个说法在公开资料里长什么样"。文章工坊的事实核查用它（只查被点名的
+        可疑说法，全文逐条联网既慢又贵）。
+        """
+        out: List[Dict[str, str]] = []
+        try:
+            for source in self._search_and_collect(query, limit=limit)[:limit]:
+                content = self._extract_page_content(source.url)
+                out.append({
+                    "title": source.title or "",
+                    "url": source.url,
+                    "snippet": (content or source.snippet or "")[:1500],
+                })
+        except Exception as e:                  # noqa: BLE001
+            print(f"[DeepResearch] 检索 '{query}' 出错: {e}")
+        return out
+
     def _generate_search_queries(self, topic: str, depth: int) -> List[str]:
         """生成搜索关键词策略。"""
         # 策略1: 使用 LLM 生成搜索词

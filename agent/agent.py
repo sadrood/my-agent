@@ -1845,10 +1845,10 @@ class Agent:
             return 0
 
     def _wire_session_tools(self):
-        """按会话给会话级工具注入 key + 事件回调（todo/task/thought/terminal）。"""
+        """按会话给会话级工具注入 key + 事件回调（todo/task/thought/article/terminal）。"""
         try:
             session_key = getattr(self.config, "session_name", "") or ""
-            for name in ("todo_write", "terminal", "task", "thought"):
+            for name in ("todo_write", "terminal", "task", "thought", "article"):
                 try:
                     t = self.tool_manager.get_tool(name)
                 except Exception:
@@ -1860,7 +1860,7 @@ class Agent:
                         t.set_session_key(session_key)
                     except Exception:
                         pass
-                if name in ("todo_write", "task", "thought") and hasattr(t, "set_emit"):
+                if name in ("todo_write", "task", "thought", "article") and hasattr(t, "set_emit"):
                     try:
                         t.set_emit(self._emit)
                     except Exception:

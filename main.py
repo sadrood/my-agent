@@ -6,6 +6,7 @@ my_agent 入口程序（Team + Research + Dashboard + 安全审批 + MCP Server 
     python main.py "你的任务"                 # 单Agent执行
     python main.py --team "复杂任务"          # 多Agent团队协作
     python main.py --research "研究主题"      # 深度研究模式
+    python main.py --article "文章主题"       # 文章工坊（多模型互审写作）
     python main.py --dashboard                # 启动Web监控面板
     python main.py --dashboard --team "任务"  # Dashboard + 团队模式
     python main.py --mcp-server               # 以 MCP server 运行（供上游宿主平台调用）
@@ -116,6 +117,22 @@ def run_research(topic: str):
     return report
 
 
+def run_article(topic: str, requirements: str = ""):
+    """文章工坊：多模型互审写文章（一家写、另一家审，含事实核查与逐条修订）。"""
+    from agent.ui_theme import print_final_result, print_info, print_warning
+    from models.article import ArticleError, ArticlePipeline
+
+    print_info(f"文章工坊 · {topic[:80]}", style="primary")
+    pipeline = ArticlePipeline(tool_manager=ToolManager(), verbose=True)
+    try:
+        result = pipeline.write(topic, requirements=requirements)
+    except ArticleError as e:
+        print_warning(str(e), use_rich=True)
+        return ""
+    print_final_result(result.summary() + "\n\n--- 定稿 ---\n\n" + result.final_text)
+    return result.final_text
+
+
 def start_dashboard(port: int = 8080, host: str = "127.0.0.1"):
     """
     启动 dashboard 后端服务（/api + /ws）。
@@ -151,7 +168,7 @@ def _parse_command(goal: str):
         (命令名, 参数) 或 (None, None)。
         命令名 ∈ {"team", "research", "tools", "sessions", "open", "new"}
     """
-    for cmd in ("team", "research", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "help"):
+    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "help"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -383,6 +400,15 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             else:
                 run_research(cmd_args)
             continue
+        if cmd == "article":
+            # 多模型互审写作：/article <主题> [| 写作要求]
+            c.print()
+            if not cmd_args:
+                print_warning("用法: /article <主题> [| 写作要求]", use_rich=True)
+            else:
+                _topic, _, _reqs = cmd_args.partition("|")
+                run_article(_topic.strip(), _reqs.strip())
+            continue
         if cmd == "image":
             # 文生图（SenseNova U1.5 Lite）：生成图片并保存到本地
             c.print()
@@ -451,6 +477,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             for line in [
                 "/team <任务>        团队协作模式",
                 "/research <主题>     深度研究",
+                "/article <主题>      文章工坊（多模型互审写作，可用 | 附要求）",
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
@@ -471,10 +498,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/tools", "/sessions", "/open", "/new", "/model", "/config", "/image", "/memory", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/new", "/model", "/config", "/image", "/memory", "/help"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
-                f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /image <描述> · /memory · /help · /tools · /sessions · /open <ID> · /new · exit"
+                f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /help · /tools · /sessions · /open <ID> · /new · exit"
             )
             continue
 
@@ -544,6 +571,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-replans", type=int, default=3, help="最大重规划次数")
     parser.add_argument("--team", action="store_true", help="团队协作模式")
     parser.add_argument("--research", action="store_true", help="深度研究模式")
+    parser.add_argument("--article", action="store_true",
+                        help="文章工坊：多模型互审写作（一家写、另一家审 + 事实核查）")
     parser.add_argument("--auto-mode", action="store_true",
                         help="按意图自动路由：调研/报告类 → 深度研究；团队/并行类 → 团队模式；其余单循环")
     parser.add_argument("--dashboard", action="store_true", help="启动Web监控面板")
@@ -723,7 +752,7 @@ def main():
     # 自动路由（--auto-mode / AUTO_MODE=true）：按意图把目标路由到 research/team
     if not args.auto_mode:
         args.auto_mode = os.getenv("AUTO_MODE", "false").lower() == "true"
-    if args.auto_mode and args.goal and not args.team and not args.research:
+    if args.auto_mode and args.goal and not args.team and not args.research and not args.article:
         from agent.mode_router import route_goal
         routed = route_goal(args.goal)
         if routed == "research":
@@ -740,7 +769,9 @@ def main():
         print("  [Dashboard] 浏览器版控制面板已禁用（web 端已停用）。")
         print("  [Dashboard] 如需浏览器版页面，设置 MY_AGENT_WEB_UI=1 后启动服务。")
 
-    if args.research and args.goal:
+    if args.article and args.goal:
+        run_article(args.goal)
+    elif args.research and args.goal:
         run_research(args.goal)
     elif args.team and args.goal:
         run_team(args.goal)
@@ -751,6 +782,8 @@ def main():
             run_team(args.goal)
         elif args.research:
             run_research(args.goal)
+        elif args.article:
+            run_article(args.goal)
         else:
             run_once(
                 goal=args.goal,

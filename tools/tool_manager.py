@@ -98,6 +98,13 @@ class ToolManager:
         except Exception:
             pass
 
+        # 文章工坊（多模型互审写作）：需要复用浏览器做事实核查 → 注入 self
+        try:
+            from tools.article import ArticleTool
+            self.register(ArticleTool(tool_manager=self))
+        except Exception:
+            pass
+
         # 桌面操控工具（Windows）：截图/无障碍树/鼠标键盘，高危走审批门
         try:
             from tools.computer_use import DesktopTool

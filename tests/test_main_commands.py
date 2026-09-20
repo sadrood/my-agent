@@ -29,6 +29,18 @@ class TestParseCommand:
         assert _parse_command("/research AI 趋势") == ("research", "AI 趋势")
         assert _parse_command("/tools") == ("tools", "")
 
+    def test_article_command(self):
+        """文章工坊：/article <主题> [| 写作要求]（要求由 REPL 侧按 | 切分）。"""
+        assert _parse_command("/article AI Agent 的记忆机制") == (
+            "article", "AI Agent 的记忆机制")
+        assert _parse_command("/article") == ("article", "")
+        assert _parse_command("/article选题 | 给大众看") == ("article", "选题 | 给大众看")
+        assert _parse_command("/articles") == (None, None), "英文连写不算命令"
+
+    def test_article_flag_exists(self):
+        parser = build_parser()
+        assert parser.parse_args(["--article", "主题"]).article is True
+
     def test_command_args_concatenated_chinese(self):
         # /team任务（无空格，中文连写）——用户实际输入场景
         assert _parse_command("/team你觉得你自身还有什么需要升级的") == (

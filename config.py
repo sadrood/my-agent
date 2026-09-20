@@ -719,3 +719,62 @@ SKILLS_CONFIG = {
     ),
     "max_chars": int(os.getenv("SKILLS_MAX_CHARS", "6000")),
 }
+
+# ============================================================
+# 文章工坊（多模型互审写作流水线）
+# ============================================================
+# 为什么必须**跨厂商**互审：同一个模型审自己写的稿子，盲点、偏好、知识边界完全
+# 重合，"互审"会退化成自我复述；同厂不同名的模型也基本重合。所以默认让另一家的
+# 模型当审阅/校对，写稿与修订留在主模型。
+ARTICLE_ENDPOINTS = {
+    # 端点名 → OpenAI 兼容配置。可写 "main" / "agnes"，也可 "agnes:某个模型名"。
+    "main": {
+        "api_key": LLM_CONFIG.get("api_key") or "",
+        "base_url": LLM_CONFIG.get("base_url") or "",
+        "model": LLM_CONFIG.get("default_model") or "",
+    },
+    "agnes": {
+        "api_key": GUARDIAN_CONFIG.get("api_key") or VISION_CONFIG.get("api_key") or "",
+        "base_url": GUARDIAN_CONFIG.get("base_url") or VISION_CONFIG.get("base_url") or "",
+        "model": GUARDIAN_CONFIG.get("model") or VISION_CONFIG.get("vision_model") or "",
+    },
+}
+
+ARTICLE_CONFIG = {
+    "save_dir": resolve_under_root(os.getenv("ARTICLE_DIR", "./output/articles")),
+    # 审阅→修订 最多来回几轮（到顶就带着剩余意见定稿，不会无限刷 token）
+    "max_revise_rounds": int(os.getenv("ARTICLE_MAX_REVISE_ROUNDS", "2")),
+    # 只有这些严重度才值得回炉重写；轻微问题攒到校对阶段一次性落定
+    "revise_severities": tuple(
+        s.strip() for s in os.getenv("ARTICLE_REVISE_SEVERITIES", "严重,中等").split(",") if s.strip()
+    ),
+    # 先出大纲再写初稿（短文/已有大纲时可关掉）
+    "outline": os.getenv("ARTICLE_OUTLINE", "true").lower() == "true",
+    # 目标篇幅（如 "1500字"），留空由模型按主题自行判断
+    "target_length": os.getenv("ARTICLE_TARGET_LENGTH", ""),
+    # 事实核查：只查审阅方点名的可疑说法（全文逐条联网太贵且慢）
+    "factcheck": os.getenv("ARTICLE_FACTCHECK", "true").lower() == "true",
+    "factcheck_max_claims": int(os.getenv("ARTICLE_FACTCHECK_MAX_CLAIMS", "5")),
+    "lookup_limit": int(os.getenv("ARTICLE_LOOKUP_LIMIT", "3")),
+    # 检索通道（按顺序凑够 lookup_limit 条即停）：zhihu=知乎开放平台全网搜索
+    # （结构化、稳，需 ZHIHU_ACCESS_SECRET）；browser=抓搜索引擎结果页（无密钥依赖，
+    # 但经常抓不到东西）。两条都拿不到才记"未查到"。
+    "lookup_sources": os.getenv("ARTICLE_LOOKUP_SOURCES", "zhihu,browser"),
+    # 限流兜底：长文一次跑 8+ 个大请求，很容易撞上游 TPM/RPM（实测商汤在 revise
+    # 阶段 429 过）。同端点退避重试 stage_retries 次 → 仍失败就换另一家端点续跑
+    # （fallback_endpoint=auto 表示自动选"另一家"；留空/off 关闭换端点）。
+    "stage_retries": int(os.getenv("ARTICLE_STAGE_RETRIES", "1")),
+    "retry_wait": float(os.getenv("ARTICLE_RETRY_WAIT", "20")),
+    "fallback_endpoint": os.getenv("ARTICLE_FALLBACK_ENDPOINT", "auto"),
+    # 各阶段用哪个端点（改这里就能换"谁来审谁"）
+    "stages": {
+        "outline": os.getenv("ARTICLE_MODEL_OUTLINE", "main"),
+        "draft": os.getenv("ARTICLE_MODEL_DRAFT", "main"),
+        "review": os.getenv("ARTICLE_MODEL_REVIEW", "agnes"),
+        "claims": os.getenv("ARTICLE_MODEL_CLAIMS", "agnes"),
+        "verify": os.getenv("ARTICLE_MODEL_VERIFY", "main"),
+        "revise": os.getenv("ARTICLE_MODEL_REVISE", "main"),
+        "proofread": os.getenv("ARTICLE_MODEL_PROOFREAD", "agnes"),
+        "finalize": os.getenv("ARTICLE_MODEL_FINALIZE", "main"),
+    },
+}
