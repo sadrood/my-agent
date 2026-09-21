@@ -462,6 +462,17 @@ LEARN_CONFIG = {
     # 只影响**新记录**，不动已有历史；**失败的经验总是记**（失败模式靠它）。0 = 关闭。
     "min_goal_chars": int(os.getenv("LEARN_MIN_GOAL_CHARS", "15")),
     "min_tool_calls": int(os.getenv("LEARN_MIN_TOOL_CALLS", "2")),
+    # 经验压缩（memory distill）用的模型：留空 = 主模型。
+    # 压缩是**离线维护任务**，而主模型（商汤）配额紧张时会回 429 / 空正文；
+    # 换一家跑完更划算（例如 LEARN_DISTILL_BASE_URL=https://api.agnes-ai.cn/v1 +
+    # LEARN_DISTILL_MODEL=agnes-3.0-flash + LEARN_DISTILL_API_KEY=<agnes key>）。
+    # 只影响压缩，不动主循环的模型。
+    "distill_model": os.getenv("LEARN_DISTILL_MODEL", ""),
+    "distill_base_url": os.getenv("LEARN_DISTILL_BASE_URL", ""),
+    "distill_api_key": os.getenv("LEARN_DISTILL_API_KEY", ""),
+    # 压缩时**每组之间**等待秒数：账号 RPM 很低时连续几发大请求必被限流
+    # （实测商汤 429 + 空正文），拉开间隔比换模型有效。
+    "distill_pause": float(os.getenv("LEARN_DISTILL_PAUSE", "0")),
     # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
     "inject_failure_warnings": os.getenv("LEARN_INJECT_WARNINGS", "true").lower() == "true",

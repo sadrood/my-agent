@@ -1943,6 +1943,17 @@ class Agent:
                         t.set_emit(self._emit)
                     except Exception:
                         pass
+            # 记忆库工具要拿到**当前会话**的 Memory：经验库是按会话分文件的
+            # （memory/<chat_id>/experiences.json），不注入就会整理到 default 那份。
+            try:
+                mt = self.tool_manager.get_tool("memory")
+                if mt is not None:
+                    if hasattr(mt, "set_memory"):
+                        mt.set_memory(self.memory)
+                    if hasattr(mt, "set_llm"):
+                        mt.set_llm(self.llm)
+            except Exception:
+                pass
         except Exception:
             pass
 
