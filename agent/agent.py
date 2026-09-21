@@ -883,14 +883,21 @@ class Agent:
         failed_steps = [s for s in self.memory.step_history if s.get("status") == "failed"]
         task_success = len(self.memory.get_failed_steps()) == 0
 
-        self.memory.save_experience(
-            goal=goal,
-            plan_steps=self.state.plan,
-            success=task_success,
-            summary=(final_summary or "无输出")[:500],
-            tool_usage=tool_usage,
-            errors=errors_collected,
-        )
+        # 写入侧质量门槛：一句话问答（"你能做什么""列出前 3 个文件"）不值得沉淀——
+        # 实测这类占了库里的 37%，召回时只会挤掉真正有用的经验。判断在 Memory 里，
+        # 失败的一律照记（失败模式靠它）。
+        if self.memory.should_record_experience(goal, tool_usage, task_success,
+                                               errors_collected):
+            self.memory.save_experience(
+                goal=goal,
+                plan_steps=self.state.plan,
+                success=task_success,
+                summary=(final_summary or "无输出")[:500],
+                tool_usage=tool_usage,
+                errors=errors_collected,
+            )
+        else:
+            print_evolution("本轮是简短问答，不作为经验沉淀", use_rich=self.config.verbose)
 
         # 记录策略结果
         task_category = self.memory._classify_task(goal)
@@ -1600,14 +1607,21 @@ class Agent:
         self.memory.add_message("user", goal)
         self.memory.add_message("assistant", final)
         if not result.get("stopped"):
-            self.memory.save_experience(
-                goal=goal,
-                plan_steps=[goal],
-                success=result.get("success", False),
-                summary=final[:500],
-                tool_usage=tool_usage,
-                errors=result.get("errors", []),
-            )
+            # 同上：简短的纯问答不沉淀（见 memory.should_record_experience）
+            if self.memory.should_record_experience(goal, tool_usage,
+                                                    result.get("success", False),
+                                                    result.get("errors", [])):
+                self.memory.save_experience(
+                    goal=goal,
+                    plan_steps=[goal],
+                    success=result.get("success", False),
+                    summary=final[:500],
+                    tool_usage=tool_usage,
+                    errors=result.get("errors", []),
+                )
+            else:
+                print_evolution("本轮是简短问答，不作为经验沉淀",
+                                use_rich=self.config.verbose)
         approach = self._infer_approach()
         if approach:
             self.memory.record_strategy(task_category, approach, result.get("success", False))

@@ -451,6 +451,17 @@ LEARN_CONFIG = {
     # 召回打分的候选池：同一类别各取最近 N 条参与打分（0 = 全量参与）。
     # 库变全量后由它把打分成本压住；排序仍由关键词/类别/时间打分决定。
     "recall_pool": int(os.getenv("LEARN_RECALL_POOL", "200")),
+    # 相关性下限：候选经验与当前目标的关键词重叠数低于它就**不注入**
+    # （宁缺毋滥）。库里大量是十几字的闲聊式目标，靠一两个通用 bigram 就能挤进
+    # 前 3 条把提示词塞满噪音；设为 0 恢复"总是凑满 n 条"的旧行为。
+    "min_overlap": int(os.getenv("LEARN_MIN_OVERLAP", "1")),
+    # 写入侧质量门槛（策略判断在 Memory.should_record_experience，调用方记录前问一句）：
+    # 目标短于 min_goal_chars **且**工具调用少于 min_tool_calls 才不记——两者都小的
+    # 是闲聊/一次性问答，不是可复用经验。实测库里 159 条有 59 条属于此类，它们往往
+    # 动过一两个工具（列目录/看模型）能穿过"有没有干活"的判断，召回时却只会塞噪音。
+    # 只影响**新记录**，不动已有历史；**失败的经验总是记**（失败模式靠它）。0 = 关闭。
+    "min_goal_chars": int(os.getenv("LEARN_MIN_GOAL_CHARS", "15")),
+    "min_tool_calls": int(os.getenv("LEARN_MIN_TOOL_CALLS", "2")),
     # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
     "inject_failure_warnings": os.getenv("LEARN_INJECT_WARNINGS", "true").lower() == "true",
@@ -682,6 +693,10 @@ TOOL_CONFIG = {
     "loop_base_turns": int(os.getenv("LOOP_BASE_TURNS", "30")),          # 起步轮数
     "loop_extend_per_progress": int(os.getenv("LOOP_EXTEND_PER_PROGRESS", "10")),
     "loop_stall_limit": int(os.getenv("LOOP_STALL_LIMIT", "5")),         # 连续无进展即停
+    # "连续无进展"预警阈值（LOOP_HARD_CAP=0 的无限模式下，只有原样重复/空回复会停；
+    #  "换了新做法但失败"的轮次永远到不了上限——达到该阈值时向前端发一次提示。
+    #  0 = 关闭。只预警不自动停：无限模式的语义是"让 agent 做完任务再结束"。）
+    "loop_stagnation_warn": int(os.getenv("LOOP_STAGNATION_WARN", "10")),
     # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。
     # 留空则回退到 max_loop_ops（即升级前的行为）。
     "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))

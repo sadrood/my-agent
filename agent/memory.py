@@ -101,22 +101,39 @@ class Memory:
         (r"(编码|encode|decode|乱码|gbk|utf)", "encoding_error"),
     ]
 
-    # 任务类别关键词 → 标签
+    # 任务类别关键词 → 标签（顺序即优先级：先命中先归类）
+    #
+    # ⚠️ 这张表之前**漏掉了整个开发与视频词汇**：实测 7 个典型目标
+    # （"修 pytest 报的 bug"、"重构 memory.py 的召回逻辑"、"配音+字幕合成视频"…）
+    # **全部**落到 general，而库里 117/159 条都是 general —— 于是"同类别加权"
+    # （W_CATEGORY）形同虚设，召回退化成 2-gram 关键词硬凑。
+    # 补词表时注意：只放**有区分度**的词，别把"写""做"这类放进 coding。
     TASK_CLASSIFIERS = [
         (["安装", "pip", "install", "配置", "部署", "setup"], "setup"),
         (["excel", "表格", "xlsx", "csv", "单元格", "工作表"], "file_excel"),
-        (["word", "文档", "docx", "报告", "论文"], "file_document"),
+        # 视频/音频制作（本仓库高频任务，之前完全没有类别）
+        (["视频", "剪辑", "配音", "字幕", "漫剧", "镜头", "运镜", "合成", "音频",
+          "语音", "tts", "生图", "配音员", "成片", "转场"], "video_media"),
+        # 写作/校对（文章工坊那条线）
+        (["文章", "润色", "校对", "审阅", "文案", "稿子", "写一篇", "写作", "排版"], "writing"),
+        # 网上的事先判：像"用浏览器搜索这个报错的解法"里也含"报错"，
+        # 若 coding 排在前面会被误判成编程任务（实测踩到）。
         (["浏览器", "网页", "搜索", "访问", "打开.*网", "浏览"], "web_browse"),
+        # 编程/调试（"测试""用例""pytest""bug"这些最常见的说法之前一个都没有）
+        (["测试", "用例", "单元测试", "pytest", "unittest", r"\btest\b", "bug", "报错",
+          "异常", "修复", "修好", "调试", "重构", "函数", "代码", "编程", r"写.*程序",
+          "脚本", "python", "接口", r"\bapi\b", "类型标注", "静态检查", "lint"], "coding"),
+        (["word", "文档", "docx", "报告", "论文"], "file_document"),
         (["下载", "爬虫", "抓取", "数据采集", "scrape"], "web_scrape"),
         (["计算", "统计", "分析", "数据分析", "pandas", "图表"], "data_analysis"),
         (["文件", "目录", "文件夹", "复制", "移动", "删除", "重命名"], "file_ops"),
-        (["代码", "编程", "写.*程序", "脚本", "python", "函数"], "coding"),
     ]
 
     #: 经验召回打分的权重与近期性半衰期。
     #: 用显式权重而不是把各项塞进 lexicographic 元组：后者无法表达"近期性只占
     #: 一部分分量"，也没法调参。关键词重叠是主因，所以权重远高于其它项。
-    W_OVERLAP = 10.0          # 每命中一个关键词
+    W_OVERLAP = 10.0          # 与经验 **goal** 每命中一个关键词
+    W_SUMMARY = 2.0           # 与经验 **summary** 命中（次要信号，防通用词刷分）
     W_CATEGORY = 3.0          # 同一任务类别
     W_SUCCESS = 1.0           # 成功经验（失败经验也有参考价值，故只有 1 分）
     W_RECENCY = 2.0           # 近期性上限（乘以 0~1 的衰减系数）
@@ -158,6 +175,11 @@ class Memory:
         self.max_experiences = int(LEARN_CONFIG.get("max_experiences_store", 2000))
         self.recall_n = int(LEARN_CONFIG.get("max_experiences_recall", 3))
         self.recall_pool = int(LEARN_CONFIG.get("recall_pool", 200))
+        # 相关性下限：没达到就少注入/不注入（"宁缺毋滥"），0 = 关闭
+        self.min_overlap = int(LEARN_CONFIG.get("min_overlap", 1))
+        # 写入侧策略阈值（见 should_record_experience）
+        self.min_goal_chars = int(LEARN_CONFIG.get("min_goal_chars", 15))
+        self.min_tool_calls = int(LEARN_CONFIG.get("min_tool_calls", 2))
         self.max_failure_patterns = int(LEARN_CONFIG.get("max_failure_patterns", 50))
 
         # 失败模式库
@@ -451,6 +473,46 @@ class Memory:
     # 经验库（自我进化核心）
     # ================================================================
 
+    #: 像"问句/闲聊"的目标（不是任务）。**只用来判断短目标**：长目标里出现"如何"
+    #: 往往是真任务（"如何让 agent 学会用知乎"），不能一刀切。
+    _CHAT_HINT = re.compile(
+        r"(吗|呢|什么|为什么|怎么|如何|哪个|哪些|能不能|可不可以|是不是|有没有|"
+        r"^\s*(你|您)|谢谢|你好|\?|？)")
+
+    def should_record_experience(self, goal: str, tool_usage: dict = None,
+                                 success: bool = True, errors: list = None) -> bool:
+        """这次任务值不值得沉淀成"经验"？（调用方在 save_experience 前问一句）
+
+        为什么需要它（实测数据）：库里 159 条中有 59 条是"你能做什么""你现在用的
+        什么模型""为什么停止了""还有什么需要升级迭代的地方吗"这类一句话问答。它们
+        往往**确实调用过一两个工具**（列目录、看模型），所以能穿过"有没有干活"的
+        判断，但毫无可复用价值；召回时还会靠一两个通用 bigram 挤进前 3 条，把提示词
+        塞满噪音——这正是"召回看起来没用"的主因。
+
+        规则（宁可少记，也别记没用的）：
+          · 失败/踩坑的**总是记**（失败模式靠它）；
+          · 工具调用 ≥ min_tool_calls（默认 2）→ 记，不管目标长短
+            （"重构召回逻辑"这种短目标是真任务）；
+          · 很短（< 8 字）→ 不记（"你能做什么""为什么停止了"）；
+          · 像问句/闲聊 且 短于 min_goal_chars（默认 15）→ 不记。
+        阈值由 LEARN_MIN_* 配置，设 0 分别关闭。
+        """
+        if not success or errors:
+            return True                       # 失败/踩坑：必须留
+        usage = tool_usage or {}
+        calls = sum(int(v) for v in usage.values() if isinstance(v, (int, float)))
+        min_calls = int(getattr(self, "min_tool_calls", 2) or 0)
+        if min_calls and calls >= min_calls:
+            return True
+        text = (goal or "").strip()
+        min_chars = int(getattr(self, "min_goal_chars", 15) or 0)
+        if min_chars and len(text) < min_chars:
+            # 短目标里只有"纯闲聊/问句"该丢；祈使句的小任务（"用python计算3加4"）照记。
+            # 8 字以下无论像不像问句都不像任务。min_goal_chars=0 → 整段判断关闭。
+            if len(text) < 8 or self._CHAT_HINT.search(text):
+                return False
+        return bool(usage) or bool(errors)
+
     def save_experience(self, goal: str, plan_steps: list, success: bool,
                          summary: str = "", tool_usage: dict = None,
                          errors: list = None) -> ExperienceEntry:
@@ -461,6 +523,9 @@ class Memory:
         质量门槛：纯问答（无工具使用、无错误、且成功）不入库——经验库只
         沉淀"做了事"的记录（调用过工具 / 出过错 / 失败），避免闲聊问答
         稀释真正可复用的技能经验。
+
+        （"任务值不值得沉淀"的**策略**判断在 should_record_experience()，
+        由调用方在记录前问一句；这里是存储层，保持"给什么存什么"。）
         """
         tool_usage = tool_usage or {}
         errors = errors or []
@@ -592,12 +657,19 @@ class Memory:
             days = max(0.0, (datetime.now() - then).total_seconds() / 86400.0)
             return 0.5 ** (days / self.RECENCY_HALF_LIFE_DAYS)
 
+        def _goal_overlap(exp) -> int:
+            """与经验 **goal** 的关键词重叠数（主信号）。"""
+            return len(goal_keywords & set(self._extract_keywords(exp.goal)))
+
         def _score(exp) -> tuple:
-            exp_keywords = set(self._extract_keywords(exp.goal))
-            overlap = len(goal_keywords & exp_keywords)
-            # 关键词重叠是主因（权重最高），其次同类、成功，最后叠加近期性；
-            # 权重是显式的常量，便于调参而不是埋在 lexicographic 元组顺序里。
-            score = (self.W_OVERLAP * overlap
+            # goal 重叠是**主信号**，summary 重叠只作次要信号（权重低一档）。
+            # 教训（本次实测踩到）：把两者并成一个集合等权算重叠，summary 里那些
+            # 处处都有的通用词（"测试""项目""文件"）会把每条经验的 overlap 都抬到 2，
+            # 排序反而更糊——等于给无关条目背书。
+            sum_overlap = len(goal_keywords & set(
+                self._extract_keywords(getattr(exp, "summary", "") or "", limit=60)))
+            score = (self.W_OVERLAP * _goal_overlap(exp)
+                     + self.W_SUMMARY * sum_overlap
                      + self.W_CATEGORY * (1 if exp.task_category == task_category else 0)
                      + self.W_SUCCESS * (1 if exp.success else 0)
                      + self.W_RECENCY * _recency(exp))
@@ -606,6 +678,17 @@ class Memory:
 
         if goal_keywords:
             candidates = sorted(candidates, key=_score, reverse=True)
+
+            # 相关性下限（LEARN_MIN_OVERLAP，默认 1）：**只看与 goal 的重叠**，宁缺毋滥。
+            # 库里 59/159 条是"视频任务你完成了吗"这类十几字的闲聊，靠一两个通用
+            # bigram（"视频""agent"）就能挤进前 3 条，把提示词塞满噪音；一条都不重叠
+            # 时**不如不注入**（调用方对空串已有处理）。summary 的通用词不算数——
+            # 它证明不了"这件事我做过"。
+            min_overlap = int(getattr(self, "min_overlap", 1) or 0)
+            if min_overlap > 0:
+                candidates = [e for e in candidates if _goal_overlap(e) >= min_overlap]
+                if not candidates:
+                    return ""
 
         # 取前 n 条（最相关在前；timestamp 参与打分，同类同分时新经验优先）
         selected = candidates[:n]
