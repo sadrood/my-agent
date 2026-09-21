@@ -3,6 +3,8 @@ import os
 import shutil
 import tempfile
 
+import pytest
+
 from agent.memory import (
     Memory, MemoryEntry, ExperienceEntry,
     FailurePattern, StrategyEntry,
@@ -249,6 +251,7 @@ def test_recall_pool_bounds_scoring_cost(monkeypatch):
                           tool_usage={"terminal": 1})
     m.recall_n = 10                     # 不靠 n 限制，只看池子
     m.recall_pool = 1                   # 每组只取最近 1 条 → 池子共 2 条
+    m.min_overlap = 0                   # 这条测的是池子大小，不是相关性门槛
     assert m.recall_experiences("目标触发").count("### 经验") == 2
     m.recall_pool = 0                   # 0 = 全量参与
     assert m.recall_experiences("目标触发").count("### 经验") == 8
@@ -327,17 +330,22 @@ def test_recall_without_llm_uses_lightweight_rank():
 
 
 def test_recall_ranks_related_experience_first():
-    """轻量相似度排序：与目标关键词重叠多的经验应排最前。"""
+    """轻量相似度排序：与目标关键词重叠多的经验应排最前；完全不相干的被门槛滤掉。
+
+    （"部署服务到服务器"那条以前会排在第 2 位一起注入——现在它与目标零重叠，
+    被相关性下限挡在门外，所以这里改成断言"它不在结果里"。）
+    """
     m, tmp = _make_memory()
-    m.save_experience(goal="帮我把数据整理成 Excel 表格", plan_steps=["s1"], success=True,
-                      summary="openpyxl 生成", tool_usage={"python": 1})
+    m.save_experience(goal="整理数据生成 Excel 表格", plan_steps=["s1"], success=True,
+                      summary="openpyxl 生成", tool_usage={"python": 1, "file": 2})
+    m.save_experience(goal="把数据备份到服务器", plan_steps=["s1"], success=True,
+                      summary="rsync 备份", tool_usage={"terminal": 1})
     m.save_experience(goal="部署服务到服务器", plan_steps=["s1"], success=True,
                       summary="ssh 部署", tool_usage={"terminal": 1})
-    ctx = m.recall_experiences("整理数据生成 Excel", n=2)
-    # Excel 经验应在部署经验之前
-    excel_pos = ctx.find("Excel")
-    deploy_pos = ctx.find("部署")
-    assert 0 <= excel_pos < deploy_pos
+    ctx = m.recall_experiences("整理数据生成 Excel", n=3)
+    assert ctx.find("Excel") >= 0, "相关的必须注入"
+    assert 0 <= ctx.find("Excel") < ctx.find("备份"), "重叠多的排前面"
+    assert "部署服务" not in ctx, "零重叠的噪音不该被注入"
     shutil.rmtree(tmp)
 
 
@@ -457,6 +465,147 @@ class TestRecallScoring:
                   for d in (0, 30, 60, 365)]
         assert scores[0] > scores[1] > scores[2] > scores[3] > 0
         assert math.isclose(scores[1], m.W_RECENCY / 2, rel_tol=1e-6), "半衰期应为 30 天"
+
+
+class TestTaskClassifier:
+    """任务分类：这张词表曾漏掉整个开发/视频词汇，7 个典型目标全判 general。"""
+
+    @pytest.mark.parametrize("goal,expect", [
+        ("帮我把 tests/test_zhihu.py 里失败的用例修好", "coding"),
+        ("修一下 pytest 报的这个 bug", "coding"),
+        ("重构 memory.py 的召回逻辑", "coding"),
+        ("给视频加一个新的剪辑参数", "video_media"),
+        ("把这段配音和字幕合成到视频里", "video_media"),
+        ("把生成的图片拼成竖屏漫剧", "video_media"),
+        ("写一篇关于 AI Agent 记忆机制的文章", "writing"),
+        ("把这篇稿子润色一下", "writing"),
+        ("安装 ffmpeg 并配置好路径", "setup"),
+        ("用浏览器搜索一下这个报错的解法", "web_browse"),
+    ])
+    def test_common_goals_are_classified(self, goal, expect):
+        assert Memory._classify_task(goal) == expect, goal
+
+    def test_falls_back_to_general(self):
+        assert Memory._classify_task("今天天气怎么样") == "general"
+
+
+class TestWriteSideQualityGate:
+    """写入侧策略：一句话问答不该被当成"经验"存下来（实测库里 59/159 是这类）。
+
+    策略在 `Memory.should_record_experience()`（**由调用方在记录前问一句**），
+    `save_experience()` 保持"存储层：给什么存什么"——上一版把门槛塞进存储层，
+    直接打断了 12 个只关心容量/排序的既有测试（分层错了）。
+    """
+
+    def test_short_chat_goal_is_not_recorded(self):
+        m, tmp = _make_memory()
+        for goal in ("你能做什么", "你用的什么模型", "为什么停止了", "你给我改了吗",
+                     "还有什么需要升级迭代的地方吗"):
+            assert m.should_record_experience(goal, {"terminal": 1}, True, []) is False, goal
+        shutil.rmtree(tmp)
+
+    def test_real_task_is_recorded(self):
+        m, tmp = _make_memory()
+        assert m.should_record_experience(
+            "把 tests/test_zhihu.py 里失败的用例修好并跑通全量测试",
+            {"terminal": 5, "edit": 3}, True, []) is True
+        shutil.rmtree(tmp)
+
+    def test_short_but_real_task_survives_via_tool_calls(self):
+        """"重构召回逻辑"很短，但工具调用多，是真任务 → 记。"""
+        m, tmp = _make_memory()
+        assert m.should_record_experience("重构召回逻辑", {"edit": 1, "terminal": 3},
+                                          True, []) is True
+        shutil.rmtree(tmp)
+
+    def test_short_imperative_task_is_kept(self):
+        """短不等于闲聊：祈使句的小任务照记（判据是"像不像问句"，不是单纯字数）。"""
+        m, tmp = _make_memory()
+        assert m.should_record_experience("用python计算3加4", {"python": 1}, True, []) is True
+        shutil.rmtree(tmp)
+
+    def test_long_question_is_still_a_task(self):
+        """"如何让 agent 学会用知乎"含疑问词但是真任务（长目标不按问句判）。"""
+        m, tmp = _make_memory()
+        assert m.should_record_experience("如何让 agent 学会使用知乎的数据开放平台",
+                                          {"terminal": 2}, True, []) is True
+        shutil.rmtree(tmp)
+
+    def test_failure_is_always_recorded(self):
+        """失败经验必须留下——失败模式靠它（短目标也一样）。"""
+        m, tmp = _make_memory()
+        assert m.should_record_experience("短目标但失败了", {"terminal": 1}, False, []) is True
+        assert m.should_record_experience("出错了", {"terminal": 1}, True,
+                                          ["boom"]) is True
+        shutil.rmtree(tmp)
+
+    def test_thresholds_can_be_disabled(self):
+        m, tmp = _make_memory()
+        m.min_goal_chars, m.min_tool_calls = 0, 0
+        assert m.should_record_experience("你能做什么", {"terminal": 1}, True, []) is True
+        shutil.rmtree(tmp)
+
+    def test_storage_layer_still_accepts_anything(self):
+        """存储层不做策略判断（否则会静默改变容量/排序类测试的前提）。"""
+        m, tmp = _make_memory()
+        m.save_experience("你能做什么", ["s"], True, summary="x", tool_usage={"terminal": 1})
+        assert len(m.experiences) == 1
+        shutil.rmtree(tmp)
+
+    def test_pure_qa_gate_still_works(self):
+        """原本的门槛（无工具、无错误、成功）不能被新策略取代。"""
+        m, tmp = _make_memory()
+        m.save_experience("这是一个足够长的纯问答目标没有调用任何工具", ["s"], True,
+                          summary="答完了")
+        assert m.experiences == []
+        shutil.rmtree(tmp)
+
+
+class TestRecallRelevanceFloor:
+    """相关性下限：一条都不重叠时**不注入**，而不是硬凑 n 条噪音。"""
+
+    @staticmethod
+    def _entry(goal, summary="", category="general"):
+        return ExperienceEntry(goal=goal, plan_steps=["s"], success=True, total_steps=1,
+                               completed_steps=1, failed_steps=0, summary=summary,
+                               task_category=category, tool_usage={"terminal": 1},
+                               errors=[], timestamp="2026-09-20T10:00:00")
+
+    def test_no_overlap_injects_nothing(self, monkeypatch):
+        m, tmp = _make_memory()
+        m.experiences = [self._entry("你为什么要开一个新的窗口"),
+                         self._entry("视频任务你完成了吗")]
+        m.recall_n, m.recall_pool = 3, 0
+        assert m.recall_experiences("重构经验召回的打分逻辑并补测试") == "", \
+            "没有共享关键词就不该注入噪音"
+        shutil.rmtree(tmp)
+
+    def test_overlap_passes_the_floor(self):
+        m, tmp = _make_memory()
+        m.experiences = [self._entry("重构经验召回的打分逻辑", summary="改了打分权重")]
+        m.recall_n, m.recall_pool = 3, 0
+        ctx = m.recall_experiences("重构经验召回的打分逻辑并补测试")
+        assert "### 经验 1" in ctx and "改了打分权重" in ctx
+        shutil.rmtree(tmp)
+
+    def test_floor_can_be_disabled(self):
+        m, tmp = _make_memory()
+        m.experiences = [self._entry("完全不相干的一句话")]
+        m.recall_n, m.recall_pool, m.min_overlap = 3, 0, 0
+        assert m.recall_experiences("重构经验召回的打分逻辑") != "", "关掉下限=旧行为"
+        shutil.rmtree(tmp)
+
+    def test_goal_overlap_outweighs_summary_overlap(self):
+        """goal 重叠是主信号：summary 里撞上通用词不能压过 goal 的真重叠。"""
+        m, tmp = _make_memory()
+        m.experiences = [
+            self._entry("随便聊聊别的", summary="这次任务和测试、项目、文件都有关"),
+            self._entry("给经验召回补一个相关性下限", summary="无关摘要"),
+        ]
+        m.recall_n, m.recall_pool = 1, 0
+        ctx = m.recall_experiences("给经验召回加相关性下限")
+        assert "补一个相关性下限" in ctx and "随便聊聊别的" not in ctx
+        shutil.rmtree(tmp)
 
 
 def test_persistence_roundtrip():
