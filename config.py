@@ -470,6 +470,9 @@ LEARN_CONFIG = {
     "distill_model": os.getenv("LEARN_DISTILL_MODEL", ""),
     "distill_base_url": os.getenv("LEARN_DISTILL_BASE_URL", ""),
     "distill_api_key": os.getenv("LEARN_DISTILL_API_KEY", ""),
+    # 压缩时**每组之间**等待秒数：账号 RPM 很低时连续几发大请求必被限流
+    # （实测商汤 429 + 空正文），拉开间隔比换模型有效。
+    "distill_pause": float(os.getenv("LEARN_DISTILL_PAUSE", "0")),
     # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
     "inject_failure_warnings": os.getenv("LEARN_INJECT_WARNINGS", "true").lower() == "true",

@@ -86,6 +86,7 @@ class TestDistill:
         shutil.rmtree(tmp)
 
     def test_llm_failure_keeps_that_group(self):
+        """**非配额类**故障（如超时）只影响那一组；配额类会整体中止（见另一个测试）。"""
         m, tmp = _mem()
         _add(m, "a", "coding", 4)
         _add(m, "b", "general", 4)
@@ -93,6 +94,44 @@ class TestDistill:
         assert sum(1 for e in m.experiences if e.task_category == "general") == 4
         assert sum(1 for e in m.experiences if e.task_category == "coding") == 1
         assert "总结失败" in res["error"]
+        shutil.rmtree(tmp)
+
+    def test_truncated_json_is_salvaged(self):
+        """真机踩到：模型回了数组但被 max_tokens 截断 → 逐个对象抢救。"""
+        m, tmp = _mem()
+        _add(m, "coding 任务", "coding", 4)
+        truncated = ('[\n {"title": "第一条", "do": "做法一", "dont": "坑一"},\n'
+                     ' {"title": "第二条", "do": "做法二", "dont": "坑二"},\n'
+                     ' {"title": "被截断的第三条", "do": "写到一半')
+        res = m.distill_experiences(FakeLLM(script={"coding": truncated}), min_group=3)
+        assert res["after"] == 2, "应救回两条完整对象"
+        titles = [e.goal for e in m.experiences]
+        assert "第一条" in titles and "第二条" in titles
+        shutil.rmtree(tmp)
+
+    def test_salvage_handles_braces_inside_strings(self):
+        """字段里带 {} 时也能救（正则版会整条丢掉——真机就这么白跑了一组）。"""
+        m, tmp = _mem()
+        _add(m, "coding 任务", "coding", 4)
+        raw = ('[{"title": "用占位符", "do": "写成 {path} 形式", "dont": "别硬编码"},'
+               ' {"title": "第二条", "do": "做法二", "dont": "坑二"},'
+               ' {"title": "半截", "do": "截断')
+        m.distill_experiences(FakeLLM(script={"coding": raw}), min_group=3)
+        titles = [e.goal for e in m.experiences]
+        assert "用占位符" in titles and "第二条" in titles
+
+    def test_rerun_does_not_reprocess_distilled_groups(self):
+        """重跑只处理**原始记录**：已蒸馏的组不再回炉（否则好条目会被反复揉）。"""
+        m, tmp = _mem()
+        _add(m, "coding 任务", "coding", 4)
+        _add(m, "setup 任务", "setup", 4)
+        llm = FakeLLM(script={"setup": "不是 JSON"})     # setup 第一轮失败
+        m.distill_experiences(llm, min_group=3)
+        assert m._is_distilled([e for e in m.experiences if e.task_category == "coding"][0])
+        calls_before = len(llm.calls)
+        m.distill_experiences(llm, min_group=3)          # 第二轮
+        # 第二轮只该为 setup 调一次（coding 已蒸馏，跳过）
+        assert len(llm.calls) - calls_before == 1, "重跑不该再动已蒸馏的类别"
         shutil.rmtree(tmp)
 
     def test_raw_records_are_archived(self):
@@ -203,7 +242,7 @@ class TestEmptyResponseHandling:
         res = m.distill_experiences(llm, min_group=3)
         assert llm.calls == 2, "空正文应重试一次"
         assert len(m.experiences) == 4, "两次都空 → 原样保留"
-        assert "空内容" in res["error"]
+        assert "无内容返回" in res["error"]
         shutil.rmtree(tmp)
 
 
@@ -239,6 +278,85 @@ class TestDistillModelSelection:
         from config import LEARN_CONFIG
         for k in ("distill_model", "distill_base_url", "distill_api_key"):
             assert k in LEARN_CONFIG
+
+
+class TestNoValueGroupsAndFailFast:
+    """两件实测出来的事：①"这堆记录没干货"是合法结论；②配额挂了要快速失败。"""
+
+    def test_explicit_empty_array_drops_the_group(self):
+        """模型回 `[]` = 这批没可复用经验 → 丢弃（归档里有，不算丢数据）。"""
+        m, tmp = _mem()
+        _add(m, "闲聊", "general", 6)
+        _add(m, "真任务", "coding", 4)
+        llm = FakeLLM(script={"general": "[]", "coding": _OK})
+        res = m.distill_experiences(llm, min_group=3)
+        cats = [e.task_category for e in m.experiences]
+        assert "general" not in cats, "明确判定没干货的类别应被丢掉"
+        assert len(res["groups"][1].get("titles", [])) >= 0
+        assert any(g["made"] == 0 for g in res["groups"])
+        # 归档里仍然有全部原始记录
+        with open(res["archived"], encoding="utf-8") as f:
+            assert len(json.load(f)) == 10
+        shutil.rmtree(tmp)
+
+    def test_all_empty_still_compresses_to_nothing(self):
+        m, tmp = _mem()
+        _add(m, "闲聊", "general", 5)
+        res = m.distill_experiences(FakeLLM(script={"general": "[]"}), min_group=3)
+        assert m.experiences == [] and res["after"] == 0 and res["archived"]
+        shutil.rmtree(tmp)
+
+    def test_quota_block_fails_fast(self, monkeypatch):
+        """连续两组拿不到内容 = 上游配额问题，别磨完全部类别（实测白等 8 分钟）。"""
+        monkeypatch.setattr("time.sleep", lambda *_: None)
+
+        class AllEmpty:
+            calls = 0
+
+            def chat(self, messages, **kw):
+                AllEmpty.calls += 1
+                return ""
+
+        m, tmp = _mem()
+        for cat in ("a", "b", "c", "d"):
+            _add(m, cat, cat, 3)
+        res = m.distill_experiences(AllEmpty(), min_group=3)
+        assert res.get("aborted") is True
+        assert "配额不足" in res["error"] and "已中止" in res["error"]
+        assert len(m.experiences) == 12, "中止后原库必须一条不动"
+        # 4 组只试了前两组（每组 2 次尝试）→ 最多 4 次调用
+        assert AllEmpty.calls <= 4, f"应快速失败，实际调用 {AllEmpty.calls} 次"
+        shutil.rmtree(tmp)
+
+    def test_quota_error_aborts_immediately(self, monkeypatch):
+        """429 是账号级问题：第一组就中止，不该再去试其它类别（实测白等 266 秒）。"""
+        monkeypatch.setattr("time.sleep", lambda *_: None)
+
+        class QuotaBoom:
+            calls = 0
+
+            def chat(self, messages, **kw):
+                QuotaBoom.calls += 1
+                raise RuntimeError("Error code: 429 - {'code': '429003', 'message': 'exceeds tpm/rpm limit'}")
+
+        m, tmp = _mem()
+        for cat in ("a", "b", "c"):
+            _add(m, cat, cat, 3)
+        res = m.distill_experiences(QuotaBoom(), min_group=3)
+        assert res.get("aborted") is True and "配额不足" in res["error"]
+        assert QuotaBoom.calls == 1, "配额错误应第一组就停"
+        assert len(m.experiences) == 9
+        shutil.rmtree(tmp)
+
+    def test_pause_between_groups(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+        m, tmp = _mem()
+        for cat in ("a", "b", "c"):
+            _add(m, cat, cat, 3)
+        m.distill_experiences(FakeLLM(), min_group=3, pause=7)
+        assert slept.count(7) == 2, "3 组之间应等 2 次"
+        shutil.rmtree(tmp)
 
 
 class TestMemoryTool:

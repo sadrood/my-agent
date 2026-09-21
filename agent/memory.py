@@ -371,7 +371,8 @@ class Memory:
         return "distilled" in (getattr(entry, "plan_steps", None) or [])
 
     def distill_experiences(self, llm, min_group: int = 3, dry_run: bool = False,
-                            max_records_per_group: int = 20) -> dict:
+                            max_records_per_group: int = 20,
+                            pause: float = None) -> dict:
         """按类别把零散经验压缩成高层条目（**原始记录先归档，不丢**）。
 
         Args:
@@ -387,8 +388,13 @@ class Memory:
                                     EXPERIENCE_DISTILL_USER_TEMPLATE)
 
         before = len(self.experiences)
+        # 只把**原始记录**分桶：已经蒸馏过的条目不再回炉（否则第二次压缩会把
+        # 上一轮的好条目又揉一遍，白花调用还可能揉糊）。这样重跑天然可续：
+        # 只有"还有 ≥min_group 条原始记录"的类别会被处理。
         buckets: Dict[str, list] = {}
         for e in self.experiences:
+            if self._is_distilled(e):
+                continue
             buckets.setdefault(e.task_category, []).append(e)
         groups = [(cat, items) for cat, items in sorted(buckets.items())
                   if len(items) >= max(2, int(min_group))]
@@ -399,8 +405,21 @@ class Memory:
         distilled_entries, report = [], []
         errors = []
         done_cats = set()                        # 只有**真的提炼出条目**的类别才算覆盖
-        for cat, items in groups:
+        # 组间间隔：账号 RPM 很低时连续几发大请求必被限流（实测商汤回 429/空正文），
+        # 拉开间隔比换模型有效。默认 0（不限流时不必等），LEARN_DISTILL_PAUSE 可配。
+        if pause is None:
+            try:
+                pause = float(LEARN_CONFIG.get("distill_pause", 0) or 0)
+            except (TypeError, ValueError):
+                pause = 0.0
+        consecutive_blocked = 0        # 连续几组拿不到内容 → 判定上游配额不足，快速失败
+        aborted = False                # 中止标记：已完成的部分照样落盘
+        for idx, (cat, items) in enumerate(groups):
+            if idx and pause > 0:
+                time.sleep(pause)
             recent = items[-max_records_per_group:]
+            blocked = False
+            quota_blocked = False
             records = "\n".join(
                 f"- 目标: {(e.goal or '')[:120]}\n  结果: {'成功' if e.success else '失败'}"
                 f" | 步骤 {e.completed_steps}/{e.total_steps} | 工具 {','.join((e.tool_usage or {}).keys())}"
@@ -414,33 +433,65 @@ class Memory:
                         [{"role": "system", "content": EXPERIENCE_DISTILL_SYSTEM_PROMPT},
                          {"role": "user", "content": EXPERIENCE_DISTILL_USER_TEMPLATE.format(
                              category=cat, count=len(items), records=records)}],
-                        temperature=0.2, max_tokens=2000)
+                        temperature=0.2, max_tokens=3000)
                 except Exception as e:          # noqa: BLE001
                     errors.append(f"{cat}: 总结失败 {str(e)[:120]}")
                     raw = ""
-                    break                        # 429 之类：LLM 层已重试过，别再加倍等
-                # 上游配额耗尽时除了回 429，还会回**空正文**（实测商汤如此）。
-                # 空正文不是"模型说没有经验"，隔一下再试一次通常就出内容了。
-                if (raw or "").strip():
+                    blocked = True
+                    # 配额类错误（429 / quota / rpm）是**账号级**问题：再试别的类别
+                    # 也是白等（LLM 层自己已退避重试过）。标记后跳出**整个组循环**，
+                    # 但已完成的部分照样落盘——半成品也比白跑强。
+                    low = str(e).lower()
+                    quota_blocked = any(k in low for k in
+                                        ("429", "quota", "rate limit", "rpm", "tpm",
+                                         "配额", "限流"))
                     break
-                time.sleep(2)
-            if not (raw or "").strip():
-                errors.append(f"{cat}: 上游返回空内容（{len(items)} 条记录保持原样）")
+                # 上游配额耗尽时除了回 429，还会回**空正文**（实测商汤如此）。
+                # 空正文不是"模型说没有经验"；而它是**每分钟/每日**限流的表现，
+                # 隔 2 秒重试没用，得等过一个配额窗口。
+                if (raw or "").strip():
+                    blocked = False
+                    break
+                blocked = True
+                time.sleep(30)
+            if quota_blocked:
+                aborted = True
+                errors.append("上游配额不足（429），已提前中止压缩")
+                break
+            if blocked and not (raw or "").strip():
+                consecutive_blocked += 1
+                errors.append(f"{cat}: 上游无内容返回（{len(items)} 条记录保持原样）")
+                if consecutive_blocked >= 2:
+                    # 连着两组都拿不到内容 = 配额/服务问题，不是模型不会总结。
+                    # 继续磨下去只是白等（实测磨了 8 分钟、7 组里 4 组空转）。
+                    aborted = True
+                    errors.append("连续多个类别拿不到模型输出，判定为上游配额不足，已中止压缩")
+                    break
                 continue
+            consecutive_blocked = 0
 
             made = self._parse_distilled(raw or "", cat, len(items))
-            if not made:
+            if made is None:
                 errors.append(f"{cat}: 模型输出无法解析（{len(items)} 条记录保持原样）"
                               f"｜原文开头: {str(raw or '')[:120]}")
+                continue
+            if not made:
+                # 模型明确回 `[]`：这批记录里没有可复用的做法/坑（纯闲聊），
+                # 压缩的正确答案就是"丢掉"——原始记录已在归档里，不算丢数据。
+                distilled_entries.extend([])
+                done_cats.add(cat)
+                report.append({"category": cat, "records": len(items), "made": 0,
+                               "titles": [], "note": "没有可复用经验（记录已归档）"})
                 continue
             distilled_entries.extend(made)
             done_cats.add(cat)
             report.append({"category": cat, "records": len(items), "made": len(made),
                            "titles": [d.goal for d in made]})
 
-        if not distilled_entries:
+        if not distilled_entries and not done_cats:
+            # 一条都没提炼出来、也没有"明确判定为没干货"的类别 → 什么都没发生
             return {"groups": report, "before": before, "after": before, "archived": "",
-                    "error": "；".join(errors)}
+                    "error": "；".join(errors), "aborted": aborted}
 
         # ⚠️ 只替换**成功提炼**的类别：失败的类别必须原样保留。
         # （曾经写成"所有尝试过的类别"，于是解析失败那几类的原始记录会被静默丢掉——
@@ -448,7 +499,10 @@ class Memory:
         keep = [e for e in self.experiences if e.task_category not in done_cats]
         after_entries = keep + distilled_entries
         result = {"groups": report, "before": before, "after": len(after_entries),
-                  "archived": "", "error": "；".join(errors)}
+                  "archived": "", "error": "；".join(errors), "aborted": aborted}
+        if aborted:
+            result["note"] = ("上游配额不足提前中止：已完成的类别已落盘，"
+                              "未处理的类别原样保留；稍后重跑即可继续。")
         if dry_run:
             result["dry_run"] = True
             result["preview"] = [self._format_distilled(d) for d in distilled_entries[:3]]
@@ -475,12 +529,53 @@ class Memory:
         self._save_experiences()
         return result
 
-    def _parse_distilled(self, raw: str, category: str, count: int) -> list:
-        """把模型输出解析成 ExperienceEntry（容错；含密钥扫描）。
+    @staticmethod
+    def _salvage_objects(text: str) -> list:
+        """从（可能被截断的）文本里按花括号配对抢救 JSON 对象。
 
-        实测要点：模型很爱给 JSON 套一层 ```json 围栏，或者前面写一句"好的，以下是…"，
-        所以先剥围栏再找最外层的 `[...]`；被 max_tokens 截断的半截 JSON 直接判失败，
-        由调用方保留原始记录（**宁可没压成，也不能丢**）。
+        不能用正则 `\\{[^{}]*\\}`：字段内容里带 `{}`（例如"用 {path} 占位"）就匹配不到，
+        半截数组里的完整对象会被整段丢掉——实测因此让一整组记录白跑。
+        """
+        import json as _json
+
+        out, depth, start, in_str, esc = [], 0, None, False, False
+        for i, ch in enumerate(text or ""):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                if depth:
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            obj = _json.loads(text[start:i + 1])
+                        except Exception:       # noqa: BLE001
+                            obj = None
+                        if isinstance(obj, dict) and obj.get("title"):
+                            out.append(obj)
+        return out
+
+    def _parse_distilled(self, raw: str, category: str, count: int):
+        """把模型输出解析成 ExperienceEntry 列表（容错；含密钥脱敏）。
+
+        Returns:
+            None  = **解析失败**（调用方必须保留原始记录）
+            []    = 模型明确表示"这批没有可复用经验"（可以丢，归档里有）
+            [..]  = 提炼出的条目
+
+        （必须区分这两种空：前者是故障，后者是结论——混为一谈就会把
+          "模型没答上来"当成"这些记录没价值"而删库。）
         """
         import json as _json
         import re as _re
@@ -489,6 +584,8 @@ class Memory:
         fence = _re.match(r"^```[a-zA-Z]*\s*\n(.*?)\n?```\s*$", text, _re.DOTALL)
         if fence:
             text = fence.group(1).strip()
+        if text in ("[]", ""):
+            return [] if text == "[]" else None
         m = _re.search(r"\[[\s\S]*\]", text)
         data = None
         if m:
@@ -497,7 +594,13 @@ class Memory:
             except Exception:                   # noqa: BLE001
                 data = None
         if data is None:
-            # 退一步：模型可能只给了单个对象 {"title": ...}
+            # 退一步 1：截断/半截 JSON 抢救——按花括号配对扫描逐个解析，能救几条算几条。
+            # （实测真机：模型明明回了数组，但输出被 max_tokens 截断、或字段里带 {}
+            #   导致整段 json.loads 失败 → 白跑一组。用扫描器而不是 `\{[^{}]*\}`，
+            #   因为字符串里的花括号不能当结构。）
+            data = self._salvage_objects(text) or None
+        if data is None:
+            # 退一步 2：模型可能只给了单个对象 {"title": ...}
             mo = _re.search(r"\{[\s\S]*\}", text)
             if mo:
                 try:
@@ -507,6 +610,8 @@ class Memory:
         if isinstance(data, dict):
             data = [data]
         if not isinstance(data, list):
+            return None
+        if not data:
             return []
         out = []
         for item in data[:3]:
