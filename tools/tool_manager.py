@@ -112,6 +112,13 @@ class ToolManager:
         except Exception:
             pass
 
+        # 记忆库管理（经验库体检 + 压缩）：agent 可自己整理经验
+        try:
+            from tools.memory_tool import MemoryTool
+            self.register(MemoryTool())
+        except Exception:
+            pass
+
         # 桌面操控工具（Windows）：截图/无障碍树/鼠标键盘，高危走审批门
         try:
             from tools.computer_use import DesktopTool

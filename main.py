@@ -443,7 +443,30 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 removed = agent.memory.prune_long_term(keep=keep)
                 print_info(f"已清理长期记忆 {removed} 条（保留最新 {keep} 条）", style="success")
                 continue
+            if cmd_args.strip().lower().startswith(("distill", "压缩", "总结")):
+                # 经验压缩：零散任务记录 → 高层经验（原始记录先归档，可回溯）
+                dry = "--dry-run" in cmd_args or "预览" in cmd_args
+                print_info("经验压缩中（会把零散记录按类别总结成高层经验）…", style="accent")
+                from agent.memory import build_distill_llm
+                result = agent.memory.distill_experiences(
+                    build_distill_llm(agent.llm), min_group=3, dry_run=dry)
+                if not result.get("groups"):
+                    print_info(result.get("note") or "无需压缩。", style="dim")
+                    continue
+                head = "（预览，未写盘）" if dry else ""
+                print_info(f"{head}经验压缩: {result['before']} 条 → {result['after']} 条",
+                           style="success")
+                for g in result["groups"]:
+                    c.print(f"[dim]  [{g['category']}] {g['records']} 条 → {g['made']} 条经验[/dim]")
+                    for title in g["titles"]:
+                        c.print(f"[dim]      · {title}[/dim]")
+                if result.get("archived"):
+                    c.print(f"[dim]  原始记录已归档: {result['archived']}[/dim]")
+                if result.get("error"):
+                    print_warning(f"部分未处理: {result['error']}", use_rich=True)
+                continue
             s = agent.memory.summary()
+            stats = agent.memory.experience_stats()
             print_info("记忆总览:", style="primary")
             for label, key in [
                 ("对话历史", "conversation_history"),
@@ -455,7 +478,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             ]:
                 c.print(f"[dim]  {label:<6} {s[key]} 条[/dim]")
             c.print(f"[dim]  完成步骤 {s['completed_steps']} · 失败步骤 {s['failed_steps']}[/dim]")
+            c.print(f"[dim]  经验库详情: 蒸馏条目 {stats['distilled']} · 原始记录 {stats['raw']}"
+                    f" · 过短目标 {stats['short_goals']}[/dim]")
             c.print("[dim]  清理长期记忆: /memory prune 100[/dim]")
+            c.print("[dim]  压缩经验库: /memory distill [--dry-run]（原始记录会先归档）[/dim]")
             continue
         if cmd == "compact":
             # 手动压缩对话历史（旧部分 LLM 总结成摘要）
