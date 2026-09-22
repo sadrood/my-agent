@@ -61,6 +61,21 @@ my_agent 是一个 Python 实现的通用 AI Agent，融合了主流开源 agent
     - 提交信息里写清"本次只含本人改动，他人的 X/Y 仍未提交"。
     这样别人的在制品不会被破坏，也不会被误记到你名下。
 
+    ⚠️ **"具体文件"也要先逐 hunk 看**：同一个文件里常常既有你的改动、又有别人正在写的
+    （配置文件尤其容易：`config.py` / `.env.example` 人人都要加旋钮）。整文件
+    `git add <file>` 一样会把别人的在制品卷进来——本仓库实测犯过两次
+    （`config.py` 的 `loop_stagnation_warn`、`.env.example` 同一项）。做法：
+    ```bash
+    git diff -U0 -- config.py          # 1. 先看清每个 hunk 是谁的（看新增行的内容/标记）
+    git diff -- config.py > full.patch # 2. 导出补丁
+    # 3. 只保留"新增行里含自己标记"的 hunk，生成 mine.patch（脚本过滤，别手改）
+    git apply --cached mine.patch      # 4. 只暂存自己的 hunk
+    git diff --cached --stat           # 5. 复查：暂存区里不应出现别人的关键字
+    ```
+    万一还是混进去了：**不要改写历史**（别的会话可能在用那些 hash 做回滚点），
+    而是"加一次再减一次"把净效果归零——新建一个提交删掉误提交的那几行，再立刻把它们
+    放回**工作区**（不暂存），让归属回到"别人未提交的改动"。
+
 ## 测试
 - 全部测试必须通过后再交付（命令见 `.env` 的 `TEST_COMMAND`）
 - 不依赖网络的测试优先（FakeLLM 脚本化），真机测试用小任务。
