@@ -53,6 +53,12 @@ class TestParseCommand:
         assert parser.parse_args(["--no-supervisor", "任务"]).supervisor is False
         assert parser.parse_args(["--supervisor", "任务"]).supervisor is True
 
+    def test_history_command(self):
+        """查看当前对话历史（用户反馈"重新打开看不到历史"后新增）。"""
+        assert _parse_command("/history") == ("history", "")
+        assert _parse_command("/history 50") == ("history", "50")
+        assert _parse_command("/historyx") == (None, None)
+
     def test_command_args_concatenated_chinese(self):
         # /team任务（无空格，中文连写）——用户实际输入场景
         assert _parse_command("/team你觉得你自身还有什么需要升级的") == (

@@ -169,7 +169,7 @@ def _parse_command(goal: str):
         (命令名, 参数) 或 (None, None)。
         命令名 ∈ {"team", "research", "tools", "sessions", "open", "new"}
     """
-    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "consent", "help"):
+    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "consent", "history", "help"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -184,6 +184,37 @@ def _parse_command(goal: str):
             if not nxt.isascii():
                 return cmd, rest.strip()
     return None, None
+
+
+def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
+                      header: str = "") -> None:
+    """把对话记录打印到终端（打开旧对话/查看历史时用）。
+
+    为什么需要：`--session` / `-r` 恢复旧对话时**只打印一行"已恢复（N 条记录）"**，
+    屏幕上什么都没有——用户的原话是"重新打开之前的对话 cli 看不到历史记录"。
+    恢复上下文却不显示上下文，等于让人猜上次聊到哪。
+
+    截断是**显式**的：超出 limit 条、或单条超 width 字时给出提示与总数，
+    并告诉用户用 /history 看更多（不做静默截断）。
+    """
+    msgs = [m for m in (messages or []) if str(m.get("content", "")).strip()]
+    if not msgs:
+        return
+    shown = msgs[-max(1, limit):]
+    c.print(f"[dim]{header or '—— 对话记录 ——'}[/dim]")
+    for m in shown:
+        who = "你" if m.get("role") == "user" else "小悟"
+        text = str(m.get("content", "")).replace("\r", "")
+        text = " ".join(text.split())            # 压掉换行，保持一行一条
+        if len(text) > width:
+            text = text[:width] + "…"
+        style = "white" if m.get("role") == "user" else "dim"
+        c.print(f"[{style}]  {who}: {text}[/{style}]")
+    if len(msgs) > len(shown):
+        c.print(f"[dim]  …（共 {len(msgs)} 条，这里显示最近 {len(shown)} 条；"
+                f"输入 /history 看更多）[/dim]")
+    else:
+        c.print(f"[dim]  （共 {len(msgs)} 条）[/dim]")
 
 
 def run_interactive(enable_team: bool = False, auto_mode: bool = False,
@@ -242,6 +273,9 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             f"标题: {conv.get('title', '')[:40]}）",
             style="accent",
         )
+        # 关键：把上次的对话显示出来——只报一句"已恢复"用户等于什么都看不到
+        _print_transcript(c, conv.get("messages", []), limit=8, width=150,
+                          header="—— 上次对话（最近几条）——")
     else:
         print_info(
             f"对话 ID: {conv_id}（下次用 --session {conv_id} 或 /open {conv_id} 恢复全部记录）",
@@ -325,9 +359,23 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 f"已打开对话 {conv_id}（{len(target.get('messages', []))} 条记录）",
                 style="accent",
             )
-            for m in target.get("messages", [])[-4:]:
-                who = "你" if m.get("role") == "user" else "小悟"
-                c.print(f"[dim]  {who}: {m.get('content', '')[:80]}[/dim]")
+            _print_transcript(c, target.get("messages", []), limit=10, width=160,
+                              header="—— 该对话的最近记录 ——")
+            continue
+        if cmd == "history":
+            # 查看当前对话的历史（打开旧对话后、或长任务跑完想回看时用）
+            c.print()
+            msgs = agent.memory.get_messages()
+            if not msgs:
+                print_info("当前对话还没有记录。", style="info")
+                continue
+            try:
+                limit = int(cmd_args.strip()) if cmd_args.strip() else 20
+            except ValueError:
+                print_warning("用法: /history [显示条数]（默认 20）", use_rich=True)
+                continue
+            _print_transcript(c, msgs, limit=max(1, limit), width=200,
+                              header=f"—— 当前对话 {conv_id}（共 {len(msgs)} 条）——")
             continue
         if cmd == "new":
             conv_id = generate_conversation_id()
@@ -525,7 +573,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
                 "/sessions           历史对话列表",
-                "/open <对话ID>       打开并恢复历史对话",
+                "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
+                "/history [条数]      查看当前对话的历史记录（默认 20 条）",
                 "/new                新开一个对话",
                 "/model [名@地址]     查看 / 切换模型（绑定当前对话）",
                 "/config             查看当前生效配置",
@@ -541,10 +590,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/new", "/model", "/config", "/image", "/memory", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/image", "/memory", "/help"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
-                f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /help · /tools · /sessions · /open <ID> · /new · exit"
+                f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"
             )
             continue
 
