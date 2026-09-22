@@ -53,6 +53,7 @@ class RunMetrics:
     cached_tokens: int = 0              # 缓存命中的输入 token
     last_context_tokens: int = 0        # 最近一次请求的输入规模（≈上下文窗口水位）
     modified_files: dict = field(default_factory=dict)  # {文件路径: 修改次数}
+    supervisor_rounds: int = 0          # 监管者把任务推回来的次数（0 = 没介入）
 
     # ---- 累加接口 ----
 
@@ -154,6 +155,9 @@ class RunMetrics:
                 for p, n in sorted(self.modified_files.items())
             )
             parts.append(f"修改 {files}")
+        # 监管者介入次数：只在实际推回过时显示（用户要能看见"它被拦了几次"）
+        if getattr(self, "supervisor_rounds", 0):
+            parts.append(f"监管者推回 {self.supervisor_rounds} 次")
         return " · ".join(parts)
 
     def render_status_bar(self, policy: str = "", sandbox_mode: str = "") -> str:

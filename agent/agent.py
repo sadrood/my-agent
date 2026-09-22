@@ -95,6 +95,7 @@ class AgentConfig:
         approver=None,
         agent_name: str = None,       # 用户自定义名字（None=默认人格名「小悟」）
         guardian_enabled: bool = None,
+        supervisor_enabled: bool = None,   # 任务监管者（独立模型复核完成度）；None=读配置
         # ---- v2：指令 / 追踪 / 会话 ----
         instructions_enabled: bool = None,
         rollout_enabled: bool = None,
@@ -150,6 +151,8 @@ class AgentConfig:
             if guardian_enabled is not None
             else GUARDIAN_CONFIG.get("enabled", True)
         )
+        # 任务监管者（独立模型复核完成度）：None = 读 SUPERVISOR_CONFIG
+        self.supervisor_enabled = supervisor_enabled
 
         # AGENTS.md / Rollout / 步骤内操作上限 / 会话
         self.instructions_enabled = (
@@ -498,6 +501,9 @@ class Agent:
         """
         from config import SUPERVISOR_CONFIG
         if not SUPERVISOR_CONFIG.get("enabled", True):
+            return None
+        # 命令行 --no-supervisor 可显式关掉（与 --no-guardian 同款）
+        if getattr(self.config, "supervisor_enabled", None) is False:
             return None
         try:
             from agent.supervisor import Supervisor, build_supervisor_llm

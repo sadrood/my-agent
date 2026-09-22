@@ -254,3 +254,45 @@ class TestAgentWiring:
         a = Agent(config=cfg)
         assert a.supervisor is not None, "默认应启用监管者"
         assert a.executor.supervisor is a.supervisor
+
+    def test_cli_flag_can_disable_it(self):
+        """--no-supervisor：模型说完成就结束，不再复核。"""
+        from agent import Agent, AgentConfig
+        cfg = AgentConfig(verbose=False, guardian_enabled=False, approval_policy="never",
+                          approval_interactive=False, session_name="", enable_vision=False,
+                          supervisor_enabled=False)
+        a = Agent(config=cfg)
+        assert a.supervisor is None and a.executor.supervisor is None
+
+
+class TestVisibility:
+    """用户要能看见它做了什么：统计行里显示推回次数。"""
+
+    def test_metrics_line_shows_interventions(self):
+        from agent.metrics import RunMetrics
+        m = RunMetrics()
+        m.turns, m.steps = 13, 20
+        assert "监管者推回" not in m.render_line(), "没介入就不该显示"
+        m.supervisor_rounds = 2
+        assert "监管者推回 2 次" in m.render_line()
+
+    def test_executor_records_interventions_into_metrics(self):
+        from agent.metrics import RunMetrics
+
+        sup = Supervisor(llm=FakeJudge(_v("continue", "只写了第 1 章", "继续写第 2 章"),
+                                       _v("done", "ok")))
+        llm = FakeLLM([_tool_call(1), _tool_call(2),
+                       LLMToolResponse(content="第 1 章。"),
+                       _tool_call(3), LLMToolResponse(content="第 2 章。")])
+        ex = _make_executor(llm, supervisor=sup)
+        ex.metrics = RunMetrics()
+        ex.execute_goal_loop(goal="写一部两章的小说，每章 300 字以上，写完再交付",
+                             system_prompt="s")
+        assert ex.metrics.supervisor_rounds == 1
+
+    def test_report_line_renders(self):
+        from agent.metrics import RunMetrics
+        m = RunMetrics()
+        m.turns, m.steps, m.supervisor_rounds = 13, 20, 1
+        line = m.render_line()
+        assert "13 轮" in line and "监管者推回 1 次" in line
