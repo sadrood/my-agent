@@ -74,6 +74,7 @@ class TestResolveIsCwdIndependent:
 
 
 class TestConfigPathsAreAnchored:
+    @pytest.mark.real_paths          # 断言看的是真实根目录，跳过 conftest 的存储隔离
     @pytest.mark.parametrize("cfg_name,key", ANCHORED_PATHS)
     def test_path_is_absolute_under_project_root(self, cfg_name, key):
         cfg = getattr(config, cfg_name)
