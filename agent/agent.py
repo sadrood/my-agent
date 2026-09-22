@@ -273,6 +273,8 @@ class Agent:
             enabled=GUARDIAN_CONSENT_CONFIG.get("enabled", True),
         )
         self.consent_ask = self._build_consent_ask()
+        # 任务监管者：独立模型复核"目标做完没有"（默认另一家厂商，避免同源自评）
+        self.supervisor = self._build_supervisor()
 
         self.instructions_text = ""
         if self.config.instructions_enabled:
@@ -297,6 +299,7 @@ class Agent:
             snapshot_dir=SNAPSHOT_CONFIG.get("work_dir") or os.getcwd(),
             consents=self.consents,
             consent_ask=self.consent_ask,
+            supervisor=self.supervisor,
         )
         self.state = AgentState()
         self._mcp_connected = False
@@ -487,6 +490,26 @@ class Agent:
         if g_key == LLM_CONFIG["api_key"] and g_base == LLM_CONFIG["base_url"]:
             return Guardian(llm=self.llm)
         return Guardian(llm=LLM(api_key=g_key, base_url=g_base))
+
+    def _build_supervisor(self):
+        """构建任务监管者（默认另一家模型；端点缺失时回退主 LLM 并记警告）。
+
+        跨厂商是刻意的：同源模型审自己的活容易自我确认（"看着挺完整"）。
+        """
+        from config import SUPERVISOR_CONFIG
+        if not SUPERVISOR_CONFIG.get("enabled", True):
+            return None
+        try:
+            from agent.supervisor import Supervisor, build_supervisor_llm
+            llm = build_supervisor_llm(self.llm)
+            sup = Supervisor(llm=llm)
+            if llm is self.llm and SUPERVISOR_CONFIG.get("model"):
+                # 没配独立端点 → 与执行同一个模型，效果打折，但明确告诉用户
+                sup.config = dict(sup.config)
+                sup.config["same_vendor_warning"] = True
+            return sup
+        except Exception:                       # noqa: BLE001
+            return None
 
     def _build_consent_ask(self):
         """构建"拦截当场问人"的回调；无人值守时返回 None（拦截保持生效）。
