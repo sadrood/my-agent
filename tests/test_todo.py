@@ -76,6 +76,7 @@ def test_emits_todo_event(tmp_path, monkeypatch):
     assert events[0][1]["todos"][0]["title"] == "x"
 
 
+@pytest.mark.real_paths
 def test_todo_dir_is_anchored_to_project_root():
     """清单目录必须是绝对路径。
 

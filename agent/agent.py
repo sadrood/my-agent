@@ -278,6 +278,8 @@ class Agent:
         self.consent_ask = self._build_consent_ask()
         # 任务监管者：独立模型复核"目标做完没有"（默认另一家厂商，避免同源自评）
         self.supervisor = self._build_supervisor()
+        # 小快模型（杂活专用：会话标题等）——学 Claude Code 把跑腿活从主模型挪走
+        self.small_model = self._build_small_model()
 
         self.instructions_text = ""
         if self.config.instructions_enabled:
@@ -493,6 +495,22 @@ class Agent:
         if g_key == LLM_CONFIG["api_key"] and g_base == LLM_CONFIG["base_url"]:
             return Guardian(llm=self.llm)
         return Guardian(llm=LLM(api_key=g_key, base_url=g_base))
+
+    def _build_small_model(self):
+        """构建小快模型（杂活专用：会话标题等）。禁用或失败时返回 None。
+
+        为什么单独一个：这类活（起标题/写摘要）不需要主模型的智商，却会花掉它的
+        时间与上下文预算。Claude Code 就是这么干的（后台小模型跑杂活）。
+        """
+        from config import SMALL_MODEL_CONFIG
+        if not SMALL_MODEL_CONFIG.get("enabled", True):
+            return None
+        try:
+            from agent.small_model import SmallModel, build_small_llm
+            llm = build_small_llm(self.llm)
+            return SmallModel(llm=llm)
+        except Exception:                       # noqa: BLE001
+            return None
 
     def _build_supervisor(self):
         """构建任务监管者（默认另一家模型；端点缺失时回退主 LLM 并记警告）。
@@ -1214,6 +1232,8 @@ class Agent:
                 last_summary=self.last_execution_summary,
                 model=self.llm.default_model,
                 base_url=str(self.llm.client.base_url),
+                # 会话标题交给小快模型（杂活不占用主模型）；失败自动退回规则标题
+                title_fn=self.small_model.title_for if getattr(self, "small_model", None) else None,
             )
             print_evolution(f"对话已保存: {name}（{len(messages)} 条记录）", use_rich=self.config.verbose)
             # 体积告警：会话是**每轮整份重写**的（O(n²) 落盘），且这是对话的唯一

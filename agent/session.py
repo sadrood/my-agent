@@ -96,6 +96,7 @@ class SessionStore:
         last_summary: str = "",
         model: str = "",
         base_url: str = "",
+        title_fn=None,
     ) -> str:
         """
         保存对话（全量记录，不截断），并绑定当时使用的模型。
@@ -106,6 +107,10 @@ class SessionStore:
             title: 标题；为空时沿用已有标题，否则取第一条用户消息作为标题
             last_summary: 最后一轮执行摘要
             model / base_url: 该对话绑定的模型（恢复对话时自动切回）
+            title_fn: 可选的标题生成器 messages -> str（用小快模型起个短标题，
+                像 Claude Code 那样把这类杂活从主模型挪走）。返回空串/抛异常时
+                **自动退回**"第一条用户消息截断"的规则实现；标题一经生成就固定，
+                不会每轮重算。
 
         Returns:
             保存的文件路径
@@ -117,8 +122,17 @@ class SessionStore:
         if not title:
             title = (existing or {}).get("title", "")
         if not title and messages:
-            first_user = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
-            title = (first_user or "").strip()[:60] or "新对话"
+            generated = ""
+            if title_fn is not None:
+                try:
+                    generated = str(title_fn(messages) or "").strip()
+                except Exception:               # noqa: BLE001
+                    generated = ""              # 小模型坏了不能挡住保存
+            if generated:
+                title = generated
+            else:
+                first_user = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+                title = (first_user or "").strip()[:60] or "新对话"
 
         payload = {
             "id": conv_id,

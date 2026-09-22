@@ -28,6 +28,67 @@ def _allow_testclient_host(monkeypatch):
     monkeypatch.setenv("DASHBOARD_ALLOWED_HOSTS", "testserver")
 
 
+def pytest_configure(config):
+    """注册自定义标记。"""
+    config.addinivalue_line(
+        "markers",
+        "real_paths: 该用例专门验证**真实路径锚定**（需要默认存储目录保持原样），"
+        "跳过 _isolate_storage_dirs 的重定向",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_storage_dirs(request, monkeypatch, tmp_path):
+    """把默认存储目录整体重定向到临时目录——测试**绝不能**写真实数据。
+
+    实测出过两次事故：一次是会话测试裸用 `SessionStore()`（默认目录 = 真实
+    memory/sessions），写进 5 个垃圾会话；另一次是冒烟脚本覆盖了
+    memory/tasks.json。数据目录必须由 fixture 统一兜住，而不是指望每个测试
+    自己记得传 tmp_path。
+
+    做法：改 `SESSION_CONFIG["dir"]`（SessionStore 默认就读它）而不是设 `SESSION_DIR`
+    环境变量——环境变量会被**子进程**继承，而 `test_path_anchoring` 里有一个用例
+    专门起子进程验证"漂移启动也锚定项目根"，被继承了就测不到了。
+    Memory 的默认根是模块级 PROJECT_ROOT，把它指到 tmp 即可（个别测试自己再
+    patch 会覆盖本 fixture，互不影响）。
+
+    验证"默认路径确实锚定项目根"的用例要加 `@pytest.mark.real_paths`
+    ——那类断言看的就是真实根目录，被重定向反而测不到东西。
+    """
+    if request.node.get_closest_marker("real_paths"):
+        yield
+        return
+    root = tmp_path / "store"
+
+    try:
+        from config import SESSION_CONFIG
+        monkeypatch.setitem(SESSION_CONFIG, "dir", str(root / "sessions"))
+    except Exception:
+        pass
+
+    try:
+        import agent.memory as _mem
+        monkeypatch.setattr(_mem, "PROJECT_ROOT", str(root))
+    except Exception:
+        pass
+
+    try:
+        import agent.tasks as _tasks
+        monkeypatch.setattr(_tasks, "_MEM_DIR", str(root / "memory"))
+        monkeypatch.setattr(_tasks, "_TASKS_FILE", str(root / "memory" / "tasks.json"))
+        monkeypatch.setattr(_tasks, "_THOUGHTS_FILE", str(root / "memory" / "thoughts.json"))
+    except Exception:
+        pass
+
+    try:
+        import tools.todo as _todo
+        monkeypatch.setattr(_todo, "_TODO_DIR", str(root / "memory" / "todos"))
+    except Exception:
+        pass
+
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _isolate_heavy_runtime_switches(monkeypatch):
     """默认关闭会触发真实副作用的运行时开关（测试可自行覆盖）。"""
