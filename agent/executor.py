@@ -93,6 +93,7 @@ class Executor:
         snapshot_dir: str = "",               # 检查点的 git 工作目录
         consents=None,                        # ConsentStore：人工放行（Guardian 授权）
         consent_ask=None,                     # 拦截当场问人的回调（仅交互式会话注入）
+        supervisor=None,                      # Supervisor：独立复核完成度并给下一步指令
     ):
         self.tool_manager = tool_manager or ToolManager()
         self.llm = llm or LLM()
@@ -107,6 +108,9 @@ class Executor:
         # （无人值守时为 None → 拦截仍然是拦截，不会因为"没人可问"就放行）
         self.consents = consents
         self.consent_ask = consent_ask
+        # 任务监管者（独立模型复核完成度）：None = 不启用
+        self.supervisor = supervisor
+        self._supervisor_rounds = 0
         self.rollout = rollout                   # Rollout | None
         self._event_sink = None                  # execute_goal_loop 期间的事件回调（→ dashboard）
         self.instructions_text = instructions_text
@@ -503,6 +507,20 @@ class Executor:
                 pending = TurnOutcome()
             if not budget.allow_next():
                 break
+            # 连续无进展预警（无限模式下"换新做法但失败"的轮次不会触发任何停止条件，
+            # 只有这个计数器能告诉用户"它已经很久没有产出了"）。每阈值只响一次。
+            if budget.stagnation_alarm():
+                alarm_data = {
+                    "turn": turn + 1,
+                    "stagnation_turns": budget.stagnation_turns,
+                    "hard_cap": budget.hard_cap,
+                }
+                self._emit("stagnation_warning", alarm_data)
+                if self._event_sink is not None:
+                    try:
+                        self._event_sink("stagnation_warning", alarm_data)
+                    except Exception:
+                        pass
             # 停止检查点：每轮开始前，用户点"停止"后优雅退出
             if stop_event is not None and stop_event.is_set():
                 try:
@@ -728,6 +746,25 @@ class Executor:
                             ),
                         })
                         continue
+                # 监管者复核：模型想收尾时，由**独立模型**对照原始目标审"到底做完没有"，
+                # 没做完就把它给的下一步指令发回循环继续做。
+                # 与上面的清单闸门互补：闸门依赖 agent 自己列清单（实测它根本不列，
+                # todo_write 调用数长期为 0），监管者不依赖它，直接看目标与交付。
+                if final:
+                    sup_data = self._supervisor_check(goal, final, tool_calls_log, turn)
+                    if sup_data:
+                        messages.append({"role": "assistant", "content": final})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "【监管者复核】任务还没完成：%s\n\n"
+                                "下一步请立刻执行（这一轮不要停下来问我，"
+                                "把这件事做完再给最终答案）：\n%s"
+                                % (sup_data["reason"] or "仍有未完成部分",
+                                   sup_data["instruction"])
+                            ),
+                        })
+                        continue
                 # 成功 = 有最终回答 且 没有未补救的失败
                 # （空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
                 success = bool(final) and last_success_idx >= last_failure_idx
@@ -738,6 +775,7 @@ class Executor:
                     "tool_calls": tool_calls_log,
                     "errors": errors,
                     "ops": turn + 1,
+                    "budget": budget.summary(),
                 }
             consecutive_empty = 0
 
@@ -913,6 +951,84 @@ class Executor:
             "ops": budget.used,
             "budget": budget.summary(),
         }
+
+    def _supervisor_check(self, goal: str, final: str, tool_calls_log: list,
+                          turn: int) -> Optional[dict]:
+        """让独立监管者审一次完成度；需要继续时返回 {"reason","instruction"}，否则 None。
+
+        什么时候**不惊动**监管者（省一次模型调用）：
+          · 没启用 / 没有监管者实例；
+          · 还没干什么活就收尾（turn 少于 min_turns，简单问答没必要审）。
+        监管者异常一律放行（fail-open）：坏掉的裁判不能把任务卡死。
+        """
+        if self.supervisor is None:
+            return None
+        try:
+            cfg = self.supervisor.config
+            if not self.supervisor.enabled:
+                return None
+            if int(cfg.get("min_turns", 1)) > turn:
+                return None
+            # 一句话问答（"3+4 等于几"）不值得多花一次调用；真任务一律复核。
+            # （注意判据是**目标长度 + 轮次**，不是"用没用工具"——纯文字交付的长任务
+            #   同样可能只做了一半，那正是最该复核的情况。）
+            if len(str(goal or "").strip()) < int(cfg.get("min_goal_chars", 12)):
+                return None
+            max_rounds = int(cfg.get("max_rounds", 3))
+            if self._supervisor_rounds >= max_rounds:
+                return None
+        except Exception:                       # noqa: BLE001
+            return None
+
+        evidence = self._supervisor_evidence(tool_calls_log)
+        checklist = ""
+        try:
+            pending = self._unfinished_items("", set())
+            checklist = "；".join(pending[:5]) if pending else ""
+        except Exception:                       # noqa: BLE001
+            checklist = ""
+        try:
+            verdict = self.supervisor.review(goal, final, evidence, checklist)
+        except Exception as e:                  # noqa: BLE001
+            self._emit("supervisor", {"verdict": "done", "error": str(e)[:150]})
+            return None
+
+        data = {"turn": turn + 1, "verdict": verdict.verdict,
+                "reason": verdict.reason, "attempt": self._supervisor_rounds + 1,
+                "used": verdict.used, "error": verdict.error}
+        self._emit_visible("supervisor", data)
+        if verdict.verdict != "continue" or not verdict.next_instruction:
+            return None
+        self._supervisor_rounds += 1
+        return {"reason": verdict.reason or "", "instruction": verdict.next_instruction}
+
+    @staticmethod
+    def _supervisor_evidence(tool_calls_log: list) -> str:
+        """给监管者的**事实**（不是模型自述）：用了哪些工具、改了哪些文件、失败几次。"""
+        try:
+            names: dict = {}
+            files, failures = [], 0
+            for call in tool_calls_log or []:
+                name = call.get("name") or "?"
+                names[name] = names.get(name, 0) + 1
+                if call.get("blocked_reason"):
+                    failures += 1
+                elif call.get("success") is False:
+                    failures += 1
+                for key in ("file", "path"):
+                    val = (call.get("arguments") or {}).get(key)
+                    if val and val not in files:
+                        files.append(str(val))
+            usage = "、".join(f"{k}×{v}" for k, v in
+                             sorted(names.items(), key=lambda kv: -kv[1])[:12]) or "无"
+            lines = [f"工具调用：{usage}"]
+            if files:
+                lines.append("涉及文件：" + "、".join(files[:10]))
+            if failures:
+                lines.append(f"其中失败的调用：{failures} 次")
+            return "\n".join(lines)
+        except Exception:                       # noqa: BLE001
+            return ""
 
     @staticmethod
     def _pending_tasks(since: str = "") -> list:

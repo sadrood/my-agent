@@ -563,6 +563,35 @@ GUARDIAN_CONSENT_CONFIG = {
 }
 
 # ============================================================
+# 任务监管者（Supervisor）配置
+# ============================================================
+# 用户痛点："我让他写小说，它每写一章就来问我一次，不应该是写完所有的然后交接
+# 任务结果吗"。实测原因：单循环唯一的停止条件是"模型给出最终回答"，而唯一能拦住
+# 提前收尾的完成度闸门依赖 agent 自己的清单——实测最近 8 次运行 todo_write 调用数
+# 全是 0，闸门从未触发；也没有任何角色对照**目标**审"到底做完没有"。
+#
+# 监管者 = 一个独立模型，在 agent 想收尾时审完成度；没做完就发回**下一步指令**。
+# 默认用另一家（Agnes）而不是执行任务的模型（商汤）：同源自评容易自我确认。
+SUPERVISOR_CONFIG = {
+    "enabled": os.getenv("SUPERVISOR_ENABLED", "true").lower() == "true",
+    # 最多把任务推回去几次（有界，避免与模型无限拉锯）
+    "max_rounds": int(os.getenv("SUPERVISOR_MAX_ROUNDS", "3")),
+    # 监管者模型端点；留空 model 或 key/base 缺失时回退主 LLM（并记警告）
+    "model": os.getenv("SUPERVISOR_MODEL", "") or os.getenv("GUARDIAN_MODEL", "") or "agnes-3.0-flash",
+    "base_url": (os.getenv("SUPERVISOR_BASE_URL", "")
+                 or os.getenv("GUARDIAN_BASE_URL", "")),
+    "api_key": (os.getenv("SUPERVISOR_API_KEY", "")
+                or os.getenv("GUARDIAN_API_KEY", "")),
+    "timeout": float(os.getenv("SUPERVISOR_TIMEOUT", "30")),
+    # 监管者异常/超时时是否放行（判完成）。默认 true：坏掉的裁判不该把任务卡死。
+    "fail_open": os.getenv("SUPERVISOR_FAIL_OPEN", "true").lower() == "true",
+    # 低于该轮数就收尾时**不惊动监管者**（简单任务没必要多花一次调用）
+    "min_turns": int(os.getenv("SUPERVISOR_MIN_TURNS", "1")),
+    # 目标短于这么多字视为闲聊问答，不审（真任务一律复核）
+    "min_goal_chars": int(os.getenv("SUPERVISOR_MIN_GOAL_CHARS", "12")),
+}
+
+# ============================================================
 # 本地 OCR 配置（截图取字，不依赖视觉大模型）
 # ============================================================
 # 用户痛点："agent 缺少截图识别文字的能力，总是依赖视觉模型，视觉模型无响应就废了。"
