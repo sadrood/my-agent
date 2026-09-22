@@ -41,6 +41,7 @@ def build_config(args) -> AgentConfig:
         sandbox_mode=args.sandbox,
         approval_interactive=True,   # 终端交互模式下允许人工确认
         guardian_enabled=args.guardian,
+        supervisor_enabled=args.supervisor,
         rollout_enabled=not args.no_rollout,
         max_step_ops=args.max_step_ops,
         session_name=args.session or "",
@@ -373,7 +374,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 print_warning(f"切换失败: {str(e)[:120]}", use_rich=True)
             continue
         if cmd == "config":
-            from config import LLM_CONFIG, APPROVAL_CONFIG, GUARDIAN_CONFIG, VISION_CONFIG
+            from config import (LLM_CONFIG, APPROVAL_CONFIG, GUARDIAN_CONFIG, VISION_CONFIG,
+                                SUPERVISOR_CONFIG)
             key = (agent.llm.client.api_key or "")[:6]
             masked = f"{key}…" if key else "（未设置）"
             print_info("当前生效配置:", style="primary")
@@ -382,6 +384,12 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print(f"[dim]  视觉      {VISION_CONFIG.get('vision_model') or LLM_CONFIG.get('default_model')} @ {VISION_CONFIG.get('base_url')}[/dim]")
             c.print(f"[dim]  Guardian  {'开' if GUARDIAN_CONFIG.get('enabled') else '关'}"
                     f"{' · ' + (GUARDIAN_CONFIG.get('model') or '') if GUARDIAN_CONFIG.get('model') else ''}[/dim]")
+            _sup = getattr(agent, "supervisor", None)
+            if _sup is not None and _sup.enabled:
+                c.print(f"[dim]  监管者    开 · {SUPERVISOR_CONFIG.get('model') or '主模型'}"
+                        f"（最多推回 {SUPERVISOR_CONFIG.get('max_rounds')} 次）[/dim]")
+            else:
+                c.print("[dim]  监管者    关（模型说完成即结束；--supervisor 可开）[/dim]")
             c.print(f"[dim]  审批/沙箱 {APPROVAL_CONFIG.get('approval_policy')} / {APPROVAL_CONFIG.get('sandbox_mode')}[/dim]")
             c.print(f"[dim]  对话 ID   {conv_id}[/dim]")
             c.print("[dim]  临时覆盖方式: --model/--base-url/--api-key 参数，或 /model 命令[/dim]")
@@ -648,6 +656,10 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None, help="启用 Guardian 安全审校")
     parser.add_argument("--no-guardian", dest="guardian", action="store_false",
                         help="关闭 Guardian 安全审校")
+    parser.add_argument("--supervisor", dest="supervisor", action="store_true",
+                        default=None, help="启用任务监管者（独立模型复核「做完没有」）")
+    parser.add_argument("--no-supervisor", dest="supervisor", action="store_false",
+                        help="关闭任务监管者（模型说完成就结束，不再复核）")
     parser.add_argument("--no-rollout", action="store_true", help="关闭 Rollout 事件追踪")
     parser.add_argument("--max-step-ops", type=int, default=None,
                         help="计划模式下单步骤内最大工具操作数（默认 12）")

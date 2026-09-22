@@ -1000,6 +1000,8 @@ class Executor:
         if verdict.verdict != "continue" or not verdict.next_instruction:
             return None
         self._supervisor_rounds += 1
+        if self.metrics is not None:
+            self.metrics.supervisor_rounds = self._supervisor_rounds
         return {"reason": verdict.reason or "", "instruction": verdict.next_instruction}
 
     @staticmethod

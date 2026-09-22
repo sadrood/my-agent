@@ -46,6 +46,13 @@ class TestParseCommand:
         assert _parse_command("/consent") == ("consent", "")
         assert _parse_command("/consent list") == ("consent", "list")
 
+    def test_supervisor_flags(self):
+        """监管者开关：默认 None（读配置=开），可显式开/关。"""
+        parser = build_parser()
+        assert parser.parse_args(["任务"]).supervisor is None
+        assert parser.parse_args(["--no-supervisor", "任务"]).supervisor is False
+        assert parser.parse_args(["--supervisor", "任务"]).supervisor is True
+
     def test_command_args_concatenated_chinese(self):
         # /team任务（无空格，中文连写）——用户实际输入场景
         assert _parse_command("/team你觉得你自身还有什么需要升级的") == (
