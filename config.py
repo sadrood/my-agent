@@ -733,10 +733,6 @@ TOOL_CONFIG = {
     "loop_base_turns": int(os.getenv("LOOP_BASE_TURNS", "30")),          # 起步轮数
     "loop_extend_per_progress": int(os.getenv("LOOP_EXTEND_PER_PROGRESS", "10")),
     "loop_stall_limit": int(os.getenv("LOOP_STALL_LIMIT", "5")),         # 连续无进展即停
-    # "连续无进展"预警阈值（LOOP_HARD_CAP=0 的无限模式下，只有原样重复/空回复会停；
-    #  "换了新做法但失败"的轮次永远到不了上限——达到该阈值时向前端发一次提示。
-    #  0 = 关闭。只预警不自动停：无限模式的语义是"让 agent 做完任务再结束"。）
-    "loop_stagnation_warn": int(os.getenv("LOOP_STAGNATION_WARN", "10")),
     # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。
     # 留空则回退到 max_loop_ops（即升级前的行为）。
     "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))
