@@ -30,10 +30,17 @@ class SlowTool(BaseTool):
     min_sandbox_mode = "workspace-write"
     parallel_safe = True
 
-    def __init__(self, hold: float = 0.4):
+    def __init__(self, hold: float = 0.4, rendezvous: int = 0,
+                 rendezvous_timeout: float = 15.0):
         self.hold = hold
+        #: >0 时：等到这么多兄弟**同时在飞**才继续（见 execute_json）
+        self.rendezvous = rendezvous
+        self.rendezvous_timeout = rendezvous_timeout
         self.live = 0
         self.peak = 0
+        #: [(线程名, 进入时刻, 进入后在飞数)] —— 断言失败时打出来，便于判断是
+        #: "第 N 个线程来得太晚"还是"根本没被派发"，不用再靠猜
+        self.entries = []
         self.lock = threading.Lock()
 
     def execute(self, input_str):
@@ -43,9 +50,24 @@ class SlowTool(BaseTool):
         with self.lock:
             self.live += 1
             self.peak = max(self.peak, self.live)
-        time.sleep(self.hold)
-        with self.lock:
-            self.live -= 1
+            self.entries.append((threading.current_thread().name, time.time(), self.live))
+        try:
+            # "并发真的跑起来了"不能靠 sleep 撞运气：机器有负载时第 N 个线程可能还没起，
+            # 前 N-1 个就已经结束 → peak 少 1（实测在全量测试里抖过两次，独立跑则 8/8 通过）。
+            # 这里让每个调用**等**到凑够 rendezvous 个同时在飞再往下走；上限真的更小的话，
+            # 等待会在 deadline 后超时退出，peak 仍达不到目标值，断言照样能抓出来
+            # （已用"把上限压到 3"负向验证过：peak=3 → 断言失败）。
+            if self.rendezvous:
+                deadline = time.time() + self.rendezvous_timeout
+                while time.time() < deadline:
+                    with self.lock:
+                        if self.live >= self.rendezvous:
+                            break
+                    time.sleep(0.005)
+            time.sleep(self.hold)
+        finally:
+            with self.lock:
+                self.live -= 1
         return ToolResult(success=True, output="ok")
 
     def is_parallel_safe(self, arguments):
@@ -91,13 +113,14 @@ class TestParallelCap:
     def test_runs_parallel_when_under_cap(self, monkeypatch):
         from config import TOOL_CONFIG
         monkeypatch.setitem(TOOL_CONFIG, "max_parallel_tools", 4)
-        tool = SlowTool(hold=0.3)
+        # rendezvous=4：每个调用等到 4 个同时在飞才继续，去掉"谁先起谁先跑完"的时序运气
+        tool = SlowTool(hold=0.05, rendezvous=4)
         ex = make_executor(monkeypatch, tool)
 
         from models.llm import ToolCall
         tcs = [ToolCall(str(i), "slowtool", {}) for i in range(4)]
         ex._run_tool_calls_parallel(tcs, "目标")
-        assert tool.peak == 4, f"未并发执行: peak={tool.peak}"
+        assert tool.peak == 4, f"未并发执行: peak={tool.peak}; 进入时间线={tool.entries}"
 
 
 class TestSiblingResetProtection:
