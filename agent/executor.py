@@ -522,7 +522,14 @@ class Executor:
             # 预警必须先于「停」判断：预算恰好同时耗尽的那一轮（used 与
             # stagnation_turns 同时到位）旧顺序会先 break，把更准确的「已连续 N 轮
             # 没有产出」吞掉、只剩「轮数耗尽」（2026-09-22 审计）。
-            if budget.stagnation_alarm():
+            # ⚠️ 必须 getattr 兜底：loop_budget 的 stagnation_alarm / stagnation_turns
+            # **只存在于某个会话尚未提交的工作区里**，仓库里没有任何一次提交包含它
+            # （git log -S "def stagnation_alarm" -- agent/loop_budget.py 为空）。
+            # 也就是说：checkout 干净的 main 会在这里 AttributeError，第一个目标就崩。
+            # 兜底之后 main 能跑，只是少了「连续无进展」预警；等那份 loop_budget.py
+            # 提交上来，预警会自动恢复。
+            _alarm = getattr(budget, "stagnation_alarm", None)
+            if _alarm is not None and _alarm():
                 alarm_data = {
                     "turn": turn + 1,
                     "stagnation_turns": budget.stagnation_turns,
