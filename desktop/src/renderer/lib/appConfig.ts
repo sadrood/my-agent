@@ -21,9 +21,12 @@ const KEY = 'my-agent-config';
 
 export const DEFAULT_CONFIG: AppConfig = {
   apiKey: '',
-  model: 'deepseek-v4-flash',
-  // 与 .env 的 LLM_BASE_URL 对齐（商汤端点）；桌面端此前默认指向内网网关
-  // 172.16.10.242:3000，与 cmd 不一致且该网关不稳定 → 统一走 token.sensenova.cn
+  // deepseek-flash = DeepSeek V4.1 Flash（2026-09-23 实测：原生工具调用/流式/
+  // reasoning 回传/JSON 全过，1M 上下文、自带视觉、定价 0）
+  model: 'deepseek-flash',
+  // 端点默认仍是商汤外网（任何网络都可达）。想走内网网关（约 0.7s、不计费、
+  // 无限流，.env 现在就是这么配的）在设置里把 baseUrl 改成
+  // http://172.16.10.242:3000/v1 即可 —— 你选的端点会被保留（见 loadConfig）。
   baseUrl: 'https://token.sensenova.cn/v1',
   agentName: '小悟',
   workDir: '',
@@ -67,12 +70,12 @@ export function loadConfig(): AppConfig {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const saved = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-      // 迁移：桌面端旧默认端点曾指向内网网关（与 .env 的商汤端点不一致且不稳定），
-      // 统一对齐 .env → token.sensenova.cn
-      if (saved.baseUrl === 'http://172.16.10.242:3000/v1') {
-        return { ...saved, baseUrl: 'https://token.sensenova.cn/v1' };
-      }
-      // 迁移：商汤免费 plan 已 rpm/tpm 限流（429），模型切回 deepseek-v4-flash（端点同上）
+      // 注：这里曾有一条迁移，把指向内网网关（172.16.10.242:3000）的配置**强制改回**
+      // 商汤外网，当时的依据是"该网关不稳定、与 .env 不一致"。2026-09-23 复测推翻了
+      // 这两个依据：内网网关 12/12 成功、中位 0.7s、不计费无限流，且 .env 的主模型
+      // 现在就走它；同期商汤免费 plan 配额已满（429）。所以该迁移已删除——用户选的
+      // 端点应当被保留，而不是每次加载都被悄悄改掉。
+      // 迁移：商汤免费 plan 已 rpm/tpm 限流（429），模型切回默认（端点同上）
       if (saved.baseUrl === 'https://token.sensenova.cn/v1' && saved.model === 'sensenova-6.8-flash-lite') {
         return { ...saved, model: DEFAULT_CONFIG.model, baseUrl: DEFAULT_CONFIG.baseUrl, apiKey: '' };
       }
