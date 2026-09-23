@@ -412,7 +412,7 @@ OCR_PREFER_FOR_TEXT=true         # 要文字时直接用 OCR，不先问视觉�
 
 | 用途 | 可用的模型 | 备注 |
 |---|---|---|
-| 视觉（能读图） | `sensenova-6.8-flash-lite` | 实测答对了测试图里的暗号；`sensenova-6.7-flash-lite` 对多模态返回 404 |
+| 视觉（能读图） | `deepseek-flash`（= DeepSeek V4.1 Flash）、`sensenova-6.8-flash-lite` | 用答案已知的图实测：单图 3/3、多图（视频抽帧时序）4/4。**注意 `deepseek-flash` 的 `input_modalities` 只写 `["text"]`，实测却完全能读图**——元数据不可尽信，判断能不能读图要拿图打一次（见 三·十四）；`gpt-5.6-terra` 也能读图但中文 OCR 会幻觉（"橙子七号"→"魔法导览"）；`sensenova-6.7-flash-lite` 对多模态返回 404 |
 | 生图 | `sensenova-u1.5-lite`、`sensenova-u1.5-fast`、`sensenova-u1-fast` | `/images/generations` 均可用，返回 b64_json |
 | 纯文本 | `deepseek-v4-pro`、`glm-5.2`、`kimi-k3` 等 | 见下方"列出可用模型" |
 
@@ -422,10 +422,10 @@ python -c "import json,urllib.request;from config import LLM_CONFIG as c;req=url
 ```
 
 ```cmd
-# ---- 视觉备用（默认：Agnes 主 → 商汤备）
+# ---- 视觉备用（主 = VISION_MODEL/主视觉端点，备用默认指向商汤）
 VISION_FALLBACK_MODELS=sensenova-6.8-flash-lite
 VISION_FALLBACK_BASE_URL=https://token.sensenova.cn/v1
-VISION_FALLBACK_API_KEY=            # 留空 = 用主 LLM(商汤) 的 key
+VISION_FALLBACK_API_KEY=            # 留空 = 用主 LLM(商汤) 的 key；别填别家的 key
 VISION_FALLBACK_TIMEOUT=60
 
 # ---- 生图备用（默认：Agnes 主 → 商汤备）
@@ -439,6 +439,30 @@ IMAGE_GEN_FALLBACK_TIMEOUT=180
 - 换了备用时，工具输出会**明确标注**（"本次由**备用模型** X 应答"），生图产物也标实际
   出图的模型——不会把备用的功劳记在主模型头上；
 - 视觉还叠了一层**本地 OCR** 兜底（见上一节）：模型链全挂时，至少把字读出来。
+
+## 三·十四、看图 / 看视频（`see` 工具）
+
+`see` 既能看浏览器页面，也能看**本地文件**——直接说"看看 output/x.mp4 讲了什么"即可：
+
+```
+see question="图里报什么错"          # 不给 path：截当前浏览器页面分析
+see path="output/frame.png"          # 本地图片
+see path="D:/clips/demo.mp4"         # 本地视频
+```
+
+- **图片**：原图直接交给视觉模型；只要"文字"时先走本地 OCR（离线、免费、不超时）。
+- **视频**：上游**没有任何模型声明 video 输入模态**（商汤 `GET /models` 只有 `text`
+  与 `text,image`），所以视频是**等间隔抽帧 → 多图一次请求**：帧必须放在同一个请求里，
+  模型才能比较帧间变化（分多次问只能拿到各帧的孤立描述）。抽出的临时帧用完即删。
+  - 帧数默认 6、上限 16：越长/变化越快的片子要越多帧，也越费 token；
+  - **快速切换的画面可能被漏掉**（1 秒内闪过的内容，建议先自己抽关键帧再看图）；
+  - 需要 ffmpeg 抽帧（`static_ffmpeg` 自带二进制即可，不要求 PATH 里有）。
+
+```cmd
+# 换视觉模型/换端点后，先确认它到底能不能读图（`input_modalities` 会骗人，实测才算）
+python tools/local/vision_probe.py                    # 测 .env 里的主/备视觉模型
+python tools/local/vision_probe.py deepseek-flash --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
+```
 
 ## 三·十五、任务监管者（做完再交付，别每章来问一次）
 
