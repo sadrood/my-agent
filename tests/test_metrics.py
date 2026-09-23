@@ -1,7 +1,10 @@
 """
 运行时统计（状态行）测试。
 """
-from agent.metrics import RunMetrics, humanize_seconds, humanize_tokens
+import pytest
+
+from agent.metrics import (RunMetrics, humanize_duration_cn,
+                           humanize_seconds, humanize_tokens)
 
 
 class TestHumanize:
@@ -80,3 +83,49 @@ class TestRunMetrics:
         assert "修改 " in line
         assert "tools/file.py" in line
         assert "config.py ×2" in line   # 排序后 config.py 在前
+
+
+class TestWallClockElapsed:
+    """「这次一共跑了多久」——用户感知的是墙钟，不是分项之和。
+
+    背景（2026-09-23）：统计行原先只有 `LLM 42.3s · 工具 0.8s` 这类**分项之和**，
+    没有总时间。而分项与墙钟的**差额**才是信息量所在：那部分是"看不见的等待"
+    （限流退避 / 等人工审批 / 快照 git 操作 / 压缩 / 浏览器启动 / MCP 连接）。
+    实测一次简单任务：工具 2.0s，但墙钟 5s。
+    """
+
+    def test_elapsed_is_wall_clock(self):
+        m = RunMetrics()
+        m.started -= 183
+        assert 182 <= m.elapsed <= 185, f"elapsed={m.elapsed}"
+
+    def test_elapsed_zero_when_not_started(self):
+        """没记录起点时给 0，不能算成"从 epoch 到现在"。"""
+        m = RunMetrics()
+        m.started = 0
+        assert m.elapsed == 0.0
+
+    def test_elapsed_covers_more_than_parts(self):
+        """墙钟 >= LLM+工具之和（分项有并行时会互相重叠，所以只断言不矛盾）。"""
+        m = RunMetrics()
+        m.started -= 10
+        m.add_llm_call(elapsed=3.0)
+        m.tool_seconds = 2.0
+        assert m.elapsed >= 9
+
+
+class TestHumanizeDurationCn:
+    """中文时长格式：3分03秒（秒补零），不是 3m3s。"""
+
+    @pytest.mark.parametrize("seconds,expected", [
+        (0, "0秒"), (3, "3秒"), (12, "12秒"), (59, "59秒"),
+        (60, "1分00秒"), (63, "1分03秒"), (183, "3分03秒"), (599, "9分59秒"),
+        (3600, "1时00分00秒"), (3661, "1时01分01秒"),
+        (-5, "0秒"), (None, "0秒"),          # 异常输入不炸
+    ])
+    def test_format(self, seconds, expected):
+        assert humanize_duration_cn(seconds) == expected
+
+    def test_truncates_instead_of_rounding_up(self):
+        """3分59.8秒 不该显示成 4分00秒（会让人以为多跑了一分钟）。"""
+        assert humanize_duration_cn(239.8) == "3分59秒"
