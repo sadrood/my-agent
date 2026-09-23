@@ -60,9 +60,9 @@ const PROVIDERS = [
   {
     id: 'sensenova',
     name: '商汤 SenseNova',
-    desc: '免费 Token Plan（当前 .env 默认）',
+    desc: 'Token Plan（deepseek-flash 定价 0；免费档有 rpm/tpm 限流）',
     baseUrl: 'https://token.sensenova.cn/v1',
-    models: 'deepseek-v4-flash · sensenova-u1.5-lite（文生图）',
+    models: 'deepseek-flash（= V4.1 Flash）· sensenova-u1.5-lite（文生图）',
     site: 'https://token.sensenova.cn',
   },
   {

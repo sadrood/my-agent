@@ -6,6 +6,8 @@
  */
 export const MODEL_WINDOWS: Record<string, number> = {
   // DeepSeek（1M 上下文）
+  // deepseek-flash = DeepSeek V4.1 Flash：端点 /models 实测 context_length=1048576
+  'deepseek-flash': 1_048_576,
   'deepseek-v4-flash': 1_000_000,
   'deepseek-v4-pro': 1_000_000,
   // Moonshot / Kimi
@@ -41,15 +43,17 @@ export const MODEL_WINDOWS: Record<string, number> = {
 
 /** 供应商 preset id → catalog 模型 id 列表（设置页模型下拉建议） */
 export const PROVIDER_MODEL_SUGGESTIONS: Record<string, string[]> = {
-  deepseek: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
+  deepseek: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
   moonshot: ['kimi-k3', 'kimi-k2.6', 'kimi-k2-0905-preview', 'moonshot-v1-32k', 'moonshot-v1-128k'],
   zhipu: ['glm-5.3', 'glm-4.7', 'glm-4.5', 'glm-4.5-air'],
-  sensenova: ['deepseek-v4-flash', 'sensenova-u1.5-lite'],
+  sensenova: ['deepseek-flash', 'deepseek-v4-flash', 'sensenova-u1.5-lite'],
   anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1'],
 };
 
 /** 模型目录 maxOutputTokens（设置参数联动提示用） */
 export const MODEL_MAX_OUTPUT: Record<string, number> = {
+  // 端点实测 max_output_length=65536
+  'deepseek-flash': 65_536,
   'deepseek-v4-flash': 384_000,
   'deepseek-v4-pro': 384_000,
   'kimi-k3': 131_072,
