@@ -181,7 +181,7 @@ BROWSER_CONFIG = {
 #   VISION_BASE_URL=https://token.sensenova.cn/v1
 #   VISION_MODEL=<商汤视觉模型名>
 #
-# 2026-09-22 实测（同一张答案已知的图；单图 2 次 + 多图/时序 2 次）：
+# 2026-09-23 实测（同一张答案已知的图；单图 2 次 + 多图/时序 2 次）：
 #   agnes-3.0-flash 30s×2 全超时；deepseek-flash（= DeepSeek V4.1 Flash）与
 #   sensenova-6.8-flash-lite 都 3/3 命中、多图 4/4，1-4s。**关键：商汤
 #   `GET /models` 把 deepseek-flash 的 input_modalities 标成 ["text"]，实测却
@@ -607,6 +607,14 @@ GUARDIAN_CONSENT_CONFIG = {
 # 这些活交给主模型既慢又贵，还会挤占它的上下文预算。用一个小的快模型单独干，
 # 失败就退回原来的规则实现（fail-open），绝不影响主流程。
 # 默认用商汤自家的轻量模型（与主模型同一把 key，实测响应快）。
+# ⚠️ 坑（2026-09-23 实测踩到）：**模型名是商汤专有的，端点却默认跟随主 LLM**
+# （下面 base_url/api_key 留空 = 用 LLM_CONFIG 的）。主模型一换网关（例如换到内网
+# 172.16.10.242），`sensenova-6.8-flash-lite` 在那边根本不存在 → 503，而杂活是
+# fail-open 的，只会**无声**退回规则实现（会话标题变成截断文本），不报错。
+# 所以换主模型端点时，请显式给 SMALL_MODEL / SMALL_MODEL_BASE_URL / SMALL_MODEL_API_KEY；
+# `my-agent --doctor` 的「子系统模型对账」会逐端点核对这类组合。
+# 另注意：若换成思考模型（如 deepseek-flash），SMALL_MODEL_MAX_TOKENS 要给够
+# （推理也占额度，默认 200 可能只剩空正文）。
 SMALL_MODEL_CONFIG = {
     "enabled": os.getenv("SMALL_MODEL_ENABLED", "true").lower() == "true",
     "model": os.getenv("SMALL_MODEL", "") or "sensenova-6.8-flash-lite",

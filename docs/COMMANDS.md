@@ -440,6 +440,32 @@ IMAGE_GEN_FALLBACK_TIMEOUT=180
   出图的模型——不会把备用的功劳记在主模型头上；
 - 视觉还叠了一层**本地 OCR** 兜底（见上一节）：模型链全挂时，至少把字读出来。
 
+### 主模型怎么选（别只看跑分）
+
+agent 每天真正依赖这几件事，缺一个就残废——用 `tools/local/llm_bench.py` 一条命令压一遍
+（走 agent 自己的 `LLM` 客户端，不是跑分网站）：
+
+1. **原生 function calling**：工具名与参数对不对；
+2. **reasoning_content 回传**：思考模型不回传推理字段，下一轮直接 400（本仓库踩过），
+   所以必须真的走一次"assistant(带推理+工具调用) + tool 结果"回合；
+3. **流式**：主循环走 `chat_with_tools_stream`，首增量延迟决定"交互像不像卡住"；
+4. JSON 输出、指令遵循（用答案可验证的小题）；
+5. 延迟与限流：**限流不算能力问题**，但它决定这东西能不能当主模型。
+
+2026-09-23 实测（同一个 `deepseek-flash` = DeepSeek V4.1 Flash，两个端点）：
+
+| 端点 | 能力 | 延迟 | 限流 |
+|---|---|---|---|
+| 内网网关 | 7/7（工具 + 流式 + reasoning 回传 + JSON + 逻辑题） | 中位 0.7s、最慢 1.6s | 无（12/12 成功） |
+| 商汤外网 | 未测全（429 打断） | 单次普通问答 12.5s | 配额已满，探针在 51-111s 退避里空转 |
+
+结论：**同一个模型换个端点，可用性天差地别** —— 主模型要指向快且不限流的那个端点。
+
+```cmd
+# 换模型/换端点后先压一遍（思考模型的推理也占 --max-tokens，别调太小）
+python tools/local/llm_bench.py deepseek-flash --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
+```
+
 ## 三·十四、看图 / 看视频（`see` 工具）
 
 `see` 既能看浏览器页面，也能看**本地文件**——直接说"看看 output/x.mp4 讲了什么"即可：
@@ -552,7 +578,7 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| LLM_DEFAULT_MODEL | — | 主模型（当前 deepseek-v4-flash） |
+| LLM_DEFAULT_MODEL | — | 主模型（当前 `deepseek-flash` = DeepSeek V4.1 Flash，走内网网关；免费 plan 的外网端点配额常满，见 三·十三） |
 | LLM_BASE_URL / LLM_API_KEY | — | 主模型端点 |
 | LLM_TIMEOUT | 300 | 请求超时秒数（防挂死） |
 | LLM_MAX_RETRIES | 2 | 限流自动重试次数 |
@@ -560,7 +586,7 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 | SANDBOX_MODE | workspace-write | 沙箱等级 |
 | VISION_MODEL / VISION_API_KEY / VISION_BASE_URL | 回退主 LLM | 视觉模型（可走独立端点） |
 | GUARDIAN_ENABLED | true | Guardian 审校开关 |
-| GUARDIAN_MODEL | 主模型 | 审校模型（当前 deepseek-v4-flash） |
+| GUARDIAN_MODEL | 主模型 | 审校模型（当前 `agnes-3.0-flash`，跨厂商） |
 | ROLLOUT_ENABLED / ROLLOUT_DIR | true / ./rollouts | 事件追踪（JSONL 日志） |
 | SESSION_DIR / SESSION_MAX | ./memory/sessions / 50 | 对话存储 |
 | SNAPSHOT_ENABLED | true | 运行前 git 快照安全网 |
