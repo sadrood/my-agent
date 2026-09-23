@@ -503,11 +503,22 @@ if HAS_FASTAPI:
         node["children"] = dirs + files
         return node
 
+    def _read_capped(path: str) -> bytes:
+        """读文件内容，上限 `_FILE_READ_MAX_BYTES + 1` 字节（多读 1 字节好判断截断）。
+
+        模块层函数是为了 `api_file` / `api_diff` 共用，并且能整体交给
+        `asyncio.to_thread` —— 事件循环里不做文件**内容** IO（2026-09-23 审计：
+        200KB 的读在慢盘/网络盘上足以让 `/ws` 推送与 `/api/stop` 排住）。
+        """
+        with open(path, "rb") as f:
+            return f.read(_FILE_READ_MAX_BYTES + 1)
+
     @app.get("/api/files")
     async def api_files():
         """工作目录文件树（递归、跳过噪声目录、有深度/数量上限）。"""
         counter = [0]
-        tree = _build_tree(WORKSPACE_ROOT, "", 0, counter)
+        # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里（递归遍历整个工作区）
+        tree = await asyncio.to_thread(_build_tree, WORKSPACE_ROOT, "", 0, counter)
         return {"root": WORKSPACE_ROOT, "tree": tree}
 
     @app.get("/api/skills")
@@ -546,8 +557,8 @@ if HAS_FASTAPI:
         if not os.path.isfile(abs_path):
             return {"ok": False, "error": "文件不存在"}
         try:
-            with open(abs_path, "rb") as f:
-                raw = f.read(_FILE_READ_MAX_BYTES + 1)
+            # 文件内容 IO 挪到线程里（同步读会冻住事件循环，见 _read_capped 注释）
+            raw = await asyncio.to_thread(_read_capped, abs_path)
         except OSError as e:
             return {"ok": False, "error": f"读取失败: {e}"}
         truncated = len(raw) > _FILE_READ_MAX_BYTES
@@ -601,9 +612,11 @@ if HAS_FASTAPI:
             diff_text = proc.stdout or ""
             if not diff_text.strip():
                 try:
-                    proc2 = _sub.run(["git", "rev-parse", "--is-inside-work-tree"],
-                                     cwd=WORKSPACE_ROOT, capture_output=True,
-                                     text=True, timeout=10)
+                    # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里
+                    proc2 = await asyncio.to_thread(
+                        lambda: _sub.run(["git", "rev-parse", "--is-inside-work-tree"],
+                                         cwd=WORKSPACE_ROOT, capture_output=True,
+                                         text=True, timeout=10))
                     in_repo = proc2.returncode == 0 and proc2.stdout.strip() == "true"
                 except Exception:
                     in_repo = False
@@ -625,8 +638,8 @@ if HAS_FASTAPI:
         current_exists = os.path.isfile(abs_path)
         if current_exists:
             try:
-                with open(abs_path, "rb") as f:
-                    raw = f.read(_FILE_READ_MAX_BYTES + 1)
+                # 文件内容 IO 挪到线程里（同步读会冻住事件循环，见 _read_capped 注释）
+                raw = await asyncio.to_thread(_read_capped, abs_path)
                 if len(raw) > _FILE_READ_MAX_BYTES:
                     return {"ok": False, "error": "当前文件过大（>200KB），无法生成 diff"}
                 new_content = raw.decode("utf-8")
@@ -845,29 +858,35 @@ if HAS_FASTAPI:
         # 那是把用户全部历史反馈（唯一副本）静默清掉（2026-09-22 审计）。
         from config import resolve_under_root
         path = resolve_under_root(os.path.join("memory", "feedback.json"))
-        data = []
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    loaded = _json.load(f)
-                if isinstance(loaded, list):
-                    data = loaded
-                else:
-                    raise ValueError("feedback.json 不是数组")
-            except Exception as e:
-                # 保留原件、另起新文件：宁可多一个 .corrupt 也不丢数据
+        # 读-改-写整套搬进线程。分开挪会把"读到的内容"与"写回的内容"拆成两次线程
+        # 切换，中间态锁不住；同步跑则冻住事件循环（/ws 推送、/api/stop 一起排队）
+        # —— 2026-09-23 审计，与 api_file / api_diff 同一类。
+        def _append() -> dict:
+            data = []
+            if os.path.exists(path):
                 try:
-                    os.replace(path, path + ".corrupt")
-                    print(f"[dashboard] feedback.json 无法解析（{e}），已改名保留为 .corrupt")
-                except OSError:
-                    return {"ok": False, "error": "feedback.json 损坏且无法改名，已放弃本次写入以保住历史"}
-                data = []
-        data.append({"message_id": msg_id, "rating": rating, "note": note,
-                     "time": _t.strftime("%Y-%m-%d %H:%M")})
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(data, f, ensure_ascii=False, indent=2)
-        return {"ok": True, "count": len(data)}
+                    with open(path, "r", encoding="utf-8") as f:
+                        loaded = _json.load(f)
+                    if isinstance(loaded, list):
+                        data = loaded
+                    else:
+                        raise ValueError("feedback.json 不是数组")
+                except Exception as e:
+                    # 保留原件、另起新文件：宁可多一个 .corrupt 也不丢数据
+                    try:
+                        os.replace(path, path + ".corrupt")
+                        print(f"[dashboard] feedback.json 无法解析（{e}），已改名保留为 .corrupt")
+                    except OSError:
+                        return {"ok": False, "error": "feedback.json 损坏且无法改名，已放弃本次写入以保住历史"}
+                    data = []
+            data.append({"message_id": msg_id, "rating": rating, "note": note,
+                         "time": _t.strftime("%Y-%m-%d %H:%M")})
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(data, f, ensure_ascii=False, indent=2)
+            return {"ok": True, "count": len(data)}
+
+        return await asyncio.to_thread(_append)
 
     @app.get("/api/search")
     async def api_search(q: str = "", scope: str = "all", limit: int = 30):
@@ -878,10 +897,11 @@ if HAS_FASTAPI:
         if not q:
             return {"ok": True, **out}
         try:
+            # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里（两个都会走文件系统）
             if scope in ("all", "conversations"):
-                out["conversations"] = search_sessions(q, limit)
+                out["conversations"] = await asyncio.to_thread(search_sessions, q, limit)
             if scope in ("all", "files"):
-                out["files"] = search_files(os.getcwd(), q, limit)
+                out["files"] = await asyncio.to_thread(search_files, os.getcwd(), q, limit)
         except Exception as e:
             return {"ok": False, "error": str(e)[:200], **out}
         return {"ok": True, **out}
@@ -925,7 +945,9 @@ if HAS_FASTAPI:
         q = (q or "").strip()
         if not q:
             return {"ok": True, "files": []}
-        return {"ok": True, "files": search_files(os.getcwd(), q, limit)}
+        # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop）
+        return {"ok": True,
+                "files": await asyncio.to_thread(search_files, os.getcwd(), q, limit)}
 
     @app.post("/api/approve")
     async def api_approve(payload: dict = Body(...)):
@@ -957,7 +979,8 @@ if HAS_FASTAPI:
         import concurrent.futures
         fut = _get_side_browser_executor().submit(_side_browser_execute, command, args)
         try:
-            return fut.result(timeout=_SIDE_BROWSER_TIMEOUT)
+            # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里（这里最长等 _SIDE_BROWSER_TIMEOUT 秒）
+            return await asyncio.to_thread(fut.result, _SIDE_BROWSER_TIMEOUT)
         except concurrent.futures.TimeoutError:
             fut.cancel()
             return {"ok": False, "error": f"浏览器操作超时（{_SIDE_BROWSER_TIMEOUT:.0f}s）"}
@@ -1032,10 +1055,14 @@ if HAS_FASTAPI:
         base_url = str(p.get("base_url") or "").strip() or None
         api_key = str(p.get("api_key") or "").strip() or None
         t0 = _t.time()
-        try:
-            llm = LLM(api_key=api_key, base_url=base_url, model=model)
+        def _ping():
+            _llm = LLM(api_key=api_key, base_url=base_url, model=model)
             # 极小调用（max_tokens=8）：只验证配置可用与网络/鉴权
-            text = llm.chat([{"role": "user", "content": "ping"}], max_tokens=8)
+            return _llm.chat([{"role": "user", "content": "ping"}], max_tokens=8)
+
+        try:
+            # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里（这是**真实 LLM 调用**且原本没有任何超时）
+            text = await asyncio.to_thread(_ping)
             return {
                 "ok": True,
                 "latency_ms": int((_t.time() - t0) * 1000),
@@ -1098,10 +1125,13 @@ if HAS_FASTAPI:
             buf = BytesIO()
             img.save(buf, format="PNG")
             b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
-            answer = vm.analyze(
-                b64,
-                "这张图片的背景是什么颜色？中间是什么形状？用一句话回答。",
-                max_tokens=80,
+            # 同步跑会冻住整个事件循环（含 /ws 推送与 /api/stop），必须挪到线程里（真实视觉模型调用）
+            answer = await asyncio.to_thread(
+                lambda: vm.analyze(
+                    b64,
+                    "这张图片的背景是什么颜色？中间是什么形状？用一句话回答。",
+                    max_tokens=80,
+                )
             )
             return {"ok": True, "model": vm.vision_model, "answer": answer[:300]}
         except Exception as e:
