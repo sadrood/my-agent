@@ -17,7 +17,7 @@ execpolicy DSL：结构化命令策略（白名单模式的升级）。
       {
         "match": {
           "tool": "terminal",              # 精确相等；省略 = 任意工具
-          "command_prefix": "npm ",        # 命令文本前缀；省略 = 任意
+          "command_prefix": "npm ",        # 命令文本前缀（Windows 下不区分大小写）；省略 = 任意
           "pattern": "\\binstall\\b"       # 正则 re.search + IGNORECASE；省略 = 任意
         },
         "decision": "allow | deny | ask"
@@ -32,6 +32,7 @@ execpolicy DSL：结构化命令策略（白名单模式的升级）。
 """
 import json
 import logging
+import os
 import re
 from typing import List, Optional
 
@@ -99,12 +100,18 @@ class ExecPolicy:
             return False
         # command_prefix 前缀匹配（对命令文本；省略 = 任意匹配）
         prefix = match.get("command_prefix")
-        # 大小写敏感（原样比较）——这是**规定**的语义，test_execpolicy.py 里有对应用例。
-        # 但它与同一条规则里 `pattern` 的 re.IGNORECASE 不一致：用 command_prefix 写的
-        # **deny** 规则可以被 `CURL -s ...` 这类大小写变体绕过（2026-09-22 审计）。
-        # 需要收紧的话只能改 DSL 语义（会破坏既有用例），留给维护者定。
-        if prefix is not None and not command.startswith(prefix):
-            return False
+        # 前缀匹配要与**平台的命令解析规则**保持一致（命令最终交给 shell=True 解析）：
+        #   · Windows：cmd.exe 大小写不敏感，`CURL` 就是 `curl.exe` —— 敏感比较等于给
+        #     deny 规则开口子，模型换个大小写就绕过去了；
+        #   · POSIX：`curl` 与 `CURL` 是两个不同的可执行文件（后者 command not found），
+        #     必须保持敏感，否则 allow 规则会误放行一个名字只差大小写的别的程序。
+        # 2026-09-23 审计：原先无条件敏感，在 Windows 上是个真实的绕过面。
+        if prefix is not None:
+            if os.name == "nt":
+                if not command.lower().startswith(str(prefix).lower()):
+                    return False
+            elif not command.startswith(prefix):
+                return False
         # pattern 正则 re.search + IGNORECASE（省略 = 任意匹配）
         pattern = match.get("pattern")
         if pattern is not None:

