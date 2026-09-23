@@ -30,6 +30,10 @@ BLOCKED_IMPORTS = {
     "subprocess", "socket", "ctypes", "winreg", "win32api", "win32con",
     "shutil", "pty", "os.system", "multiprocessing", "pickle", "marshal",
     "importlib", "inspect", "sys", "gc", "traceback", "code", "compileall",
+    # nt / posix 是 os 的底层实现模块——`os.system` 就是它们的 `system`，
+    # 而 _winapi 直接给 CreateProcess。漏掉它们等于把 os 那层封锁整个让开：
+    # `import nt; nt.system(...)` 既不经 os 代理，也不经任何审批门。
+    "nt", "posix", "_winapi",
 }
 
 # 被禁模块的"出路"提示：模型撞上黑名单时最需要知道的是「那我该用什么」。
@@ -55,6 +59,9 @@ _BLOCKED_HINTS = {
     "traceback": "traceback 不可用；出错信息会自动回传",
     "code": "交互式解释器不受支持",
     "compileall": "批量编译不受支持",
+    "nt": "执行系统命令请用 terminal 工具（走审批门）",
+    "posix": "执行系统命令请用 terminal 工具（走审批门）",
+    "_winapi": "底层 Windows API 调用不受支持，请用 terminal 工具",
 }
 
 
@@ -105,7 +112,7 @@ def _safe_import(name, *args, **kwargs):
     if root == "os":
         # 关键：`import os` 也必须给受限代理，否则用户代码里再 import 一次
         # 就重新拿到真实的 os，绕过预导入那层的封锁。
-        return _RestrictedOS(__import__(name, *args, **kwargs))
+        return _restricted_os(__import__(name, *args, **kwargs))
     return __import__(name, *args, **kwargs)
 
 
@@ -157,59 +164,80 @@ class _CappedBuffer(io.StringIO):
         return super().write(s)
 
 
-class _RestrictedOS:
-    """os 的受限代理：拦掉"执行系统命令 / 结束进程"这一类入口。
+#: 允许执行外部程序 / 操作进程的 os 入口，一律拒绝
+_OS_DENIED = frozenset({
+    "system", "popen",
+    "execv", "execve", "execvp", "execvpe",
+    "execl", "execle", "execlp", "execlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "posix_spawn", "posix_spawnp",
+    "fork", "forkpty", "startfile",
+    "kill", "killpg", "abort", "_exit",
+    "setuid", "setgid", "setsid", "putenv", "unsetenv",
+})
+
+
+def _restricted_os(real):
+    """构造 os 的受限代理：拦掉"执行系统命令 / 结束进程"这一类入口。
 
     实测（2026-09-17）：真实 `os` 一旦暴露，`os.system('...')` 与 `os.popen(...)`
     可直接执行任意命令——它是属性调用而**不是 import**，所以 BLOCKED_IMPORTS
     那套钩子完全拦不住；终端工具的黑名单（格式化磁盘、del /s、git push -f…）
     在这里等于不存在。而且子进程的输出直接写到真实 fd 1，连 stdout 捕获都绕过。
 
+    真实模块保存在**闭包**里、代理实例上不留任何可读引用。旧实现把它挂在实例属性
+    `_real` 上，而 `__getattr__` 只在常规属性查找**失败**时才触发——`_real` 就在实例
+    `__dict__` 里，查找成功，`__getattr__` 根本不会执行。于是
+    `os._real.system('...')` / `vars(os)['_real'].popen(...)` 把整个 deny-list
+    从后门绕了过去（2026-09-22 审计实测：命令真的执行了，且输出直连真实 fd 1）。
+
+    现在代理是 `__slots__ = ()` 的空壳、没有任何实例属性，所有名字查找必然落到
+    `__getattr__`；那里连前导下划线一并拒绝——`__dict__` / `_name` 之类同样可能
+    是回到真实模块的跳板。
+
     注意定位：这是**护栏，不是沙箱**。``().__class__.__base__.__subclasses__()``
     仍能拿到 Popen 之类的类（实测可达），任何想要逃逸的代码都逃得掉。真正的隔离
     要靠 OS 级沙箱（SANDBOX_EXECUTION=appcontainer）与审批策略，这里只是让
     "顺手跑个命令"不再是一条无门槛的捷径。
     """
+    denied = _OS_DENIED
 
-    #: 允许执行外部程序 / 操作进程的入口，一律拒绝
-    _DENIED = frozenset({
-        "system", "popen",
-        "execv", "execve", "execvp", "execvpe",
-        "execl", "execle", "execlp", "execlpe",
-        "spawnv", "spawnve", "spawnvp", "spawnvpe",
-        "spawnl", "spawnle", "spawnlp", "spawnlpe",
-        "posix_spawn", "posix_spawnp",
-        "fork", "forkpty", "startfile",
-        "kill", "killpg", "abort", "_exit",
-        "setuid", "setgid", "setsid", "putenv", "unsetenv",
-    })
+    class _RestrictedOS:
+        __slots__ = ()
 
-    def __init__(self, real):
-        object.__setattr__(self, "_real", real)
+        def __getattr__(self, name):
+            # 前导下划线一律不给：`_real` 之外，`__dict__` 之类也可能成为跳板。
+            if name in denied or name.startswith("_"):
+                raise AttributeError(
+                    f"安全限制：os.{name} 已被禁用（它可绕过终端的审批门执行系统命令）。"
+                    "需要执行命令请用 terminal 工具（受审批策略管理）；"
+                    "复制/移动文件请用 file 工具；不需要外部命令的话请改用纯 Python 实现。"
+                )
+            return getattr(real, name)
 
-    def __getattr__(self, name):
-        if name in _RestrictedOS._DENIED:
-            raise AttributeError(
-                f"安全限制：os.{name} 已被禁用（它可绕过终端的审批门执行系统命令）。"
-                "需要执行命令请用 terminal 工具（受审批策略管理）；"
-                "复制/移动文件请用 file 工具；不需要外部命令的话请改用纯 Python 实现。"
-            )
-        return getattr(object.__getattribute__(self, "_real"), name)
+        def __setattr__(self, name, value):
+            raise AttributeError("安全限制：受限命名空间里不允许修改 os 模块属性。")
 
-    def __setattr__(self, name, value):
-        raise AttributeError("安全限制：受限命名空间里不允许修改 os 模块属性。")
+        def __delattr__(self, name):
+            raise AttributeError("安全限制：受限命名空间里不允许修改 os 模块属性。")
 
-    def __dir__(self):
-        """反射时表现得像真的 os（但隐藏被禁用的入口）。
+        def __dir__(self):
+            """反射时表现得像真的 os（但隐藏被禁用的入口）。
 
-        否则 `dir(os)` / `hasattr(os, 'makedirs')` 一类正常写法会给出错误答案，
-        让模型以为环境不可用而放弃本来能做的事。
-        """
-        try:
-            names = set(dir(object.__getattribute__(self, "_real")))
-        except Exception:
-            names = set()
-        return sorted(names - _RestrictedOS._DENIED)
+            否则 `dir(os)` / `hasattr(os, 'makedirs')` 一类正常写法会给出错误答案，
+            让模型以为环境不可用而放弃本来能做的事。
+            """
+            try:
+                names = set(dir(real))
+            except Exception:
+                names = set()
+            return sorted(n for n in names - denied if not n.startswith("_"))
+
+        def __repr__(self):
+            return "<受限 os 模块（护栏，非沙箱）>"
+
+    return _RestrictedOS()
 
 
 def build_safe_builtins() -> dict:
@@ -323,7 +351,7 @@ class PythonTool(BaseTool):
             "random": __import__("random"),
             "itertools": __import__("itertools"),
             "collections": __import__("collections"),
-            "os": _RestrictedOS(__import__("os")),   # 受限代理，非真实 os
+            "os": _restricted_os(__import__("os")),   # 受限代理，非真实 os
             "pathlib": __import__("pathlib"),
         }
 

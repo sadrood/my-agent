@@ -238,6 +238,93 @@ class TestSnapshot:
         assert not status.stdout.strip()
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
+    def test_rollback_restores_uncommitted_worktree_drift(self, tmp_path):
+        """回滚基准必须是**工作区**，不是 HEAD 的树。
+
+        实测故障（2026-09-22 审计）：checkpoint 只挂 refs/snapshots/*、从不推进
+        HEAD（本模块自己的设计），所以被改坏的文件全在工作区、不在任何一棵树里。
+        旧实现拿"最新快照 / HEAD 的树"当基准做 `diff`，得到**空 diff** → 一个文件都
+        不恢复，函数却返回非空 HEAD，`dashboard/server.py` 按"返回非空即成功"判定 →
+        用户看到"已回滚"，文件纹丝不动。
+        """
+        import subprocess
+        from agent.snapshot import ensure_repo, snapshot, rollback_to, _head
+
+        ensure_repo(str(tmp_path))
+        (tmp_path / "a.py").write_text("v1", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "base"], cwd=str(tmp_path), check=True, capture_output=True)
+        head = _head(str(tmp_path))
+
+        snapshot(str(tmp_path), "运行前快照")
+        (tmp_path / "a.py").write_text("BROKEN", encoding="utf-8")   # 只改工作区，不提交
+
+        new_head = rollback_to(str(tmp_path), head)
+        assert new_head, "回滚不应报失败"
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "v1", "文件没被恢复"
+
+    @pytest.mark.skipif(not _git_available(), reason="git 不可用")
+    def test_rollback_does_not_sweep_user_staged_work(self, tmp_path):
+        """回滚的归因提交不能把用户**已暂存**的改动一起提交。
+
+        实测故障（2026-09-22 审计）：`_commit` 只做 `git add -A -- <touched>`，
+        随后却执行**不带 pathspec** 的 `git commit` —— 提交的是整个真实索引。
+        用户 `git add user_wip.txt` 之后回滚一次，那个文件就跟着 agent 的
+        "rollback: …（my-agent）" 一起进了历史。
+        """
+        import subprocess
+        from agent.snapshot import ensure_repo, checkpoint, rollback_to
+
+        ensure_repo(str(tmp_path))
+        (tmp_path / "a.py").write_text("v1", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "base"], cwd=str(tmp_path), check=True, capture_output=True)
+
+        snap = checkpoint(str(tmp_path), "edit a.py", changed_file="a.py")
+        (tmp_path / "user_wip.txt").write_text("用户的在制品", encoding="utf-8")
+        subprocess.run(["git", "add", "user_wip.txt"], cwd=str(tmp_path),
+                       check=True, capture_output=True)
+        (tmp_path / "a.py").write_text("v1", encoding="utf-8")   # 改回原值
+        snap2 = checkpoint(str(tmp_path), "edit a.py", changed_file="a.py") or snap
+        (tmp_path / "a.py").write_text("BROKEN", encoding="utf-8")
+
+        rollback_to(str(tmp_path), snap2)
+
+        tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
+                              cwd=str(tmp_path), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace").stdout
+        assert "user_wip.txt" not in tree, "用户暂存的改动被卷进了 agent 的提交"
+        assert (tmp_path / "user_wip.txt").exists(), "用户文件不该被删"
+
+    @pytest.mark.skipif(not _git_available(), reason="git 不可用")
+    def test_rollback_removes_checkpointed_new_file(self, tmp_path):
+        """快照之后**被 checkpoint 过**的新文件要删掉（changed_file 生产路径）。
+
+        实测故障（2026-09-22 审计）：`git diff` 看不见未跟踪文件，而通过
+        `checkpoint(changed_file=...)` 新建的文件只出现在**后续快照的树**里 ——
+        不并上"与最新快照比较"这一路，回滚就会把它们残留下来。
+        """
+        import subprocess
+        from agent.snapshot import ensure_repo, checkpoint, rollback_to
+
+        ensure_repo(str(tmp_path))
+        (tmp_path / "a.py").write_text("v1", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "base"], cwd=str(tmp_path), check=True, capture_output=True)
+
+        snap = checkpoint(str(tmp_path), "edit a.py", changed_file="a.py")
+        (tmp_path / "b.py").write_text("new", encoding="utf-8")
+        checkpoint(str(tmp_path), "edit b.py", changed_file="b.py")
+        (tmp_path / "a.py").write_text("BROKEN", encoding="utf-8")
+
+        rollback_to(str(tmp_path), snap)
+        assert (tmp_path / "a.py").read_text(encoding="utf-8") == "v1"
+        assert not (tmp_path / "b.py").exists(), "快照之后新建的文件应被移除"
+
+    @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_rollback_rejects_non_ancestor(self, tmp_path):
         """非祖先提交（无关仓库的 hash / 乱码）必须拒绝。"""
         from agent.snapshot import ensure_repo, rollback_to
@@ -245,6 +332,51 @@ class TestSnapshot:
         ensure_repo(str(tmp_path))
         assert rollback_to(str(tmp_path), "deadbeef" * 5) == ""
         assert rollback_to(str(tmp_path), "") == ""
+
+
+class TestEditEmptyOldString:
+    """空 `old_string` 不能当"通配"用。
+
+    实测故障（2026-09-22 审计）：`str.count("")` 返回 len+1（每个字符间隙都算一次
+    匹配），所以空 old_string + `replace_all=true` 会让 `str.replace("", "X")` 把
+    `abc\\ndef\\n` 打成 `XaXbXcX\\nXdXeXfX\\nX`，返回值却还是
+    `success=True 已修改 … 替换 9 处` —— 静默毁文件，模型收到的是成功回执。
+    """
+
+    def test_replace_all_with_empty_is_refused(self, tmp_path, monkeypatch):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", False)
+        f = tmp_path / "m.py"
+        f.write_text("abc\ndef\n", encoding="utf-8")
+        r = EditTool().execute_json({
+            "file_path": str(f), "old_string": "", "new_string": "X",
+            "replace_all": True,
+        })
+        assert r.success is False
+        assert f.read_text(encoding="utf-8") == "abc\ndef\n"     # 原样未动
+
+    def test_empty_old_string_on_nonempty_file_refused(self, tmp_path, monkeypatch):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", False)
+        f = tmp_path / "m.py"
+        f.write_text("abc\n", encoding="utf-8")
+        r = EditTool().execute_json({
+            "file_path": str(f), "old_string": "", "new_string": "X",
+        })
+        assert r.success is False
+        assert f.read_text(encoding="utf-8") == "abc\n"
+
+    def test_empty_file_write_still_works(self, tmp_path, monkeypatch):
+        """往空文件里写内容是合法用法（count("") == 1），别一起拦了。"""
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", False)
+        f = tmp_path / "m.py"
+        f.write_text("", encoding="utf-8")
+        r = EditTool().execute_json({
+            "file_path": str(f), "old_string": "", "new_string": "hello",
+        })
+        assert r.success is True, r.error
+        assert f.read_text(encoding="utf-8") == "hello"
 
 
 class TestEditPreflight:
@@ -283,6 +415,34 @@ class TestEditPreflight:
         # 回滚成功后备份已用完，.bak 即时清理
         import os as _os
         assert not _os.path.exists(path + ".bak")
+
+    def test_preflight_timeout_bounds_wall_clock(self, tmp_path, monkeypatch):
+        """超时必须**真的按墙钟返回**，而不是被孙进程拖着。
+
+        实测故障（2026-09-22 审计）：`subprocess.run(shell=True, timeout=)` 在被改
+        模块的相关测试留下常驻子进程时约束不了墙钟 —— 被 kill 的只是 shell，孙进程
+        （真正的 pytest）仍持有继承来的管道写端，TimeoutExpired 分支里那句
+        `communicate()` 会一直等它（实测 timeout=1 的命令拖了 5.09s 才返回）。
+        现在输出落临时文件、只看直接子进程，超时即返回并杀进程树。
+        """
+        import sys as _sys
+        import time as _time
+        from config import TOOL_CONFIG, TEST_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", True)
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight_timeout", 2)
+        monkeypatch.setitem(
+            TEST_CONFIG, "command",
+            f'"{_sys.executable}" -c "import time; time.sleep(30)"')
+        path = self._write(tmp_path)
+        t0 = _time.time()
+        r = EditTool().execute_json({
+            "file_path": path, "old_string": "x = 1", "new_string": "x = 2",
+        })
+        elapsed = _time.time() - t0
+        assert elapsed < 20, f"超时没生效，耗时 {elapsed:.1f}s"
+        assert r.success is False
+        assert "超时" in r.error
+        assert open(path, encoding="utf-8").read() == "x = 1\n"   # 已回滚
 
     def test_preflight_skipped_when_disabled(self, tmp_path, monkeypatch):
         from config import TOOL_CONFIG, TEST_CONFIG
@@ -512,3 +672,53 @@ class TestDiffMetadataFallback:
         })
         out = capsys.readouterr().out
         assert "@@" not in out        # 简式 diff，无 unified 标记
+
+
+class TestLineEndingsPreserved:
+    """编辑不能把整个文件的换行风格翻掉。
+
+    实测故障（2026-09-22 审计）：`edit` 用 universal newlines 读文件（CRLF 已变 LF），
+    写回时又用 `newline=""` —— 于是「只改一行」会把整个文件的 CRLF 变成 LF；
+    `.bak` 是文本模式写的（LF 又被翻成 CRLF），回滚也还原不回去。
+    在 Windows 仓库里的表现是 git 里出现整文件 diff，还会破坏 snapshot 的逐操作提交。
+
+    注意：检测必须看**原始字节** —— `content` 里的 CRLF 已经被 universal newlines
+    吃掉了，在它里面找换行符恒为 False（我第一版修复就踩了这个）。
+    """
+
+    CRLF = "\r\n"
+
+    def _crlf_file(self, tmp_path):
+        f = tmp_path / "a.py"
+        f.write_bytes(("line1" + self.CRLF + "line2" + self.CRLF).encode())
+        return f
+
+    def test_edit_keeps_crlf(self, tmp_path, monkeypatch):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", False)
+        f = self._crlf_file(tmp_path)
+        r = EditTool().execute_json({
+            "file_path": str(f), "old_string": "line2", "new_string": "LINE2"})
+        assert r.success is True, r.error
+        raw = f.read_bytes()
+        assert raw == ("line1" + self.CRLF + "LINE2" + self.CRLF).encode(), repr(raw)
+
+    def test_lf_file_stays_lf(self, tmp_path, monkeypatch):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", False)
+        f = tmp_path / "b.py"
+        f.write_bytes(b"a\nb\n")
+        EditTool().execute_json({"file_path": str(f), "old_string": "b", "new_string": "B"})
+        assert f.read_bytes() == b"a\nB\n"
+
+    def test_rollback_restores_bytes(self, tmp_path, monkeypatch):
+        from config import TOOL_CONFIG, TEST_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight", True)
+        monkeypatch.setitem(TOOL_CONFIG, "edit_preflight_timeout", 5)
+        monkeypatch.setitem(TEST_CONFIG, "command", "exit 1")     # 必然失败 → 回滚
+        f = self._crlf_file(tmp_path)
+        original = f.read_bytes()
+        r = EditTool().execute_json({
+            "file_path": str(f), "old_string": "line2", "new_string": "LINE2"})
+        assert r.success is False and "回滚" in r.error
+        assert f.read_bytes() == original, "回滚没有逐字节还原（换行风格丢了）"

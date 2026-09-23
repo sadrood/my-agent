@@ -84,8 +84,15 @@ class ChangeTracker:
         except (OSError, UnicodeDecodeError):
             return None
 
-    def record_with_old(self, path: str, tool: str, old_content: Optional[str]) -> None:
-        """调用方已持有修改前内容时直接登记（edit 工具场景）。"""
+    def record_with_old(self, path: str, tool: str, old_content: Optional[str],
+                        existed: Optional[bool] = None) -> None:
+        """调用方已持有修改前内容时直接登记（edit / file 工具场景）。
+
+        `existed` 必须由调用方显式给出：`old_content is None` 有两种含义 ——
+        「文件本来不存在」和「文件存在但太大/是二进制、快照拿不到」。旧实现一律
+        当后者是新建，于是对 >200KB 的既有文件做 write，diff 视图会谎报"本次新建"
+        （2026-09-22 审计）。不给时退回旧行为。
+        """
         abs_path = self._norm(path)
         with self._lock:
             rec = self._records.get(abs_path)
@@ -95,7 +102,8 @@ class ChangeTracker:
             if len(self._records) >= self._max_paths:
                 return
             self._records[abs_path] = ChangeRecord(
-                abs_path, old_content, old_content is None, tool)
+                abs_path, old_content,
+                (old_content is None) if existed is None else (not existed), tool)
 
     def get(self, path: str) -> Optional[ChangeRecord]:
         with self._lock:

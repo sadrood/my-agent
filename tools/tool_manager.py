@@ -140,31 +140,45 @@ class ToolManager:
         except Exception:
             pass
 
+        # 下面四个多媒体工具此前**无条件注册**，`*_ENABLED=false` 形同虚设：
+        # 那几个开关只在各自的 `models/*.py::is_configured()` 里被读，而那个函数
+        # 全仓库**没有任何调用点**（2026-09-22 审计）。结果是把 `IMAGE_GEN_ENABLED`
+        # 设成 false 之后，模型工具表里照样有文生图、agent 照样调上游接口并计费。
+        # 统一按 toonflow / zhihu 已有的写法在注册处判一次。
+
         # 文生图工具（OpenAI 兼容 images 端点；b64 与 url 两种返回都落盘）
         try:
-            from tools.image_gen import ImageGenTool
-            self.register(ImageGenTool())
+            from config import IMAGE_GEN_CONFIG
+            if IMAGE_GEN_CONFIG.get("enabled", True):
+                from tools.image_gen import ImageGenTool
+                self.register(ImageGenTool())
         except Exception:
             pass
 
         # 文生视频工具（OpenAI Videos 兼容异步任务：创建 → 轮询 → 下载 mp4）
         try:
-            from tools.video_gen import VideoGenTool
-            self.register(VideoGenTool())
+            from config import VIDEO_GEN_CONFIG
+            if VIDEO_GEN_CONFIG.get("enabled", True):
+                from tools.video_gen import VideoGenTool
+                self.register(VideoGenTool())
         except Exception:
             pass
 
         # 视频剪辑工具（ffmpeg：图→运镜、拼接、配音合成、字幕）
         try:
-            from tools.video_edit import VideoEditTool
-            self.register(VideoEditTool())
+            from config import VIDEO_EDIT_CONFIG
+            if VIDEO_EDIT_CONFIG.get("enabled", True):
+                from tools.video_edit import VideoEditTool
+                self.register(VideoEditTool())
         except Exception:
             pass
 
         # 语音合成工具（edge-tts 配音）
         try:
-            from tools.tts import TTSTool
-            self.register(TTSTool())
+            from config import TTS_CONFIG
+            if TTS_CONFIG.get("enabled", True):
+                from tools.tts import TTSTool
+                self.register(TTSTool())
         except Exception:
             pass
 
@@ -452,21 +466,36 @@ class ToolManager:
         return result
 
     def build_approval_request(self, tool_name: str, arguments: dict):
-        """为一次结构化调用生成审批请求。"""
+        """为一次结构化调用生成审批请求。
+
+        这里统一补全工具声明的 `approval` 元数据（auto / on-request）。工具层有
+        8 份 `build_approval_request` 覆写（terminal / file / patch / browser /
+        python / installer / toonflow / zhihu），谁都没传这个字段，而
+        `ApprovalPolicy.decide` 第 3 步判的正是 `request.approval` —— 于是
+        `DesktopTool`（`approval="on-request"`，操控真实鼠标键盘）在
+        `danger-full-access` 下被静默降级成**零确认执行**（2026-09-22 审计）。
+
+        补在这里而不是逐个改覆写：工具只需声明一次，链路自动带上，新工具不会再漏。
+        """
         tool = self._tools.get(tool_name)
         if tool is None:
             return None
         try:
-            return tool.build_approval_request(arguments or {})
+            request = tool.build_approval_request(arguments or {})
         except Exception:
             from tools.base import ApprovalRequest
-            return ApprovalRequest(
+            request = ApprovalRequest(
                 tool_name=tool_name,
                 arguments=arguments or {},
                 command=f"{tool_name}({arguments})",
                 risk_level=getattr(tool, "risk_level", "medium"),
                 min_sandbox_mode=getattr(tool, "min_sandbox_mode", "workspace-write"),
             )
+        # 覆写里已显式给出非 auto 的值就尊重它；否则用工具类上的声明补全。
+        declared = getattr(tool, "approval", "auto") or "auto"
+        if request.approval == "auto" and declared != "auto":
+            request.approval = declared
+        return request
 
     # ================================================================
     # MCP 集成

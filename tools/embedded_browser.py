@@ -70,6 +70,31 @@ class EmbeddedBrowserTool(BrowserTool):
         "typedirect", "visionclick",
     }
 
+    @property
+    def description(self) -> str:
+        """在基类描述后补一句**实际能力**。
+
+        基类描述宣传的 newtab/switchtab/closetab/alert/elementinfo/drag 桥一律拒绝，
+        而桥真正支持的 open/switch 又不在枚举里 —— 模型按描述调 newtab 只会拿到
+        "内嵌浏览器不支持命令"，能用的命令它无从得知（2026-09-22 审计）。
+        """
+        return (super().description
+                + chr(10) + "注意：桌面端内嵌浏览器是**单标签页、无弹窗**，" 
+                  "只支持这些命令：" + "、".join(sorted(self._BRIDGE_COMMANDS)))
+
+    @property
+    def schema(self) -> dict:
+        """把 command 的枚举收窄到桥支持的集合（其余一律不出现在枚举里）。"""
+        s = super().schema
+        try:
+            props = s["properties"]["command"]
+            if "enum" in props:
+                props["enum"] = [c for c in props["enum"]
+                                 if c in self._BRIDGE_COMMANDS]
+        except Exception:
+            pass
+        return s
+
     def __init__(self, bridge_url: str = None):
         super().__init__(headless=True, persistent=False)
         self._bridge_url = (

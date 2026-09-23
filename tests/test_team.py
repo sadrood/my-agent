@@ -310,6 +310,96 @@ class TestParallelMode:
         assert "超时" in result.subtasks[0].error
         assert elapsed < 4                                 # 没等满 5s 的睡眠
 
+    def test_late_worker_cannot_resurrect_failed_subtask(self, monkeypatch):
+        """超时后**迟到的** worker 不能把 failed 改回 completed。
+
+        实测故障（2026-09-22 审计）：超时分支只做标记，daemon 线程并未被取消；
+        `_execute_subtask` 成功路径无条件置 "completed"，慢 worker 在 deadline 之后
+        跑完时会把自己从 failed 覆写回 completed —— 同一个 SubTask 上
+        `status="completed"` 与 `error="Worker 执行超时"` 并存，而调用方拿到的是空
+        结果（`results` 里是 ""），Dashboard 也已推过 `step_end status=failed`。
+        """
+        from config import TEAM_CONFIG
+        # 余量要拉开：worker 睡 3s、超时 0.5s，wall-clock 上不可能有 worker 在
+        # deadline 前跑完（0.8/0.3 那种窄余量在全量跑、机器负载高时会偶发假失败）
+        monkeypatch.setitem(TEAM_CONFIG, "worker_timeout", 0.5)
+
+        llm = FakeTeamLLM(two_independent_json(), worker_sleep=3.0)
+        team = make_team(llm)
+
+        result = team.run("总任务", parallel=True, enable_review=False)
+        assert all(st.status == "failed" for st in result.subtasks)
+
+        time.sleep(3.5)          # 等迟到的 worker 跑完
+        for st in result.subtasks:
+            assert st.status == "failed", f"{st.id} 被迟到的 worker 改回了 completed"
+            assert st.result == "", "超时的子任务不该留下'已完成'的产出"
+            assert "超时" in st.error
+
+
+
+class TestWorkerApprovalGate:
+    """team worker 的工具调用必须过审批门。
+
+    实测漏洞（2026-09-22 审计）：worker 此前是裸调
+    `tool_manager.execute(tool, input_str)` —— 没有黑名单、没有沙箱等级、没有审批
+    策略、没有 Guardian。team 模式下 worker 一句
+    `{"tool":"terminal","tool_input":"del /f /s /q D:\\data"}` 就直接执行了。
+    """
+
+    class _OneShotLLM:
+        """每轮都返回同一句工具调用（worker 解析 → 执行 → 再问）。"""
+
+        def __init__(self, reply):
+            self._reply = reply
+
+        def chat(self, *a, **k):
+            return self._reply
+
+    @staticmethod
+    def _role():
+        from agent.roles import AgentRole
+        return AgentRole(name="tester", description="测试角色",
+                         system_prompt="你是测试角色", tools=["*"])
+
+    def _worker(self, tool_input_json: str):
+        from agent.approval import ApprovalPolicy
+        from agent.team import WorkerAgent
+        from tools.tool_manager import ToolManager
+
+        tm = ToolManager()
+        executed = []
+        real_execute = tm.execute
+        tm.execute = lambda n, i: (executed.append((n, i)), real_execute(n, i))[1]
+        worker = WorkerAgent(
+            name="w", role=self._role(),
+            llm=self._OneShotLLM(tool_input_json),
+            tool_manager=tm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        return worker.execute("做点事", max_rounds=2), executed
+
+    def test_blacklisted_command_never_executes(self):
+        out, executed = self._worker(
+            '{"tool": "terminal", "tool_input": "del /f /s /q D:\\\\data"}')
+        assert executed == [], f"黑名单命令被放行执行了: {executed}"
+        assert "被审批策略拒绝" in out
+
+    def test_blacklisted_raw_string_also_refused(self):
+        """非 JSON 的字符串入参同样要过门（legacy 语法）。"""
+        out, executed = self._worker(
+            '{"tool": "terminal", "tool_input": "mkfs.ext4 /dev/sda1"}')
+        assert executed == [], f"黑名单命令被放行执行了: {executed}"
+        assert "被审批策略拒绝" in out
+
+    def test_harmless_command_still_runs(self):
+        """别把普通命令一起拦了。"""
+        out, executed = self._worker(
+            '{"tool": "terminal", "tool_input": "echo hello_gate"}')
+        assert executed, "普通命令被误拦"
+        assert "hello_gate" in out
+
 
 class TestDAGScheduling:
     """DAG 细粒度依赖调度：depends_on 显式声明子任务间的依赖关系。"""

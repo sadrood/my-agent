@@ -44,7 +44,12 @@ class ExecPolicy:
     """结构化命令策略（纯逻辑，无全局状态）。"""
 
     def __init__(self, rules: Optional[List[dict]] = None):
-        self.rules = list(rules) if rules else []
+        # 只留 dict 规则：`load()` 只校验'是 list'不校验元素类型，而直接构造
+        # `ExecPolicy([...])`（测试与嵌入式调用）也走这里。混进一个字符串就会让
+        # `rule.get(...)` 抛 AttributeError，异常一路冒出 ApprovalPolicy.decide
+        # 之外、整轮任务中断（2026-09-22 审计：规则文件写成 ["allow"] 即触发）。
+        # 方向虽是 fail-closed（不会被放行），但'坏配置炸掉审批门'同样是缺陷。
+        self.rules = [r for r in (rules or []) if isinstance(r, dict)]
 
     @classmethod
     def load(cls, path: str) -> "ExecPolicy":
@@ -94,6 +99,10 @@ class ExecPolicy:
             return False
         # command_prefix 前缀匹配（对命令文本；省略 = 任意匹配）
         prefix = match.get("command_prefix")
+        # 大小写敏感（原样比较）——这是**规定**的语义，test_execpolicy.py 里有对应用例。
+        # 但它与同一条规则里 `pattern` 的 re.IGNORECASE 不一致：用 command_prefix 写的
+        # **deny** 规则可以被 `CURL -s ...` 这类大小写变体绕过（2026-09-22 审计）。
+        # 需要收紧的话只能改 DSL 语义（会破坏既有用例），留给维护者定。
         if prefix is not None and not command.startswith(prefix):
             return False
         # pattern 正则 re.search + IGNORECASE（省略 = 任意匹配）

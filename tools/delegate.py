@@ -146,12 +146,15 @@ class DelegateTool(BaseTool):
         # 组装事件收集器：stream_delta 逐行收进缓冲；answer/run_end 记录状态
         lines: list = []
         status = {"ok": False}
+        saw_delta = False
 
         def on_event(kind: str, data: dict):
+            nonlocal saw_delta
             try:
                 if kind == "stream_delta":
                     text = str(data.get("text") or "")
                     if text:
+                        saw_delta = True
                         lines.append(text)
                         cb = self._output_callback
                         if cb is not None:
@@ -161,7 +164,11 @@ class DelegateTool(BaseTool):
                                 pass
                 elif kind == "answer":
                     text = str(data.get("output") or "")
-                    if text:
+                    # 流式已经逐段收过了就别再整段收一次：`runtime.run_external` 会先
+                    # 发一串 stream_delta、结束再发一次**完整** answer，两者都 append
+                    # 会让输出**翻倍**（2026-09-22 审计实测：
+                    # output == 'hello-XYZ\nhello-XYZ'，长输出直接双倍 token）。
+                    if text and not saw_delta:
                         lines.append(text)
                 elif kind == "run_end":
                     status["ok"] = data.get("status") == "completed"

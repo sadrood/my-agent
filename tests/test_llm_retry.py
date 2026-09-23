@@ -408,3 +408,54 @@ class TestRateLimitVisibility:
         assert "[限流]" in capsys.readouterr().err, "纯 CLI 下 stderr 仍要有兜底提示"
         assert seen and seen[0] >= 30, "回调要拿到真实等待秒数，实际 %s" % seen
         assert slept and slept[0] >= 30, "确实按该时长等待（此处被替换成记录）"
+
+
+class TestEmptyChoicesGuard:
+    """非流式响应对 choices / message 的防御。
+
+    实测故障（2026-09-22 审计）：网关把上游错误包成 **HTTP 200 + {"choices": []}**
+    是常见形态（内容被安全策略拦截时也这样），而 `chat()` / `chat_with_tools()`
+    直接 `response.choices[0].message` —— 抛 `IndexError` / `AttributeError`，
+    文章流水线会把它包成"阶段「outline」调用失败：list index out of range"，
+    排查方向被带偏。`models/vision.py` 对同一问题专门加了保护，主 LLM 反而没有。
+    """
+
+    class _Msg:
+        def __init__(self):
+            self.content = "hi"
+            self.tool_calls = None
+
+    class _Choice:
+        def __init__(self, message):
+            self.message = message
+            self.finish_reason = "stop"
+
+    def _resp(self, choices):
+        class _R:
+            pass
+        r = _R()
+        r.choices = choices
+        return r
+
+    def test_empty_choices_raises_readable_error(self):
+        from models.llm import _first_choice_message
+        with pytest.raises(RuntimeError) as ei:
+            _first_choice_message(self._resp([]))
+        assert "choices" in str(ei.value)
+
+    def test_missing_choices_attribute(self):
+        from models.llm import _first_choice_message
+        with pytest.raises(RuntimeError):
+            _first_choice_message(object())
+
+    def test_none_message_raises(self):
+        from models.llm import _first_choice_message
+        with pytest.raises(RuntimeError) as ei:
+            _first_choice_message(self._resp([self._Choice(None)]))
+        assert "message" in str(ei.value)
+
+    def test_normal_response_passes_through(self):
+        from models.llm import _first_choice_message
+        choice, message = _first_choice_message(
+            self._resp([self._Choice(self._Msg())]))
+        assert message.content == "hi" and choice.finish_reason == "stop"

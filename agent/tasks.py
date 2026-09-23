@@ -178,9 +178,15 @@ class TaskTool(BaseTool):
         if op == "create":
             return self.execute_json({"operation": "create", "title": parts[1] if len(parts) > 1 else ""})
         if op in ("status", "complete", "log"):
-            sub = parts[1].split(maxsplit=1) if len(parts) > 1 else []
-            tid = sub[0] if sub else ""
-            rest = sub[1] if len(sub) > 1 else ""
+            # parts 已经按 maxsplit=2 切好了：["status", "<id>", "<其余>"]，直接取即可。
+            # 旧实现对 parts[1] 又 split 了一次（想再拆出 status/content），
+            # 但 parts[1] 本身就是 id，拆不出第三个字段 → `rest` 恒为空串：
+            #   `task status <id> done`  → 报"非法状态: "
+            #   `task log <id> 写第一章` → 报"log 需要 content。"
+            # 于是工具描述里承诺的这两个用法永远不可用（2026-09-22 审计）。
+            # JSON 入口 execute_json 是好的，所以主流程（function calling）没暴露。
+            tid = parts[1] if len(parts) > 1 else ""
+            rest = parts[2] if len(parts) > 2 else ""
             if op == "complete":
                 return self.execute_json({"operation": "complete", "id": tid})
             if op == "status":

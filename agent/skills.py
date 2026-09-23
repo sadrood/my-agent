@@ -256,7 +256,23 @@ class SkillManager:
             return True
         # 分词包含（对英文多词名 / 混合文本有意义）
         for word in _WORD_SPLIT_RE.split(text_lower):
-            if len(word) >= 2 and word in goal_lower:
+            if len(word) < 2:
+                continue
+            if not word.isascii():
+                # 中日韩没有词边界，整段子串匹配才是对的
+                if word in goal_lower:
+                    return True
+                continue
+            # 1~2 字母的英文词（to/in/is/or/it/on/as…）只认**词边界**。技能描述里
+            # 必然出现这些词，而旧实现是裸子串 `in` 匹配 ——"用 terminal 跑一下
+            # pytest，修掉 memory.py 的召回 bug"里 "in" 落在 terminal、"to" 落在
+            # tool，于是本仓库 20 个技能命中 18 个，命中技能的**全文**随即被注入
+            # 系统提示（2026-09-22 审计实测）。3 字母以上保留词内包含，这样
+            # `githelper` 仍能命中 `git-helper`（词表里它是 git/helper 两段）。
+            if len(word) >= 3:
+                if word in goal_lower:
+                    return True
+            elif re.search(rf"\b{re.escape(word)}\b", goal_lower):
                 return True
         return False
 
@@ -290,7 +306,18 @@ class SkillManager:
                 # 脚本计数提示：仅告知有多少附带脚本，不自动放行执行
                 line += f"（含 {len(s.scripts)} 个脚本）"
             index_lines.append(line)
-        parts.append("技能索引：\n" + "\n".join(index_lines))
+        index_text = "技能索引：\n" + "\n".join(index_lines)
+        # 命中正文优先：先把正文的预算留出来，索引按剩余空间截断。旧实现是
+        # "索引 + 正文拼完再统一尾部截断"，而索引用的是**完整 description**，
+        # 它自己就可能超过 SKILLS_MAX_CHARS（本仓库实测索引 9849 字 > 6000），
+        # 于是被命中的技能正文 100% 被截掉，只剩一截索引 + "已截断"提示 ——
+        # 命中等于没命中（2026-09-22 审计实测）。
+        if matched and self.max_chars:
+            body_budget = sum(len(s.body or "") for s in matched)
+            head_room = max(200, self.max_chars - body_budget - 64)
+            if len(index_text) > head_room:
+                index_text = index_text[:head_room] + "\n…（技能索引已截断）"
+        parts.append(index_text)
         if matched:
             body_lines = ["\n命中技能正文："]
             for s in matched:

@@ -139,9 +139,6 @@ class ToonflowTool(BaseTool):
                 "concurrent_count": {
                     "type": "number", "description": "generate_images 用：并发数（默认 5）",
                 },
-                "track_id": {
-                    "type": "number", "description": "gen_prompts 用：出片轨道 ID（add_track 返回）",
-                },
                 "model": {
                     "type": "string",
                     "description": "gen_prompts / gen_videos 用：模型，如 agnes:agnes-video-2.5-flash",
@@ -154,7 +151,10 @@ class ToonflowTool(BaseTool):
                     "type": "string", "description": "gen_videos 用：分辨率，如 720P",
                 },
                 "duration": {
-                    "type": "number", "description": "gen_videos 用：单镜时长（秒，4-12）",
+                    # 只有 add_track 会读它（写进出片轨道）。旧描述写成"gen_videos 用"，
+                    # 模型于是给 gen_videos 传 duration 却**被静默忽略**，还回"已提交
+                    # 出片任务"，可能按错误时长出片并计费（2026-09-22 审计）。
+                    "type": "number", "description": "add_track 用：单镜时长（秒，4-12）",
                 },
                 "audio": {
                     "type": "boolean", "description": "gen_videos 用：是否带音频（默认 false）",

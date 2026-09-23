@@ -311,21 +311,28 @@ class Executor:
             elif thinking_mode_seen:
                 # 本回合跳过思考（无推理增量）也要带空字段：thinking 服务仍要求回传
                 assistant_msg[response.reasoning_field or "reasoning_content"] = ""
+            # 本轮 id 的兜底编号：必须以"本轮第几个"为准，不能全用
+            # `len(tool_calls_log)`（那是**整轮开始时**的值）—— 一轮里 N 个调用会拿到
+            # 同一个 id，而回喂的 tool 消息用的是逐条递增的编号，于是 assistant 里
+            # 根本不存在 `call_1`，下一次请求被上游以 "Messages with role 'tool' must
+            # be a response to a preceding message with 'tool_calls'" 400 掉，
+            # 轮级重试全败、整轮已完成的工具成果白做（2026-09-22 审计）。
+            _base = len(tool_calls_log)
             assistant_msg["tool_calls"] = [
                 {
-                    "id": tc.id or f"call_{len(tool_calls_log)}",
+                    "id": tc.id or f"call_{_base + i}",
                     "type": "function",
                     "function": {
                         "name": tc.name,
                         "arguments": json.dumps(tc.arguments, ensure_ascii=False),
                     },
                 }
-                for tc in response.tool_calls
+                for i, tc in enumerate(response.tool_calls)
             ]
             messages.append(assistant_msg)
 
-            for tc in response.tool_calls:
-                call_id = tc.id or f"call_{len(tool_calls_log)}"
+            for i, tc in enumerate(response.tool_calls):
+                call_id = tc.id or f"call_{_base + i}"
                 result, blocked_reason = self._dispatch_tool_call(tc.name, tc.arguments, goal)
 
                 tool_calls_log.append({
@@ -473,6 +480,13 @@ class Executor:
 
         self._emit("run_loop_start", {"goal": goal})
 
+        # 监管者配额按**每个目标**计。`_supervisor_rounds` 是 Executor 实例级状态，
+        # 而交互式 CLI 整场会话只建一个 Agent/Executor（`main.py` 的 while 里反复调
+        # `agent.run()`），它此前既不在这里重置、也不随 metrics 归零 —— 于是第一个
+        # 目标用满 3 次复核后，**后续每个目标都不再复核**，"让 agent 做完任务再结束"
+        # 这道闸门在会话后半段静默消失，且没有任何提示（2026-09-22 审计）。
+        self._supervisor_rounds = 0
+
         # 停止信号注入工具层：terminal 等工具在执行期间轮询该信号，
         # 用户点"停止"时正在运行的子进程能被立即终止，而不是干等到命令结束
         if stop_event is not None:
@@ -505,10 +519,9 @@ class Executor:
             if turn > 0:
                 budget.observe(pending)
                 pending = TurnOutcome()
-            if not budget.allow_next():
-                break
-            # 连续无进展预警（无限模式下"换新做法但失败"的轮次不会触发任何停止条件，
-            # 只有这个计数器能告诉用户"它已经很久没有产出了"）。每阈值只响一次。
+            # 预警必须先于「停」判断：预算恰好同时耗尽的那一轮（used 与
+            # stagnation_turns 同时到位）旧顺序会先 break，把更准确的「已连续 N 轮
+            # 没有产出」吞掉、只剩「轮数耗尽」（2026-09-22 审计）。
             if budget.stagnation_alarm():
                 alarm_data = {
                     "turn": turn + 1,
@@ -521,6 +534,8 @@ class Executor:
                         self._event_sink("stagnation_warning", alarm_data)
                     except Exception:
                         pass
+            if not budget.allow_next():
+                break
             # 停止检查点：每轮开始前，用户点"停止"后优雅退出
             if stop_event is not None and stop_event.is_set():
                 try:
@@ -600,7 +615,26 @@ class Executor:
                     })
                     # 分片睡眠：stop_event 置位立即退出，不再"睡满再响应"
                     if self._sleep_interruptible(delay, stop_event):
-                        raise KeyboardInterrupt("用户停止")
+                        # 优雅停止，与另外两个检查点同款。旧实现是
+                        # `raise KeyboardInterrupt("用户停止")` —— 它是 BaseException，
+                        # 同层的 `except Exception` 接不住，一路穿到 agent.py 的
+                        # Ctrl+C 分支：看板 worker 线程直接死、`run_end` 事件永不发出
+                        # （前端一直停在"运行中"），交接清单、记忆沉淀、
+                        # last_execution_summary 全部跳过 —— 同一个"停止"按钮，
+                        # 走到哪个检查点就有两种结局（2026-09-22 审计）。
+                        try:
+                            self.tool_manager.cancel_active_tools()
+                        except Exception:
+                            pass
+                        self._emit("run_loop_end", {"success": False, "stopped": True})
+                        return {
+                            "success": False,
+                            "output": "已按要求停止执行。",
+                            "tool_calls": tool_calls_log,
+                            "errors": errors,
+                            "ops": turn + 1,
+                            "stopped": True,
+                        }
                 try:
                     if on_turn_start is not None:
                         try:
@@ -790,16 +824,19 @@ class Executor:
             elif thinking_mode_seen:
                 # 本回合跳过思考（无推理增量）也要带空字段：thinking 服务仍要求回传
                 assistant_msg[response.reasoning_field or "reasoning_content"] = ""
+            # 同 _dispatch_tool_call：id 兜底编号必须按"本轮第几个"算，否则一轮里多个
+            # 调用会共用同一个 id，回喂的 tool 消息却逐条递增，下一次请求必 400。
+            _base = len(tool_calls_log)
             assistant_msg["tool_calls"] = [
                 {
-                    "id": tc.id or f"call_{len(tool_calls_log)}",
+                    "id": tc.id or f"call_{_base + i}",
                     "type": "function",
                     "function": {
                         "name": tc.name,
                         "arguments": json.dumps(tc.arguments, ensure_ascii=False),
                     },
                 }
-                for tc in response.tool_calls
+                for i, tc in enumerate(response.tool_calls)
             ]
             messages.append(assistant_msg)
 
@@ -1404,55 +1441,12 @@ class Executor:
             self._emit("tool_call", {"tool": "think", "args": {"thought_len": len(thought)}})
             return ToolResult(success=True, output="思考已记录。"), ""
 
-        # 1. 审批门
-        if self.approval is not None:
-            request = self.tool_manager.build_approval_request(tool_name, arguments)
-            if request is not None:
-                decision = self.approval.decide(request)
-                self._emit("approval", {
-                    "tool": tool_name,
-                    "decision": "allow" if decision.allowed else "deny",
-                    "reason": decision.reason,
-                })
-                if not decision.allowed:
-                    return ToolResult(success=False, output="", error=decision.reason), decision.reason
-
-        # 2. Guardian 审校
-        if self.guardian is not None:
-            request = self.tool_manager.build_approval_request(tool_name, arguments)
-            if request is not None and self.guardian.should_review(request.risk_level):
-                # 2.1 人工放行优先：用户已就**这一次完全相同**的调用明确授权
-                #     （授权只能由人类输入产生，见 agent/consent.py），不再让盲审否决。
-                #     只跳过 Guardian 这一层——审批黑名单/沙箱在上面第 1 步，管不到。
-                if self.consents is not None and self.consents.allows(tool_name, arguments):
-                    self._emit_visible("guardian_overridden", {"tool": tool_name,
-                                                               "reason": "用户已授权放行"})
-                else:
-                    verdict = self.guardian.review(request, goal)
-                    self._emit_visible("guardian", {"tool": tool_name, "verdict": verdict.verdict,
-                                                    "reason": verdict.reason})
-                    if verdict.verdict == "block":
-                        blocked = f"Guardian 拦截: {verdict.reason}"
-                        if self._consents_enabled():
-                            self.consents.record_block(tool_name, arguments, verdict.reason,
-                                                       command=getattr(request, "command", "") or "")
-                            # 2.2 人就在现场时，就地问他一句——这是"跟 Guardian 说放行"
-                            #     最短的路径：绑定精确、当场生效，不用等下一轮对话。
-                            if self.consent_ask is not None:
-                                scope = self._ask_consent(tool_name, arguments, verdict.reason)
-                                if scope:
-                                    grant = self.consents.grant_pending(
-                                        scope=scope,
-                                        note=f"拦截时人工确认（{'本会话内同一条调用' if scope == 'session' else '本次'}）")
-                                    if grant is not None:
-                                        self._emit_visible("guardian_override_granted", {
-                                            "tool": tool_name, "scope": scope,
-                                            "reason": verdict.reason,
-                                        })
-                                        # 放行：继续走下面的执行流程
-                                        blocked = ""
-                        if blocked:
-                            return ToolResult(success=False, output="", error=blocked), blocked
+        # 1+2. 审批门 + Guardian 审校 —— 统一走 gate_tool_call，legacy 字符串入口
+        #      共用同一道门（此前 legacy 与 team 路径**完全没有**这道门，
+        #      2026-09-22 审计）。
+        blocked = self.gate_tool_call(tool_name, arguments, goal)
+        if blocked is not None:
+            return blocked, blocked.error
 
         # 3. 执行（带硬超时：任何工具卡死都不冻结 Agent）
         self._emit("tool_call", {"tool": tool_name, "args": arguments})
@@ -1632,9 +1626,19 @@ class Executor:
         return bool(stop_event is not None and stop_event.is_set())
 
     def _sibling_calls_in_flight(self, tool_name: str) -> bool:
-        """同批次里是否还有该工具的其它调用正在执行（引用计数 > 0）。"""
+        """同批次里是否还有该工具的**其它**调用正在执行。
+
+        必须排除"我自己"：`_execute_one_tool_call` 在派发**之前**就先
+        `_enter_tool_call` 给自己记了账，所以这里读到的计数至少是 1 ——
+        判 `> 0` 恒为真，`reset_tool` 在生产路径上一次都不会被调用，而错误文案
+        仍写着"已重置该工具状态"：browser 卡死一次后，坏掉的 playwright 连接会
+        原样留到后续每一轮，正是那段注释要根治的"一次卡死、次次卡死"
+        （2026-09-22 审计实测：reset_tool 调用数为 0）。
+        测试没发现是因为它们直接调 `_dispatch_tool_call`、绕过了 `_enter_tool_call`，
+        那时计数确实是 0。
+        """
         with self._inflight_lock:
-            return self._inflight.get(tool_name, 0) > 0
+            return self._inflight.get(tool_name, 0) > 1
 
     def _enter_tool_call(self, tool_name: str) -> None:
         with self._inflight_lock:
@@ -1756,7 +1760,7 @@ class Executor:
                     result.update(screenshot_result)
                     return result
 
-            tool_result = self.call_tool_guarded(tool_name, tool_input)
+            tool_result = self.call_tool_guarded(tool_name, tool_input, goal)
             result["tool"] = tool_name
             result["tool_input"] = tool_input
             result["success"] = tool_result.success
@@ -1810,7 +1814,66 @@ class Executor:
             "reasoning": "自动执行",
         }
 
-    def call_tool_guarded(self, tool_name: str, tool_input: str) -> ToolResult:
+    def gate_tool_call(self, tool_name: str, arguments: dict,
+                       goal: str = "") -> Optional[ToolResult]:
+        """审批门 + Guardian 审校：返回 None = 放行，否则返回**拒绝**结果。
+
+        所有执行路径共用这一道门 —— function calling 主循环（`_dispatch_tool_call`）
+        与 legacy 字符串入口（`call_tool_guarded`）。`goal` 只用于 Guardian 的上下文。
+        """
+        # 1. 审批门
+        if self.approval is not None:
+            request = self.tool_manager.build_approval_request(tool_name, arguments)
+            if request is not None:
+                decision = self.approval.decide(request)
+                self._emit("approval", {
+                    "tool": tool_name,
+                    "decision": "allow" if decision.allowed else "deny",
+                    "reason": decision.reason,
+                })
+                if not decision.allowed:
+                    return ToolResult(success=False, output="", error=decision.reason)
+
+        # 2. Guardian 审校
+        if self.guardian is not None:
+            request = self.tool_manager.build_approval_request(tool_name, arguments)
+            if request is not None and self.guardian.should_review(request.risk_level):
+                # 2.1 人工放行优先：用户已就**这一次完全相同**的调用明确授权
+                #     （授权只能由人类输入产生，见 agent/consent.py），不再让盲审否决。
+                #     只跳过 Guardian 这一层——审批黑名单/沙箱在上面第 1 步，管不到。
+                if self.consents is not None and self.consents.allows(tool_name, arguments):
+                    self._emit_visible("guardian_overridden", {"tool": tool_name,
+                                                               "reason": "用户已授权放行"})
+                else:
+                    verdict = self.guardian.review(request, goal)
+                    self._emit_visible("guardian", {"tool": tool_name, "verdict": verdict.verdict,
+                                                    "reason": verdict.reason})
+                    if verdict.verdict == "block":
+                        blocked = f"Guardian 拦截: {verdict.reason}"
+                        if self._consents_enabled():
+                            self.consents.record_block(tool_name, arguments, verdict.reason,
+                                                       command=getattr(request, "command", "") or "")
+                            # 2.2 人就在现场时，就地问他一句——这是"跟 Guardian 说放行"
+                            #     最短的路径：绑定精确、当场生效，不用等下一轮对话。
+                            if self.consent_ask is not None:
+                                scope = self._ask_consent(tool_name, arguments, verdict.reason)
+                                if scope:
+                                    grant = self.consents.grant_pending(
+                                        scope=scope,
+                                        note=f"拦截时人工确认（{'本会话内同一条调用' if scope == 'session' else '本次'}）")
+                                    if grant is not None:
+                                        self._emit_visible("guardian_override_granted", {
+                                            "tool": tool_name, "scope": scope,
+                                            "reason": verdict.reason,
+                                        })
+                                        # 放行：继续走下面的执行流程
+                                        blocked = ""
+                        if blocked:
+                            return ToolResult(success=False, output="", error=blocked)
+        return None
+
+    def call_tool_guarded(self, tool_name: str, tool_input: str,
+                          goal: str = "") -> ToolResult:
         """带**硬超时**的工具调用（所有分发路径都必须走这里）。
 
         为什么必须统一：`_run_tool_with_timeout` 此前只在 `_dispatch_tool_call`
@@ -1818,7 +1881,18 @@ class Executor:
         视觉截图这三条路径都是裸调 `tool_manager.execute()`。一旦 CDP 半死，
         `browser` 的 `done.wait()` 是**无限等待**（它自己注释写明"靠外层
         Executor 提供硬超时兜底"），主线程就永久冻结、无法恢复。
+
+        另：这条字符串入口此前还**完全不过审批门**（function calling 主循环是过的），
+        team worker 同样裸调 `tool_manager.execute()` —— 等于黑名单、沙箱等级、
+        Guardian 在 legacy/team 模式下全部不生效（2026-09-22 审计）。现在统一走
+        `gate_tool_call`。
         """
+        from agent.approval import arguments_from_string
+        blocked = self.gate_tool_call(
+            tool_name, arguments_from_string(tool_input), goal)
+        if blocked is not None:
+            return blocked
+
         timeout = float(TOOL_CONFIG.get("tool_timeout", 300))
         result = self._run_tool_with_timeout(
             lambda: self.tool_manager.execute(tool_name, tool_input), timeout)

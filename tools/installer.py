@@ -25,6 +25,29 @@ import tempfile
 from tools.base import BaseTool, ToolResult
 
 
+def _describe_installer_call(command: str, arguments: dict) -> str:
+    """把 installer 调用翻成「看得懂要跑什么」的一行，供审批提示展示。
+
+    `arguments` 在 `ApprovalPolicy._ask()` 里从不打印，所以审批文本必须自己带上
+    真正要执行的命令 —— 否则用户看到的只是抽象名字 `installer mcp_add`，按 y 就
+    fork 执行了一个他根本没看见的命令（2026-09-22 审计）。
+    """
+    if command == "mcp_add":
+        name = str(arguments.get("name") or "")
+        cmd = str(arguments.get("mcp_command") or "")
+        raw_args = arguments.get("args")
+        if isinstance(raw_args, list):
+            argv = " ".join(str(a) for a in raw_args)
+        else:
+            argv = str(raw_args or "")
+        line = f"installer mcp_add name={name} → 将执行: {cmd} {argv}".strip()
+        env = arguments.get("env")
+        if env:
+            line += "（环境变量: " + ", ".join(str(k) for k in env) + "）"
+        return line
+    return f"installer {command}".strip()
+
+
 class InstallerTool(BaseTool):
     """技能包 / MCP 插件安装器（安全边界：SkillPackManager 白名单 + 验签）。"""
 
@@ -98,7 +121,10 @@ class InstallerTool(BaseTool):
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
-            command=f"installer {command}".strip(),
+            # 审批提示必须带上**真正要执行的命令**：`arguments` 在 _ask() 里从不打印，
+            # 用户看到的只有抽象名字 `installer mcp_add`，按 y 就 fork 执行了一个他
+            # 根本没看见的命令（2026-09-22 审计）。
+            command=_describe_installer_call(command, arguments),
             risk_level=risk,
             min_sandbox_mode=sandbox,
         )
@@ -268,7 +294,11 @@ class InstallerTool(BaseTool):
         if isinstance(args, list):
             return [str(a) for a in args]
         if isinstance(args, str):
-            return shlex.split(args) if args.strip() else []
+            if not args.strip():
+                return []
+            # POSIX 模式会吃掉反斜杠：Windows 路径 `C:\Users\me` 变成
+            # `C:Usersme`，服务器直接起不来（2026-09-22 审计）。按平台选模式。
+            return shlex.split(args, posix=(os.name != "nt"))
         return [str(args)]
 
     def _mcp_add(self, name: str, command: str, args, env, overwrite: bool) -> ToolResult:

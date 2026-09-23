@@ -191,6 +191,14 @@ class ImageGenModel:
                     images.append(item)
             elif save:
                 images.append(self._save_image(item, i, save_dir))
+            else:
+                # b64 形式的提供方（如商汤）：save=False 时不能什么都不做 ——
+                # 旧实现在这里直接跳过，函数返回 `{"images": []}` 却报成功，调用方
+                # 拿不到任何图片数据；而 URL 形式的提供方两种都一样返回 URL，
+                # 行为不对称（2026-09-22 审计，现有测试只覆盖了 URL 那一半）。
+                # 给回一个可直接使用的 data URI。
+                images.append(item if item.startswith("data:")
+                              else f"data:image/png;base64,{item}")
         return {
             "images": images,
             # 报**实际出图**的模型（备用顶上时不能谎报成主模型）

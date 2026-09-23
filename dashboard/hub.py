@@ -46,6 +46,8 @@ class DashboardHub:
 
     def __init__(self, max_history: int = 500):
         self._subscribers: Dict[str, asyncio.Queue] = {}
+        # 每个订阅者所在的事件循环：worker 线程要靠它把事件安全地送进去
+        self._subscribe_loops: Dict[str, Any] = {}
         self._history: List[DashboardEvent] = []
         self._max_history = max_history
         self._lock = threading.Lock()
@@ -93,16 +95,40 @@ class DashboardHub:
 
         # 推送给订阅者
         event_dict = event.to_dict()
-        for queue in list(self._subscribers.values()):
+        for cid, queue in list(self._subscribers.items()):
+            # asyncio.Queue **不是线程安全的**：worker 线程直接 put_nowait，只有在事件
+            # 循环恰好被别的东西唤醒时才会被处理（uvicorn 有 0.1s 定时器兜底才没炸，
+            # 换宿主/自建循环就不保证了）。call_soon_threadsafe 才会真正唤醒循环
+            # （2026-09-22 审计）。
+            loop = self._subscribe_loops.get(cid)
             try:
-                queue.put_nowait(event_dict)
-            except asyncio.QueueFull:
-                pass
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(self._safe_put, queue, event_dict)
+                else:
+                    self._safe_put(queue, event_dict)
+            except RuntimeError:
+                pass          # 循环已关闭：订阅者即将断开，丢弃这一条
+
+    @staticmethod
+    def _safe_put(queue: "asyncio.Queue", item: dict) -> None:
+        """投递一条事件；队列满就丢（背压策略：宁可丢事件也不阻塞）。
+
+        必须单独成函数：`call_soon_threadsafe` 的回调在**事件循环线程**里
+        执行，那里的 QueueFull 没法被调用方的 try 接住。
+        """
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
 
     def subscribe(self, client_id: str) -> asyncio.Queue:
         """订阅事件流。"""
         queue = asyncio.Queue(maxsize=200)
         self._subscribers[client_id] = queue
+        try:
+            self._subscribe_loops[client_id] = asyncio.get_running_loop()
+        except RuntimeError:
+            self._subscribe_loops[client_id] = None
 
         # 发送历史事件
         for event in self._history[-50:]:
@@ -116,6 +142,7 @@ class DashboardHub:
     def unsubscribe(self, client_id: str):
         """取消订阅。"""
         self._subscribers.pop(client_id, None)
+        self._subscribe_loops.pop(client_id, None)
 
     def get_current_state(self) -> dict:
         """获取当前运行状态。"""

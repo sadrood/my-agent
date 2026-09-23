@@ -75,3 +75,44 @@ def test_win_unix_shim_translations():
     # 不应翻译的普通命令原样返回
     assert _win_unix_shim("dir /b") == "dir /b"
     assert _win_unix_shim("python run.py") == "python run.py"
+
+
+class TestSessionCleanupAtExit:
+    """常驻会话必须在进程退出时被收掉。
+
+    实测故障（2026-09-22 审计）：`TerminalTool.close_all_sessions()` **没有任何生产
+    调用方**（Agent 也没有退出清理钩子），于是 `terminal session start` 起的常驻
+    cmd.exe 在进程生命周期内一直活着；叠加 `ToolManager.reset_tool` 超时重建实例，
+    旧实例的 sessions 与后台 job 会被彻底孤儿化 —— 句柄、临时日志、子进程再无人回收。
+    """
+
+    def test_manager_registers_itself_for_atexit(self):
+        import atexit
+        import tools.terminal_session as ts
+
+        assert hasattr(ts, "_close_all_managers"), "缺少进程退出收尾"
+        mgr = ts.TerminalSessionManager()
+        assert len(ts._LIVE_MANAGERS) >= 1, "管理器没登记进 WeakSet"
+        assert ts._ATEXIT_REGISTERED is True, "没注册 atexit"
+        assert atexit._ncallbacks() > 0
+
+    def test_close_all_managers_closes_live_sessions(self):
+        import tools.terminal_session as ts
+
+        mgr = ts.TerminalSessionManager()
+        s = mgr.start("cleanup-test")
+        assert s is not None
+        ts._close_all_managers()
+        assert mgr.get("cleanup-test") is None, "退出收尾没关掉会话"
+
+    def test_weakset_does_not_pin_managers(self):
+        """弱引用：被 reset 掉的旧实例不能因为登记而永远回收不了。"""
+        import gc
+        import tools.terminal_session as ts
+
+        mgr = ts.TerminalSessionManager()
+        n_with_mgr = len(ts._LIVE_MANAGERS)
+        del mgr
+        gc.collect()
+        # 别的临时管理器也可能在这期间被回收，所以只断言"变少了"而不是"回到某个数"
+        assert len(ts._LIVE_MANAGERS) < n_with_mgr, "WeakSet 把管理器钉住了（强引用泄漏）"

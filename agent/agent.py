@@ -473,6 +473,19 @@ class Agent:
             self.guardian = self._build_guardian()
         except Exception:
             pass
+        try:
+            self.supervisor = self._build_supervisor()
+        except Exception:
+            pass
+        # Guardian / 监管者必须**同时**推给执行器：那道门是在 Executor 里执行的
+        # （`Executor.gate_tool_call` 读 `self.guardian`，监管复核读 `self.supervisor`），
+        # 而 Executor 用的是构造时注入的引用、没有 setter。
+        # 旧实现只改了 Agent 自己的属性，于是 `/model` 换端点后高风险操作仍打到
+        # **旧端点/旧模型**；旧端点不可用时按 Guardian 的 fail-open 默认放行 ——
+        # 等于切模型后 Guardian 被静默关掉，而界面照常显示"已审校"（2026-09-22 审计）。
+        if self.executor is not None:
+            self.executor.guardian = self.guardian
+            self.executor.supervisor = self.supervisor
         return {
             "model": self.llm.default_model,
             "base_url": str(self.llm.client.base_url),
@@ -765,6 +778,15 @@ class Agent:
         errors_collected = []    # 收集所有错误（用于失败模式学习）
 
         while self.state.current_step < len(self.state.plan):
+            # 步骤上限判断必须放在循环体**开头**：旧实现放在体末，而那之前每条路径
+            # 都以 continue / break 收尾（执行成功 continue、重规划 continue、
+            # 重规划失败 break、超重规划 break），那句判断**永远执行不到** ——
+            # `--max-steps` 成了一个完全无效的开关（2026-09-22 审计实测：
+            # `--plan --max-steps 5` 配 10 步的计划会一路跑完，从不提示）。
+            if self.state.current_step >= self.config.max_steps:
+                print_warning(f"已达最大步骤数 ({self.config.max_steps})，终止。",
+                              use_rich=self.config.verbose)
+                break
             step_idx = self.state.current_step
             current_step = self.state.plan[step_idx]
 
@@ -778,7 +800,12 @@ class Agent:
             })
 
             step_context_parts = []
-            step_success = True
+            # 默认**失败**：只有内层循环真的走到"成功"分支才置 True。
+            # 旧实现初值是 True，于是"重试次数用尽"（内层 while 因 step_retry_count
+            # 耗尽而退出，没走任何赋值分支）会被当成步骤成功 —— 不记错误、不重规划，
+            # 最终 task_success 还可能被算成成功并写进经验库污染召回
+            # （2026-09-22 审计实测：连续 max_step_retries 次 status="continue" 即触发）。
+            step_success = False
 
             while step_retry_count < self.config.max_step_retries:
                 context_summary = "\n".join(step_context_parts[-5:]) if step_context_parts else ""
@@ -907,10 +934,6 @@ class Agent:
                     break
             else:
                 print_warning(f"已达最大重规划次数 ({self.config.max_replans})，终止。", use_rich=self.config.verbose)
-                break
-
-            if self.state.current_step >= self.config.max_steps:
-                print_warning(f"已达最大步骤数 ({self.config.max_steps})，终止。", use_rich=self.config.verbose)
                 break
 
         # 5. 清理
@@ -1081,6 +1104,12 @@ class Agent:
 
     def _init_mcp_servers(self):
         """根据配置初始化 MCP 服务器连接。"""
+        # MCP_ENABLED 此前是个**死开关**：MCP_CONFIG["enabled"] 定义了却没有任何
+        # 读取点，用户在 .env 里关不掉 MCP（2026-09-22 审计）。
+        from config import MCP_CONFIG
+        if not MCP_CONFIG.get("enabled", True):
+            self._log("\n[MCP] 已在配置中关闭（MCP_ENABLED=false），跳过连接。")
+            return
         servers = self.config.mcp_servers
         if not servers:
             return
@@ -1124,6 +1153,11 @@ class Agent:
                     )
                     if compare.get("has_anomaly"):
                         print_warning(f"帧对比异常: {compare.get('type', '')} - {compare.get('description', '')[:100]}", use_rich=self.config.verbose)
+                    elif compare.get("detect_failed"):
+                        # 检测失败 != 页面正常：不区分的话视觉模型挂掉时，
+                        # agent 会在"以为检查过了"的前提下继续操作（2026-09-22 审计）
+                        print_warning(f"帧对比未执行（视觉检测失败）: {compare.get('description', '')[:100]}",
+                                      use_rich=self.config.verbose)
         except Exception:
             pass
 
@@ -1139,6 +1173,9 @@ class Agent:
             )
             if anomaly.get("has_anomaly"):
                 return f"{anomaly.get('type', '未知')}: {anomaly.get('description', '')}"
+            if anomaly.get("detect_failed"):
+                # 让"没检查成"这件事可见（进 step_context），而不是被读成"页面正常"
+                return f"异常检测未执行: {anomaly.get('description', '')[:100]}"
         except Exception:
             pass
         return ""
@@ -1217,10 +1254,22 @@ class Agent:
             print_warning(f"会话恢复失败: {e}", use_rich=self.config.verbose)
 
     def _save_session_if_requested(self, final_summary: str):
-        """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。"""
+        """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。
+
+        `final_summary` 是本次运行的最终交付文本，必须真的落进 `last_summary`：
+        旧实现收下这个形参却**一次都没用过**，写盘的是 `self.last_execution_summary`，
+        而那个字段在 `_run_loop` 结尾被无条件覆盖成"使用了工具: …"（或"本轮未使用
+        工具"），于是 `_run_loop` 里的
+        `resume_unfinished = any(k in prev_summary for k in INCOMPLETE_MARKERS)`
+        恒为 False —— 未完成交接清单只进了当轮上下文，**没进会话文件**；
+        重开该对话续跑时，"只续不重做 + 扩大回忆窗口（30 条/600 字）"整套机制静默失效
+        （2026-09-22 审计）。形参名说明原意就是写它，是一次回归。
+        """
         name = self.config.session_name
         if not name:
             return
+        # 截断只是防单文件膨胀：会话文件里已有全部消息，这里存的是"上一轮做到哪"的摘要
+        last_summary = (final_summary or self.last_execution_summary or "")[:2000]
         try:
             messages = [
                 {"role": getattr(m, "role", "user"), "content": getattr(m, "content", "")}
@@ -1229,7 +1278,7 @@ class Agent:
             self.session_store.save_conversation(
                 name,
                 messages=messages,          # 全量记录（每轮整份重写，见下方体积告警）
-                last_summary=self.last_execution_summary,
+                last_summary=last_summary,
                 model=self.llm.default_model,
                 base_url=str(self.llm.client.base_url),
                 # 会话标题交给小快模型（杂活不占用主模型）；失败自动退回规则标题
@@ -1240,7 +1289,10 @@ class Agent:
             # 副本。历史上出现过单文件 3.5GB / 630 万条消息把进程拖垮的事故，
             # 所以到阈值就明确提示用户压缩，而不是等它涨到不可收拾。
             try:
-                path = os.path.join(self.session_store.dir, f"{name}.json")
+                # 必须走 SessionStore._path（含 sanitize_name）：写入用的是它，
+                # 这里裸拼 `{name}.json` 对含空格/冒号的名字会指向不存在的文件 ——
+                # size 恒为 0，那条针对 3.5GB 事故的告警永远不响（2026-09-22 审计）。
+                path = self.session_store._path(name)
                 size_mb = os.path.getsize(path) / 1048576 if os.path.exists(path) else 0
                 limit = float(SESSION_CONFIG.get("warn_size_mb", 20))
                 if size_mb >= limit:
@@ -1628,10 +1680,17 @@ class Agent:
         incomplete_reason = None
         if result.get("stopped"):
             incomplete_reason = "任务被停止/中断"
-        elif not result.get("success") and (
-            "已达到任务最大操作轮数" in final or "已达到任务最大操作轮数" in str(result.get("errors"))
-        ):
-            incomplete_reason = f"达到任务最大操作轮数（{result.get('ops') or '?'}）"
+        elif not result.get("success"):
+            # 用 INCOMPLETE_MARKERS 统一判定，而不是只硬编码"已达到任务最大操作轮数"
+            # 那一句。打转停止的文案是"已有 N 轮在原地打转（原样重复调用或空回复），
+            # 已停止以免空转"，既不含那一句、也没用上专为它准备的 "没有进展" marker
+            # —— 于是模型连续打转被停掉后**不生成交接清单**，用户只看到一句原始停止
+            # 文案，下一轮续跑也无从"只续不重做"（2026-09-22 审计）。
+            haystack = f"{final}\n{result.get('errors') or ''}"
+            if any(k in haystack for k in INCOMPLETE_MARKERS):
+                ops = result.get("ops")
+                incomplete_reason = (f"达到任务最大操作轮数（{ops}）" if ops
+                                     else "任务未跑完（轮数耗尽 / 原地打转 / 提前停止）")
         if incomplete_reason and self.rollout is not None:
             # 交接收尾也进 rollout，日志可复盘
             try:

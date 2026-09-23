@@ -303,5 +303,19 @@ def launch_desktop():
     entry.bind("<KeyPress>", on_key)
     send_btn.config(command=send)
 
+    def _on_close():
+        # 点右上角 × 时必须**真的停任务**：Tk 默认只退出 mainloop，而 agent 线程是
+        # daemon、解释器退出时被硬杀 —— 正在执行的 write/edit 可能只落一半
+        # （2026-09-22 审计）。
+        try:
+            stop_event.set()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
     root.after(100, poll)
     root.mainloop()

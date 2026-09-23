@@ -261,6 +261,14 @@ class Memory:
         self.step_history.clear()
 
     def clear_all(self):
+        """清空全部记忆（内存 + 落盘）。
+
+        删的是 `chat_db_path`（= `db_path/<chat_id>/`）而**不是** `db_path`：文件
+        从来就写在 chat 子目录里（`_save_json` 用的是 `chat_dir or self.chat_db_path`），
+        删父目录等于什么都没删 —— 清空后重新 `Memory(db_path=...)`，长期记忆与失败
+        模式原样复活（2026-09-22 审计实测）。旧测试断言的正是父目录下的文件，
+        所以一直是个空断言。
+        """
         self.conversation_history.clear()
         self.step_history.clear()
         self.long_term_memory.clear()
@@ -268,7 +276,7 @@ class Memory:
         self.failure_patterns.clear()
         self.strategies.clear()
         for fname in ["memory.json", "experiences.json", "failure_patterns.json", "strategies.json"]:
-            fp = os.path.join(self.db_path, fname)
+            fp = os.path.join(self.chat_db_path, fname)
             if os.path.exists(fp):
                 os.remove(fp)
 
@@ -496,7 +504,12 @@ class Memory:
         # ⚠️ 只替换**成功提炼**的类别：失败的类别必须原样保留。
         # （曾经写成"所有尝试过的类别"，于是解析失败那几类的原始记录会被静默丢掉——
         #  干跑时 7 类里 4 类解析失败，159 条会变成 5 条。这是数据丢失，不是压缩。）
-        keep = [e for e in self.experiences if e.task_category not in done_cats]
+        # 另外，本类别里**已经蒸馏过**的条目要一并保留：它们不是"待压缩的原始记录"，
+        # 而是上一轮压缩的成果。旧实现按 task_category 一刀切，重跑压缩会把上一轮
+        # 提炼出来的高层条目一起删掉（2026-09-22 审计实测：5 条 coding 记录第 1 轮
+        # 提炼出 1 条，再来 3 条新记录做第 2 轮后，第 1 轮那条消失了）。
+        keep = [e for e in self.experiences
+                if e.task_category not in done_cats or self._is_distilled(e)]
         after_entries = keep + distilled_entries
         result = {"groups": report, "before": before, "after": len(after_entries),
                   "archived": "", "error": "；".join(errors), "aborted": aborted}

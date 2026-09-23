@@ -410,6 +410,47 @@ class TestToolLayer:
         from tools.tool_manager import ToolManager
         assert "video_edit" in ToolManager().list_tools()
 
+    def test_kenburns_forwards_output(self, tmp_path, fake_ffmpeg):
+        """schema 里文档化的 `output` 必须真的被转发。
+
+        实测故障（2026-09-22 审计）：`_kenburns` 全程没读 `arguments["output"]`
+        （其他命令 concat / add_audio / trim / subtitle 都转发了），产物被强制丢进
+        根目录 `generated_videos/`，模型随后按 output/ 路径拼接就"文件不存在"。
+        """
+        img = touch(tmp_path / "a.png")
+        out = str(tmp_path / "output" / "s1.mp4")
+        (tmp_path / "output").mkdir(exist_ok=True)
+        r = VideoEditTool(editor=make_editor(tmp_path)).execute_json(
+            {"command": "kenburns", "image": img, "duration": 2, "output": out})
+        assert r.success is True, r.error
+        assert r.metadata["path"] == out, f"output 没被转发，产物落在 {r.metadata['path']}"
+
+    def test_add_audio_volume_zero_not_overridden(self, tmp_path, fake_ffmpeg):
+        """`volume=0` / `bgm_volume=0` 是合法值，不能被默认值顶掉。
+
+        实测故障（2026-09-22 审计）：`float(arguments.get("volume") or 1.0)`
+        里 `0 or 1.0` 得到 1.0 —— "只要人声、BGM 静音"这种用法静默失效且不报错。
+        """
+        from tools.video_edit import VideoEditTool as _T
+        video = touch(tmp_path / "v.mp4")
+        audio = touch(tmp_path / "a.mp3")
+        ed = make_editor(tmp_path)
+        seen = {}
+        real_add = ed.add_audio
+
+        def _spy(*a, **kw):
+            seen.update(kw)
+            return real_add(*a, **kw)
+
+        ed.add_audio = _spy
+        r = _T(editor=ed).execute_json(
+            {"command": "add_audio", "video": video, "audio": audio,
+             "volume": 0, "bgm_volume": 0})
+        assert r.success is True, r.error
+        assert seen, "替身没被调用，测试本身失效了"
+        assert seen.get("volume") == 0.0, f"volume=0 被顶成了 {seen.get('volume')}"
+        assert seen.get("bgm_volume") == 0.0, f"bgm_volume=0 被顶成了 {seen.get('bgm_volume')}"
+
 def _real_ffmpeg() -> bool:
     try:
         from models.video_edit import available
@@ -505,3 +546,39 @@ class TestKenBurnsPortrait:
         assert r["path"].endswith(".mp4")
         cmd = last_ffmpeg_cmd(fake_ffmpeg)
         assert "s=1280x720" in cmd
+
+class TestKenburnsBatchCleanup:
+    """批量运镜中途失败必须收拾干净的半成品。
+
+    实测故障（2026-09-22 审计）：循环里没有 try，第 k 张失败时前 k-1 段已落盘的 mp4
+    既不删也不在结果里列出 —— 模型重试一次再留一批，26 镜漫剧重试几轮就是几十个
+    几百 MB 的孤儿文件（也违反 AGENTS.md 的中间产物清理纪律）。
+    """
+
+    def test_partial_outputs_are_cleaned(self, tmp_path, monkeypatch, fake_ffmpeg):
+        from tools.video_edit import VideoEditTool as _T
+        import models.video_edit as ve
+
+        imgs = [touch(tmp_path / f"{i}.png") for i in range(3)]
+        made = []
+
+        class _Editor:
+            def __init__(self, *a, **k):
+                pass
+
+            def kenburns(self, image, duration=4.0, motion="zoom_in", output=None):
+                # 前两个成功（造出真文件），第三个炸
+                if len(made) == 2:
+                    raise RuntimeError("ffmpeg 挂了")
+                p = str(tmp_path / f"seg{len(made)}.mp4")
+                open(p, "w", encoding="utf-8").write("x")
+                made.append(p)
+                return {"path": p}
+
+        r = _T(editor=_Editor()).execute_json(
+            {"command": "kenburns", "images": imgs})
+        assert r.success is False
+        assert "第 3 张失败" in r.error
+        leftovers = [p for p in made if os.path.exists(p)]
+        assert leftovers == [], f"半成品没清理: {leftovers}"
+        assert r.metadata["cleaned"] == made

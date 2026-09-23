@@ -85,23 +85,41 @@ def _commit(path: str, message: str, allow_empty: bool = False,
                    非空 list = 只 add 指定路径（Agent 归因提交，不卷入并行工作）；
                    空 list = 不执行 add，只提交当前暂存区。
     """
+    pathspec = [str(p) for p in add_paths] if add_paths else []
     if add_paths is None:
         add = _git(["add", "-A"], path)
         if add.returncode != 0:
             return False
-    elif add_paths:
+    elif pathspec:
         # -A：路径被删除时也要把"删除"暂存下来（回滚会删掉快照之后新增的文件）
-        paths = [str(p) for p in add_paths]
-        add = _git(["add", "-A", "--"] + paths, path)
+        add = _git(["add", "-A", "--"] + pathspec, path)
         if add.returncode != 0:
             # 已删除且从未进过索引的路径会让 pathspec 匹配失败（快照走临时索引，
             # 不碰真实索引）：存在的照常 add，不存在的用 update-index 确保移除
-            existing = [p for p in paths if os.path.exists(os.path.join(path, p))]
+            existing = [p for p in pathspec if os.path.exists(os.path.join(path, p))]
             if existing:
                 _git(["add", "-A", "--"] + existing, path)
-            for miss in [p for p in paths if p not in existing]:
+            for miss in [p for p in pathspec if p not in existing]:
                 _git(["update-index", "--force-remove", "--", miss], path)
-    cmd = ["commit"] + (["--allow-empty"] if allow_empty else []) + ["-m", message]
+    # commit 也必须带同样的 pathspec：不带的话 `git commit` 提交的是**整个索引**，
+    # 会把这之前用户自己 `git add` 过、还没提交的文件一起卷进 agent 的归因提交
+    # （2026-09-22 审计实测：用户 `git add user_wip.txt` 后回滚一次，那个文件就跟着
+    # agent 的 "rollback: 回滚到检查点 …（my-agent）" 一起被提交了）。
+    # 上面那句"只提交本次触碰的路径，不卷入用户并行未提交工作"的注释，靠的就是这里。
+    suffix = (["--allow-empty"] if allow_empty else []) + ["-m", message]
+    if pathspec:
+        # 归因模式：只提交本次触碰的路径。两道过滤都关键：
+        #   · 带一个不在索引里的路径（刚删掉、且从未进过索引）会让
+        #     `git commit -- <path>` 直接报 pathspec 错误，把整次提交带崩 ——
+        #     回滚会因此"文件恢复了却没落库"（2026-09-22 验证时踩到）；
+        #   · 过滤后为空时**绝不能**退化成"不带 pathspec 的 commit" —— 那提交的是
+        #     整个真实索引，会把用户自己 `git add` 的文件卷进 agent 的提交。
+        staged = set((_git(["diff", "--cached", "--name-only"], path).stdout or "").splitlines())
+        only = [p for p in pathspec if p in staged]
+        if not only:
+            return True                     # 指定路径没有可提交的变化，不是失败
+        suffix += ["--"] + only
+    cmd = ["commit"] + suffix
     commit = _git(cmd, path, timeout=120)
     if commit.returncode == 0:
         return True
@@ -110,7 +128,7 @@ def _commit(path: str, message: str, allow_empty: bool = False,
         commit = _git(
             ["-c", f"user.name={SNAPSHOT_AUTHOR_NAME}",
              "-c", f"user.email={SNAPSHOT_AUTHOR_EMAIL}",
-             "commit"] + (["--allow-empty"] if allow_empty else []) + ["-m", message],
+             "commit"] + suffix,
             path, timeout=120,
         )
         return commit.returncode == 0
@@ -304,25 +322,48 @@ def rollback_to(path: str, commit: str) -> str:
                        path).returncode == 0
     if not is_ancestor and not _is_snapshot_commit(path, commit):
         return ""
-    if is_ancestor:
-        reference = _head(path)
-    else:
-        reference = _newest_snapshot(path)
-        if not reference:
-            return ""
-        if reference == commit:
-            # 目标就是最新快照 → 与其父快照比较（等价于撤销这一条快照）
-            parent = _git(["rev-parse", "--verify", commit + "^"], path)
-            reference = parent.stdout.strip() if parent.returncode == 0 else _head(path)
-    diff = _git(["diff", "--name-status", "--no-renames", commit, reference], path)
+    # 与**当前工作区**比较（`git diff <commit>` 不带第二个 ref 就是这个语义）：
+    # 不再拿"最新快照"或 HEAD 的**树**去比。原因是树对树比较会漏掉 agent 运行期的
+    # 改动 —— checkpoint 只挂 refs/snapshots/*、从不推进 HEAD（这是本模块自己的
+    # 设计），所以被改坏的文件全在工作区、不在任何一棵树里，diff 为空 → 一个文件都
+    # 不恢复，函数却返回非空 HEAD，`dashboard/server.py` 据此报"回滚成功"
+    # （2026-09-22 审计实测：改坏 a.py 后 rollback_to 返回非空，a.py 纹丝不动）。
+    # 同理，目标快照之后**新增**的文件（在 commit 树里不存在）现在也会被正确判成
+    # "A" 并删除，而不是像以前那样残留。
+    diff = _git(["diff", "--name-status", "--no-renames", commit], path)
     if diff.returncode != 0:
         return ""
-    touched: list = []
+    entries: list = []
+    # "A" 要区别对待：`git diff <commit>` 把"已暂存但未提交"的新文件也报成新增，
+    # 而那多半是用户自己 `git add` 的东西 —— 回滚不该替他删掉（2026-09-22 验证时
+    # 踩到：用户 add 了 user_wip.txt，回滚一次文件就没了）。
+    # 判据用"该文件是否已进 HEAD 历史"：进了 = 是某次提交带进来的，该删；
+    # 只在索引/工作区里 = 用户还在写的在制品，别动。
+    head_files = set((_git(["ls-tree", "-r", "--name-only", "HEAD"], path).stdout or "").splitlines())
     for line in diff.stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) != 2:
             continue
         status, rel = parts[0].strip(), parts[1].strip()
+        if status == "A" and rel not in head_files:
+            continue
+        entries.append((status, rel))
+    # 再并上"与最新快照比较"这一路：目标快照之后**被 checkpoint 过**的新文件只会
+    # 出现在后续快照的树里（它们不在 HEAD 历史里，正好被上面的规则放过）——
+    # 这一类是 agent 自己造的，可以放心移除；不并这一路，回滚就会把它们残留下来。
+    seen = {rel for _, rel in entries}
+    newest = _newest_snapshot(path)
+    if newest and newest != commit:
+        extra = _git(["diff", "--name-status", "--no-renames", commit, newest], path)
+        if extra.returncode == 0:
+            for line in extra.stdout.splitlines():
+                parts = line.split("\t", 1)
+                if len(parts) == 2 and parts[1].strip() not in seen:
+                    seen.add(parts[1].strip())
+                    entries.append((parts[0].strip(), parts[1].strip()))
+
+    touched: list = []
+    for status, rel in entries:
         target = os.path.join(path, rel)
         if status == "A":
             # commit 之后新增的文件 → 移除
@@ -343,7 +384,12 @@ def rollback_to(path: str, commit: str) -> str:
     # 只提交本次触碰的路径（归因提交，不卷入用户并行未提交工作）
     if _commit(path, f"rollback: 回滚到检查点 {commit[:10]}（my-agent）", add_paths=touched):
         return _head(path)
-    return ""
+    # 恢复后的内容恰好与 HEAD 一致时，`git commit` 会以 "nothing to commit" 失败 ——
+    # 那不是回滚失败：文件已经回到目标状态了，而调用方（dashboard 的
+    # `POST /api/rollback`）按"返回非空即成功"判定，返回 "" 会把成功显示成失败。
+    # 所以再确认一次"工作区是否真的已与目标提交一致"，一致就算成功。
+    verify = _git(["diff", "--quiet", commit, "--"] + touched, path)
+    return _head(path) if verify.returncode == 0 else ""
 
 
 def _head(path: str) -> str:

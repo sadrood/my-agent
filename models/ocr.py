@@ -15,10 +15,12 @@
 输出做了**中文空格归一**：Windows OCR 会把"系统提示"识别成"系 统 提 示"
 （每个汉字之间插空格），照原样回给模型会很难读，也影响后续检索/比对。
 """
+import atexit
 import base64
 import os
 import re
 import subprocess
+import threading
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -82,6 +84,13 @@ class OcrError(RuntimeError):
 
 #: 中文标点（用于空格归一：汉字与这些符号之间的空格也该去掉）
 _CJK = r"\u4e00-\u9fff"
+#: BCP-47 / 常见写法 -> tesseract traineddata 名（_run_tesseract 用）
+_TESSERACT_LANGS = {
+    "zh": "chi_sim", "zh-hans": "chi_sim", "zh-cn": "chi_sim", "zh-sg": "chi_sim",
+    "zh-hant": "chi_tra", "zh-tw": "chi_tra", "zh-hk": "chi_tra",
+    "en": "eng", "ja": "jpn", "ko": "kor", "fr": "fra", "de": "deu",
+    "es": "spa", "ru": "rus", "it": "ita", "pt": "por",
+}
 _CJK_PUNCT = "，。：；！？、）》」』】…—“”‘’％．"
 _SPACE_BETWEEN_CJK = re.compile(rf"(?<=[{_CJK}])[ \t]+(?=[{_CJK}])")
 _SPACE_CJK_PUNCT = re.compile(rf"(?<=[{_CJK}])[ \t]+(?=[{re.escape(_CJK_PUNCT)}])")
@@ -142,6 +151,42 @@ class OcrResult:
         return head
 
 
+#: PowerShell 桥脚本的**进程级**缓存路径（写一次、进程退出时删）
+_PS_SCRIPT_PATH = ""
+_PS_SCRIPT_LOCK = threading.Lock()
+
+
+def _ps_script_path() -> str:
+    """返回桥脚本路径：整个进程只写一份，退出时清理。
+
+    旧实现把它缓存在**实例**属性 `self._ps_script` 上，而 `OcrEngine()` 每次调用都
+    新建实例（`models/ocr.py::recognize_image`、`tools/ocr.py` 的四处都是新实例）
+    —— 于是每调一次 OCR 就在 %TEMP% 留一个 .ps1，永不删除（2026-09-22 审计实测：
+    本机已累积 51 个，视觉模型超时降级到 OCR 时涨得更快）。
+    同函数的 `out_file` 与 `recognize_base64` 的 PNG 都有 finally 清理，只有它漏了。
+    """
+    global _PS_SCRIPT_PATH
+    with _PS_SCRIPT_LOCK:
+        if _PS_SCRIPT_PATH and os.path.exists(_PS_SCRIPT_PATH):
+            return _PS_SCRIPT_PATH
+        fd, script = tempfile.mkstemp(prefix="myagent_ocr_", suffix=".ps1")
+        with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+            f.write(_PS_BRIDGE)
+        _PS_SCRIPT_PATH = script
+        atexit.register(_cleanup_ps_script)
+        return _PS_SCRIPT_PATH
+
+
+def _cleanup_ps_script() -> None:
+    """进程退出时删掉桥脚本（正常退出 / atexit 都能覆盖）。"""
+    path = _PS_SCRIPT_PATH
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 class OcrEngine:
     """本地 OCR 引擎（按可用性自动挑后端）。"""
 
@@ -160,7 +205,6 @@ class OcrEngine:
             self.scale = max(1, int(cfg.get("scale", 2) or 1))
         except (TypeError, ValueError):
             self.scale = 2
-        self._ps_script = ""
 
     # ---------------- 后端探测 ----------------
 
@@ -299,14 +343,9 @@ class OcrEngine:
                 pass
 
     # ---------------- 各后端实现 ----------------
-
     def _run_windows(self, path: str) -> str:
         """Windows.Media.Ocr（PowerShell WinRT 桥）。"""
-        if not self._ps_script:
-            fd, script = tempfile.mkstemp(prefix="myagent_ocr_", suffix=".ps1")
-            with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
-                f.write(_PS_BRIDGE)
-            self._ps_script = script
+        self._ps_script = _ps_script_path()
         out_fd, out_file = tempfile.mkstemp(prefix="myagent_ocr_", suffix=".txt")
         os.close(out_fd)
         shell = _which("powershell") or _which("pwsh")
@@ -360,9 +399,26 @@ class OcrEngine:
         import pytesseract
         from PIL import Image
 
-        langs = ",".join(l.split("-")[0] for l in self.languages.split(",") if l.strip())
+        # tesseract 的语言包名不是 BCP-47：默认配置 `zh-Hans-CN,en-US` 直接
+        # `split("-")[0]` 会得到 `zh,en`，而 tesseract 要的是 `chi_sim` / `eng`
+        # —— 这个后端按默认配置**必然失败**，报错还把人引向"去装语言包"
+        # （用户其实已经装了）。旧的兜底 `langs or "chi_sim+eng"` 因为 langs 非空
+        # 永远不生效；分隔符也错了，pytesseract 要 `+` 不是 `,`（2026-09-22 审计）。
+        langs = []
+        for raw in self.languages.split(","):
+            token = raw.strip().lower()
+            if not token:
+                continue
+            parts = token.split("-")
+            # 逐级回退：整串 → 前两段（zh-hant）→ 首段（zh）。
+            # 只取首段会把 zh-Hant-TW 错映射成简体 chi_sim。
+            mapped = (_TESSERACT_LANGS.get(token)
+                      or _TESSERACT_LANGS.get("-".join(parts[:2]))
+                      or _TESSERACT_LANGS.get(parts[0]))
+            langs.append(mapped or token)
+        lang_arg = "+".join(dict.fromkeys(langs)) or "chi_sim+eng"
         try:
-            return pytesseract.image_to_string(Image.open(path), lang=langs or "chi_sim+eng")
+            return pytesseract.image_to_string(Image.open(path), lang=lang_arg)
         except Exception as e:                  # noqa: BLE001
             raise OcrError(
                 f"tesseract 识别失败: {str(e)[:150]}（若提示缺少语言包，"

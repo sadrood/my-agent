@@ -105,6 +105,16 @@ class Supervisor:
                 {"role": "user", "content": prompt},
             ])
         except Exception as e:                  # noqa: BLE001
+            # 读 SUPERVISOR_FAIL_OPEN：这个配置项此前**定义了却从没被读过**
+            # （guardian.py 的同名开关是生效的），于是用户设 false 想让「坏掉的裁判
+            # 不放行」也毫无变化 —— 超时/报错仍然静默判完成（2026-09-22 审计）。
+            if not self.config.get("fail_open", True):
+                return SupervisorVerdict(
+                    verdict="continue", used=True,
+                    error=f"监管者不可用（fail-closed）: {str(e)[:150]}",
+                    reason="监管者异常，且配置为不放行",
+                    next_instruction="监管者（独立复核模型）不可用，请自行确认目标是否真的"
+                                     "全部完成，未完成的部分继续做。")
             return SupervisorVerdict(verdict="done", used=True,
                                      error=f"监管者不可用（已放行）: {str(e)[:150]}",
                                      reason="监管者异常，按完成处理")

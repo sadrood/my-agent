@@ -410,11 +410,32 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         t = str(text or "")
         return any(sig.lower() in t.lower() for sig in cls._DEAD_SIGNALS)
 
+    def _stop_playwright(self) -> None:
+        """停掉 Playwright 的**驱动进程**（node.exe）。
+
+        只有 `_close_impl` 会调 `stop()`，而 `_invalidate()` / `reset()` /
+        `_launch()` 覆盖旧对象时都只把引用置 None —— playwright sync 的
+        Playwright/Connection **没有 `__del__`**，`stop()` 才是唯一杀驱动进程的
+        入口。于是浏览器被外部杀掉、或工具超时触发一次自愈，就漂一个几十 MB 的
+        node.exe；而 `_force_cleanup_residual` 只按 `--user-data-dir=` 匹配
+        chrome.exe，收不到它（2026-09-22 审计）。
+
+        跨线程调用可能抛（sync API 绑线程），所以失败只吞掉不往上冒 ——
+        行为退化成“只丢引用”，不会比修复前更糟。
+        """
+        pw = self._playwright
+        self._playwright = None
+        if pw is not None:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
     def _invalidate(self) -> None:
         """作废当前 worker 与 Playwright 引用：下一个命令会重建全新 worker。"""
         self._worker_broken = True
         self._worker = None
-        self._playwright = None
+        self._stop_playwright()
         self._browser = None
         self._context = None
         self._pages = []
@@ -470,8 +491,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         )
         if not needs_rebuild:
             try:
-                browser_alive = bool(
-                    self._browser is not None and self._browser.is_connected)
+                browser_alive = self._is_browser_alive()
             except Exception:
                 browser_alive = False
             try:
@@ -485,7 +505,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             # 防御性丢弃旧 playwright 引用（若未被 reset 清空），
             # 避免新 worker 复用绑定在已死线程上的事件循环。
             if self._playwright is not None or self._context is not None:
-                self._playwright = None
+                self._stop_playwright()
                 self._browser = None
                 self._context = None
                 self._pages = []
@@ -1049,10 +1069,17 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             except Exception:
                 pass
             # 2. 文本匹配
-            element = self._page.get_by_text(selector, exact=False).first
-            if element:
-                element.click(timeout=10000)
+            # ⚠️ 不能用 `element = get_by_text(...).first; if element:` —— Locator
+            # **没有** __bool__/__len__（已在 playwright 1.62 实测：bool(locator) 恒为
+            # True），于是那个 if 永远成立，未匹配到时直接在 click 上白等 10 秒、
+            # 抛到外层 except 返回"点击失败"，**第 3 步的 role 匹配永远执行不到**。
+            # 图标按钮（`<button aria-label="Close"><svg/></button>`）是最常见的
+            # 无文字形态，本应命中 role 分支（2026-09-22 审计实测）。
+            try:
+                self._page.get_by_text(selector, exact=False).first.click(timeout=3000)
                 return ToolResult(success=True, output=f"已点击文本为 '{selector}' 的元素")
+            except Exception:
+                pass
             # 3. Role 匹配
             for role in ("button", "link", "textbox", "combobox", "checkbox"):
                 try:
@@ -1283,7 +1310,14 @@ class BrowserTool(BaseTool, ComputerUseMixin):
     # ================================================================
 
     def _screenshot(self, full_base64: bool = False) -> ToolResult:
-        """截取当前页面截图。"""
+        """截取当前页面截图。
+
+        `full_base64=True`（`screenshot_base64` / see 工具 / computer-use 循环用的那个
+        变体）**不落盘**：那些调用方只用 base64，而落盘会产生一棵只涨不减的
+        screenshots/ 树（2026-09-22 审计：computer-use 循环里反复 see，每次约
+        200KB–1MB，实测已涨到 12MB 且没有任何清理策略，而 profile 目录反倒有
+        `_prune_profile_dir`）。
+        """
         ensure = self._ensure_page()
         if not ensure.success:
             return ensure
@@ -1294,36 +1328,27 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             timestamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
             filename = f"screenshot_{timestamp}.png"
             filepath = os.path.join(self._screenshot_dir, filename)
+            save_to_disk = not full_base64
 
             self._page.wait_for_load_state("domcontentloaded", timeout=5000)
             time.sleep(0.3)
 
-            screenshot_bytes = self._page.screenshot(path=filepath, full_page=False)
+            if save_to_disk:
+                screenshot_bytes = self._page.screenshot(path=filepath, full_page=False)
+            else:
+                screenshot_bytes = self._page.screenshot(full_page=False)
             base64_data = base64.b64encode(screenshot_bytes).decode("utf-8")
             title = self._page.title()
             url = self._page.url
 
+            head = f"截图已保存: {filepath}\n" if save_to_disk else ""
+            info = (f"页面: {title}\n"
+                    f"URL: {url}\n"
+                    f"大小: {len(screenshot_bytes)} 字节")
             if full_base64:
-                return ToolResult(
-                    success=True,
-                    output=(
-                        f"截图已保存: {filepath}\n"
-                        f"页面: {title}\n"
-                        f"URL: {url}\n"
-                        f"大小: {len(screenshot_bytes)} 字节\n"
-                        f"[FULL_BASE64]{base64_data}[/FULL_BASE64]"
-                    ),
-                )
-            else:
-                return ToolResult(
-                    success=True,
-                    output=(
-                        f"截图已保存: {filepath}\n"
-                        f"页面: {title}\n"
-                        f"URL: {url}\n"
-                        f"大小: {len(screenshot_bytes)} 字节"
-                    ),
-                )
+                return ToolResult(success=True,
+                                  output=f"{head}{info}\n[FULL_BASE64]{base64_data}[/FULL_BASE64]")
+            return ToolResult(success=True, output=f"{head}{info}")
         except Exception as e:
             return ToolResult(success=False, output="", error=f"截图失败: {str(e)}")
 
@@ -1368,18 +1393,37 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         try:
             # is_connected 是本地状态检查（CDP 连接是否还活着），不会走网络挂起；
             # 旧实现访问 self._browser.contexts 在 CDP 半死时同样可能永久阻塞。
+            #
+            # ⚠️ 必须**调用**它：playwright 里 `is_connected` 是**方法**不是 property
+            # （已在 1.62 实测），`bool(self._browser.is_connected)` 等于
+            # `bool(<bound method>)`，**恒为 True** —— 于是"浏览器已死就重建"的分支
+            # 永不触发，`_launch` 对死浏览器也回"已在运行中"，坏状态再不自愈
+            # （2026-09-22 审计）。
             if hasattr(self._browser, "is_connected"):
-                return bool(self._browser.is_connected)
+                conn = self._browser.is_connected
+                return bool(conn() if callable(conn) else conn)
             self._browser.contexts
             return True
         except Exception:
             return False
 
     def _is_context_alive(self) -> bool:
-        """持久模式下的 context 探活（廉价本地访问，关闭后抛异常即视为死亡）。"""
+        """持久模式下的 context 探活。
+
+        只访问 `context.pages` **不够**：它是 property，context 关闭后返回 `[]`
+        而不抛异常（已实测），于是这里恒为 True、坏死状态永不自愈。补一层
+        `page.is_closed()` —— 那才是真实的探活信号（关闭后同为 True）。
+        """
         try:
-            _ = self._context.pages
-            return True
+            if self._context.pages:
+                return True
+        except Exception:
+            return False
+        page = self._page
+        if page is None:
+            return False
+        try:
+            return not page.is_closed()
         except Exception:
             return False
 
@@ -1409,7 +1453,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             except Exception:
                 pass
         self._worker = None
-        self._playwright = None
+        self._stop_playwright()
         self._browser = None
         self._context = None
         self._pages = []

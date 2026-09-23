@@ -86,6 +86,16 @@ class ACPClient:
                 except Exception:
                     pass
                 continue
+            if not isinstance(frame, dict):
+                # 合法但**不是对象**的 JSON 行（`[]` / `123` / `"x"`）会让下面的
+                # `frame.get(...)` 抛 AttributeError —— 异常在 _pump 的循环里没人接，
+                # **读线程直接退出**，之后所有帧被丢弃，wait_turn 只能等满超时
+                # （2026-09-22 审计）。当噪音跳过即可。
+                try:
+                    self._on_event("stream_delta", {"kind": "text", "text": line + chr(10)})
+                except Exception:
+                    pass
+                continue
             self._dispatch(frame)
 
     def _dispatch(self, frame: dict):
@@ -170,11 +180,20 @@ class ACPClient:
         self._on_event("approval", {"tool": "ACP", "command": desc[:300], "risk_level": "medium"})
         if self._perm_auto_allow:
             # 自动允许并回传
-            self._notify("session/response_permission", {
+            # JSON-RPC 的**请求**必须用**同 id 的 response** 应答。旧实现发的是自造的
+            # `session/response_permission` 通知（还塞了协议里不存在的 permissionId），
+            # wrapper 永远等不到响应 —— wait_turn 只能等满 600s 超时、状态判成 failed
+            # （2026-09-22 审计）。载荷字段沿用原实现的命名，未对着 ACP 规范核对过。
+            rid = frame.get("id")
+            payload = {
                 "sessionId": self._session_id or "",
                 "permissionId": params.get("permissionId") or "",
                 "allow": True,
-            })
+            }
+            if rid is not None:
+                self._write({"jsonrpc": "2.0", "id": rid, "result": payload})
+            else:
+                self._notify("session/response_permission", payload)
 
     # ---------------- 会话生命周期 ----------------
 

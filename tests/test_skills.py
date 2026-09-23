@@ -126,6 +126,83 @@ class TestFrontmatter:
 # ----------------------------------------------------------------------
 # 2. 关键词命中
 # ----------------------------------------------------------------------
+class TestMatchPrecision:
+    """2 字母英文词不能靠"词内子串"把技能全捞进来。
+
+    实测故障（2026-09-22 审计）：`_text_hits` 分词之后仍用裸子串 `in` 匹配，而技能
+    description 里必然出现 to/in/is/or/it/on/as —— 本仓库 20 个技能里，
+    "用 terminal 跑一下 pytest，修掉 memory.py 的召回 bug" 竟命中 18 个（"in" 落在
+    terminal、"to" 落在 tool）。命中技能的**全文**随即被注入系统提示，挤掉真正相关的
+    内容。修法是 1~2 字母词只认词边界，3 字母以上保留词内包含（`githelper` 仍能命中
+    `git-helper`）。
+    """
+
+    def test_two_letter_words_need_word_boundary(self, tmp_path):
+        proj = tmp_path / "skills"
+        write_skill(proj, "writer", (
+            "---\nname: writer\ndescription: write a report into the output file\n---\n正文\n"
+        ))
+        mgr = make_manager(proj, tmp_path / "no_user")
+        # "in" 落在 terminal、"to" 落在 tool —— 不该因此命中
+        assert mgr.match("用 terminal 跑一下 pytest，修掉 memory 的召回 bug") == []
+        # 真的出现独立单词时才命中
+        assert [s.name for s in mgr.match("please write a report")] == ["writer"]
+
+    def test_three_letter_words_still_match_inside(self, tmp_path):
+        """3 字母以上的"词内包含"是刻意保留的（githelper → git-helper）。"""
+        proj = tmp_path / "skills"
+        write_skill(proj, "git-helper", (
+            "---\ndescription: 简化 git 提交流程\n---\n正文-git\n"
+        ))
+        mgr = make_manager(proj, tmp_path / "no_user")
+        assert [s.name for s in mgr.match("githelper")] == ["git-helper"]
+
+    def test_unrelated_goal_matches_nothing(self, tmp_path):
+        proj = tmp_path / "skills"
+        write_skill(proj, "writer", (
+            "---\nname: writer\ndescription: write a report into the output file\n---\n正文\n"
+        ))
+        mgr = make_manager(proj, tmp_path / "no_user")
+        assert mgr.match("量子物理超弦理论") == []
+
+
+class TestRenderBudget:
+    """命中技能的正文必须真的进得了提示词。
+
+    实测故障（2026-09-22 审计）：索引行用**完整 description** 且排在正文之前，
+    总长超 `max_chars` 时只做一次统一尾部截断 —— 索引自己就可能超预算
+    （本仓库索引 9849 字 > SKILLS_MAX_CHARS=6000），于是被命中的技能正文
+    100% 被截掉，命中等于没命中。
+    """
+
+    def test_matched_body_survives_tight_budget(self, tmp_path):
+        proj = tmp_path / "skills"
+        long_desc = "很长的描述" * 200          # 单是索引就会超预算
+        write_skill(proj, "target", (
+            f"---\nname: target\ntriggers: 目标技能\ndescription: {long_desc}\n---\n"
+            "【目标技能正文标记】\n"
+        ))
+        write_skill(proj, "noise", (
+            f"---\nname: noise\ndescription: {long_desc}\n---\n噪音正文\n"
+        ))
+        mgr = make_manager(proj, tmp_path / "no_user", max_chars=800)
+        assert [s.name for s in mgr.match("目标技能")] == ["target"]   # 先确认真的命中
+        text = mgr.render_for_prompt("目标技能")
+        assert "【目标技能正文标记】" in text, "命中的技能正文被索引挤掉了"
+        assert len(text) <= 800 + 200
+
+    def test_index_still_present_when_budget_tight(self, tmp_path):
+        """正文优先不代表索引要整段消失 —— 至少留个可读的头部。"""
+        proj = tmp_path / "skills"
+        long_desc = "很长的描述" * 200
+        write_skill(proj, "target", (
+            f"---\nname: target\ntriggers: 目标技能\ndescription: {long_desc}\n---\n正文\n"
+        ))
+        mgr = make_manager(proj, tmp_path / "no_user", max_chars=800)
+        text = mgr.render_for_prompt("目标技能")
+        assert "技能索引" in text
+
+
 class TestMatch:
     @pytest.fixture()
     def mgr(self, tmp_path):

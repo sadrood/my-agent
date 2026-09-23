@@ -32,17 +32,28 @@ from config import LOG_CONFIG
 
 
 def build_config(args) -> AgentConfig:
-    """根据命令行参数构建 AgentConfig。"""
+    """根据命令行参数构建 AgentConfig。
+
+    注意哪些字段传 `None`：它们在 AgentConfig 里的语义是"**读配置中心**"
+    （见 `agent/agent.py` 的 `x if x is not None else CONFIG.get(...)`）。传一个恒定
+    的 bool 会把 `.env` 的总开关顶掉 —— 旧实现里 `rollout_enabled=not
+    args.no_rollout` 与 `approval_interactive=True` 就踩了这个坑：
+    `ROLLOUT_ENABLED=false`、`MY_AGENT_MINIMAL=1`（docs/COMMANDS.md 承诺极简模式会
+    关掉 Rollout）以及 `APPROVAL_INTERACTIVE=false` 全部失效（2026-09-22 审计）。
+    `guardian_enabled` 早就是这么做的（见 main.py 里对 `args.guardian is None` 的
+    回落），这里把漏掉的两个对齐。
+    """
     return AgentConfig(
         max_steps=args.max_steps,
         verbose=not args.quiet,
         enable_vision=not args.no_vision,
         approval_policy=args.approval,
         sandbox_mode=args.sandbox,
-        approval_interactive=True,   # 终端交互模式下允许人工确认
+        approval_interactive=None,   # None = 读 APPROVAL_INTERACTIVE（默认 true）
         guardian_enabled=args.guardian,
         supervisor_enabled=args.supervisor,
-        rollout_enabled=not args.no_rollout,
+        rollout_enabled=False if args.no_rollout else None,
+        max_replans=args.max_replans,
         max_step_ops=args.max_step_ops,
         session_name=args.session or "",
         exec_mode=args.exec_mode,
@@ -548,17 +559,23 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 print_info("对话历史未超阈值或压缩失败，保持原样。", style="info")
             continue
         if cmd == "goal":
-            # 查看 / 设置当前会话持久目标
+            # 查看 / 设置当前会话持久目标。
+            # 变量名**不能**叫 `store`：那会覆盖上面 `store = SessionStore()` 的同一个
+            # 局部变量，而本分支末尾 continue 让覆盖持续存在 —— 之后 `/sessions`
+            # （store.list_conversations()）与 `/open` 必 AttributeError，而命令分发不在
+            # 任何 try 里，异常直接冲出 run_interactive、整个 CLI 带 traceback 退出
+            # （2026-09-22 审计实测）。
             from agent.goal import GoalStore
-            store = GoalStore()
+            goal_store = GoalStore()
+            session_name = agent.config.session_name or ""
             if not cmd_args:
-                g = store.get(agent.config.session_name or "")
+                g = goal_store.get(session_name)
                 if g:
                     print_info(f"当前目标: {g}", style="accent")
                 else:
                     print_info("当前会话未设置目标。用法: /goal <目标>", style="info")
             else:
-                store.set(agent.config.session_name or "", cmd_args.strip())
+                goal_store.set(session_name, cmd_args.strip())
                 print_info(f"目标已保存: {cmd_args.strip()[:80]}", style="success")
             continue
         if cmd == "help":
@@ -811,7 +828,18 @@ def main():
         print(render_report(run_doctor(include_llm=True)))
         return
 
+    # MCP server 模式（优先级最高）
+    if args.mcp_server:
+        # ⚠️ 必须**先**处理它，再谈其它输出：stdio MCP 的协议就是 stdout 上的
+        # 行分隔 JSON-RPC，任何一句额外输出都会被宿主判成协议错误。
+        # 旧实现把这下面那段启动自检放在前面，部署副本不是 git 仓库 / 缺 .env 时
+        # 进程一启动就往 stdout 写一行 "! Git 快照安全网: 项目不是 git 仓库…"
+        # （2026-09-22 审计）。
+        run_mcp_server()
+        return
+
     # 启动轻量预警（只查快检项：.env / git / websockets，静默通过，失败给一行修复提示）
+    # 注意放在 mcp_server 分支**之后**：那段提示走 stdout，会污染 MCP 协议流。
     try:
         from agent.doctor import _check_env, _check_git, _check_ws_support
         from agent.ui_theme import print_warning
@@ -821,11 +849,6 @@ def main():
                 print_warning(f"{_r['name']}: {_r['message']} → {_r.get('hint', '')}")
     except Exception:
         pass
-
-    # MCP server 模式（优先级最高）
-    if args.mcp_server:
-        run_mcp_server()
-        return
 
     if args.list_tools:
         list_tools()

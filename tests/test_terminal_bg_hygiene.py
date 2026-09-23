@@ -86,3 +86,42 @@ class TestBackgroundJobHygiene:
         tool._release_job(job)
         tool._release_job(job)          # 重复调用不得抛错
         assert "handle" not in job
+
+
+class TestBackgroundStartFailureCleansUp:
+    """Popen 抛错时必须关句柄、删日志。
+
+    实测故障（2026-09-22 审计）：`_start_background` 先 open 日志再 Popen，异常分支
+    只 return —— 句柄不 close、文件也没进 `_jobs`（后续 `_prune_jobs` 永远碰不到它），
+    每失败一次就漏一个句柄 + 一个空日志文件。
+    """
+
+    def test_failed_spawn_leaves_no_handle_or_file(self, monkeypatch, tmp_path):
+        import glob
+        import os
+        import tempfile
+
+        import tools.terminal as t
+
+        tool = t.TerminalTool()
+        opened = []
+        real_open = open
+
+        def _tracking_open(path, *a, **k):
+            f = real_open(path, *a, **k)
+            opened.append(f)
+            return f
+
+        def _boom(*a, **k):
+            raise OSError("shell 拉不起来")
+
+        monkeypatch.setattr("builtins.open", _tracking_open)
+        monkeypatch.setattr(t.subprocess, "Popen", _boom)
+
+        pattern = os.path.join(tempfile.gettempdir(), "my_agent_bg_*.log")
+        before = set(glob.glob(pattern))
+        r = tool.execute_json({"command": "whatever", "background": True})
+
+        assert r.success is False and "后台启动失败" in r.error
+        assert all(f.closed for f in opened), "日志句柄没关"
+        assert set(glob.glob(pattern)) == before, "失败时留下了空日志文件"

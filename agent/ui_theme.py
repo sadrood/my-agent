@@ -361,8 +361,13 @@ def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
     for i, line in enumerate(text.split("\n")):
         prefix = "⎿ " if i == 0 else "  "
         if use_rich:
+            from rich.text import Text
             style = "muted" if success else "error"
-            c.print(f"[{style}]{prefix}{line}[/{style}]")
+            # 用 Text 而不是 f-string 拼 markup：工具输出/文件内容里的 `[doc](url)`
+            # 会被 rich 当成标签**静默吞掉文本**，`[/muted]` 这种还会直接抛
+            # MarkupError（异常被 executor 的 event_sink try/except 吞掉，用户只看到
+            # "这次结果没显示"）（2026-09-22 审计）。
+            c.print(Text(f"{prefix}{line}", style=style))
         else:
             c.print(f"{prefix}{line}")
 

@@ -220,7 +220,20 @@ class Rollout:
         if len(messages) <= keep + 4:
             return list(messages)
 
-        old_part = messages[:-keep]
+        # 开头的 system 消息（执行器系统提示：一次只调一个工具、参数必须来自 schema、
+        # 收尾用自然语言…）必须**原样保留**，不能被压进摘要。旧实现把它们一起算进
+        # old_part，压缩后第 0 条变成「## 之前的执行摘要」—— 之后所有 LLM 调用都不再
+        # 带执行器规则（2026-09-22 审计）。
+        head_msgs = []
+        for _m in messages:
+            if _m.get('role') == 'system':
+                head_msgs.append(_m)
+            else:
+                break
+        if len(messages) - len(head_msgs) <= keep + 4:
+            return list(messages)          # 去掉系统提示后没多少可压的
+
+        old_part = messages[len(head_msgs):-keep]
         transcript_lines = []
         for m in old_part:
             role = m.get("role", "?")
@@ -246,7 +259,10 @@ class Rollout:
         except Exception:
             return list(messages)
 
-        compacted = [{"role": "system", "content": f"## 之前的执行摘要\n{summary.strip()[:3000]}"}]
+        compacted = list(head_msgs) + [
+            {"role": "system",
+             "content": "## 之前的执行摘要" + chr(10) + summary.strip()[:3000]},
+        ]
         # 截断点必须在完整工具闭环之后：从尾部向前扫描，确保保留部分里
         # 不存在"孤立的 tool 消息"（其 tool_calls 被截断线切走）。
         # 若保留区开头是 tool 消息，则把截断线前移，连同它的 assistant

@@ -148,6 +148,8 @@ class VideoGenModel:
         if not vid:
             raise RuntimeError(f"视频任务创建响应缺少任务 ID: {json.dumps(data)[:300]}")
         data["video_id"] = vid
+        # 记下**实际生效**的时长（被 clamp 过的），供回落给调用方展示
+        data["seconds"] = norm_seconds
         if str(raw_seconds).strip() != norm_seconds:
             data["seconds_clamped_from"] = str(raw_seconds).strip()
         return data
@@ -271,7 +273,10 @@ class VideoGenModel:
             "local_path": None,
             "timed_out": False,
             "model": model or self.model,
-            "seconds": str(seconds or self.seconds),
+            # 报**实际生效**的时长：`create()` 会把越界值 clamp 到 [4,12]，而旧实现
+            # 这里写的是原始请求值 —— 请求 3s 实际出 4s，工具却报"3s"，后续按 3s
+            # 对齐配音/字幕就会错位（2026-09-22 审计）。
+            "seconds": str(created.get("seconds") or _normalize_seconds(seconds or self.seconds)),
             "size": size or self.size,
             "prompt": prompt,
         }

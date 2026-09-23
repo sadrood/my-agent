@@ -101,17 +101,43 @@ class TestParallelCap:
 
 
 class TestSiblingResetProtection:
-    def test_refcount_tracks_inflight(self, monkeypatch):
+    def test_refcount_counts_only_other_calls(self, monkeypatch):
+        """判定必须是"**其它**调用在飞"，不能把调用者自己算进去。
+
+        实测故障（2026-09-22 审计）：`_execute_one_tool_call` 在派发**之前**就先
+        `_enter_tool_call` 给自己记了账，于是 `_dispatch_tool_call` 里读到的计数至少
+        是 1 —— 判 `> 0` 恒为真，`reset_tool` 在生产路径上一次都不会被调用，而错误
+        文案仍写着"已重置该工具状态"：browser 卡死一次后，坏掉的 playwright 连接
+        原样留到后续每一轮，正是那段注释要根治的"一次卡死、次次卡死"。
+        """
         tool = SlowTool()
         ex = make_executor(monkeypatch, tool)
         assert ex._sibling_calls_in_flight("slowtool") is False
-        ex._enter_tool_call("slowtool")
+        ex._enter_tool_call("slowtool")            # 只有"我自己"
+        assert ex._sibling_calls_in_flight("slowtool") is False, "不能把自己算成兄弟"
+        ex._enter_tool_call("slowtool")            # 这才是兄弟
         assert ex._sibling_calls_in_flight("slowtool") is True
-        ex._enter_tool_call("slowtool")
-        ex._leave_tool_call("slowtool")
-        assert ex._sibling_calls_in_flight("slowtool") is True, "还有兄弟在跑"
         ex._leave_tool_call("slowtool")
         assert ex._sibling_calls_in_flight("slowtool") is False
+
+    def test_timeout_resets_tool_on_real_entry(self, monkeypatch):
+        """走**真实入口**时超时必须真的 reset_tool（旧实现恒不执行）。
+
+        这条是上面那条的"行为版"：只看 `_sibling_calls_in_flight` 的返回值容易改对，
+        真正要证明的是生产路径上 `reset_tool` 会被调到。
+        """
+        from config import TOOL_CONFIG
+        from models.llm import ToolCall
+
+        monkeypatch.setitem(TOOL_CONFIG, "tool_timeout", 0.2)
+        ex = make_executor(monkeypatch, SlowTool(hold=1.5))     # 必然超时
+        monkeypatch.setitem(TOOL_CONFIG, "tool_timeout", 0.2)   # make_executor 会设成 5，这里再压一次
+        resets = []
+        monkeypatch.setattr(ex.tool_manager, "reset_tool",
+                            lambda name: resets.append(name))
+
+        ex._execute_one_tool_call(ToolCall("1", "slowtool", {}), "目标")
+        assert resets == ["slowtool"], "超时后没重置工具（把自己当成兄弟了）"
 
     def test_reset_skipped_while_sibling_running(self, monkeypatch):
         """回归：兄弟调用在飞时不得 reset_tool（会把它排队的任务吞掉）。"""
@@ -121,7 +147,9 @@ class TestSiblingResetProtection:
         monkeypatch.setattr(ex.tool_manager, "reset_tool",
                             lambda name: resets.append(name))
         ex._enter_tool_call("slowtool")          # 模拟同批兄弟在跑
-        ex._sibling_calls_in_flight("slowtool")  # 走到判定
+        ex._enter_tool_call("slowtool")
+        assert ex._sibling_calls_in_flight("slowtool") is True
+        ex._leave_tool_call("slowtool")
         assert resets == []
         ex._leave_tool_call("slowtool")
         assert resets == []

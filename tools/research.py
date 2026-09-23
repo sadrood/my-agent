@@ -190,7 +190,8 @@ class DeepResearcher:
 
             # 打开搜索结果页
             search_url = self.SEARCH_ENGINES[engine].format(
-                query=query.replace(" ", "+")
+                # 整体 URL 编码：只把空格换 + 会让 &、#、?、中文污染查询串
+                query=quote_plus(query)
             )
 
             goto_result = self.tool_manager.execute("browser", f"goto {search_url}")
@@ -386,13 +387,21 @@ class DeepResearcher:
     @staticmethod
     def _extract_title_for_url(page_text: str, url: str) -> str:
         """从页面文本中为 URL 提取标题。"""
-        # 简单策略：找包含 URL 关键词的行
+        # 找包含**域名特征词**的行当标题。
         try:
-            from urllib.parse import urlparse
-            domain = urlparse(url).netloc
-            lines = page_text.split("\n")
-            for line in lines:
-                if any(kw in line.lower() for kw in domain.split(".")[:1]):
+            from urllib.parse import quote_plus, urlparse
+            domain = urlparse(url).netloc.lower()
+            page_lines = page_text.split("\n")
+            # 取有意义的域名片段：`domain.split(".")[:1]` 对 www.example.com 得到的是
+            # `www` —— 于是页面上任何含 www 的行都会被当标题（2026-09-22 审计）。
+            # 跳过 www/m 这类前缀，且片段至少 3 个字符。
+            _keys = [s for s in domain.split(".")
+                     if s and s not in ("www", "m", "mobile") and len(s) >= 3]
+            if not _keys:
+                return ""
+            key = max(_keys, key=len)
+            for line in page_lines:
+                if key in line.lower():
                     return line.strip()[:100]
         except Exception:
             pass

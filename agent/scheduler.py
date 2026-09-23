@@ -6,10 +6,17 @@
 """
 import json
 import os
+
 import threading
 import time
 
-_SCHED_FILE = os.path.join("memory", "scheduled_tasks.json")
+from config import resolve_under_root
+
+# 锚定项目根：裸相对路径按 **cwd** 解析，从别的目录启动时定时任务会写到启动目录，
+# 用户看到的是"定时任务凭空消失"。同仓库 tasks.py/session.py/todo.py 都已用
+# resolve_under_root 收敛过这个坑（tests/test_path_anchoring.py 就是为它写的），
+# 调度器是漏网的那个（2026-09-22 审计）。
+_SCHED_FILE = resolve_under_root(os.path.join("memory", "scheduled_tasks.json"))
 _lock = threading.Lock()
 _stop = threading.Event()
 _thread = None
@@ -26,7 +33,7 @@ def _load() -> list:
 
 
 def _save(tasks: list) -> None:
-    os.makedirs("memory", exist_ok=True)
+    os.makedirs(os.path.dirname(_SCHED_FILE), exist_ok=True)
     with open(_SCHED_FILE, "w", encoding="utf-8") as f:
         json.dump(tasks, f, ensure_ascii=False, indent=2)
 
@@ -105,4 +112,18 @@ def start(on_run) -> None:
 
 
 def stop() -> None:
+    """停止调度线程。
+
+    必须 clear()：`start()` 里的循环条件是 `while not _stop.is_set()`，只 set 不清
+    会让下一次 start() 起来的线程立刻退出、`_thread` 记下一个死线程，之后所有
+    start() 都被"已在运行"挡掉 —— 定时任务再也不触发（2026-09-22 审计）。
+    """
+    global _thread
     _stop.set()
+    t = _thread
+    _thread = None
+    if t is not None and t.is_alive():
+        try:
+            t.join(timeout=5)
+        except Exception:
+            pass

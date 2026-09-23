@@ -71,3 +71,49 @@ def test_summarize_failure_is_safe():
     messages = [{"role": "user", "content": "x" * 50}] * 5
     out = ex._maybe_compact(list(messages))
     assert out == messages   # 失败安全：原样返回
+
+
+class TestSystemPromptSurvivesCompaction:
+    """压缩必须保留开头的 system 消息（执行器规则）。
+
+    实测故障（2026-09-22 审计）：`old_part = messages[:-keep]` 把 `messages[0]`
+    （执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）
+    一起压成摘要，压缩后第 0 条变成「## 之前的执行摘要」—— 之后所有 LLM 调用都不再
+    带执行器规则，而 `executor.py` 的单循环路径正是每步都用压缩后的 messages。
+    """
+
+    def _rollout(self):
+        from agent.rollout import Rollout
+        r = Rollout.__new__(Rollout)
+        r.config = {"keep_messages": 4}
+        r.summarizer = lambda *a, **k: "摘要内容"
+        r.emit = lambda *a, **k: None
+        return r
+
+    def _messages(self, n_pairs=6):
+        msgs = [{"role": "system", "content": "【执行器规则】一次只调一个工具"}]
+        msgs.append({"role": "user", "content": "目标"})
+        for i in range(n_pairs):
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+            msgs.append({"role": "tool", "content": f"t{i}"})
+        return msgs
+
+    def test_system_prompt_kept(self):
+        r = self._rollout()
+        msgs = self._messages()
+        out = r.maybe_compact(msgs, "目标", max_tokens=1)
+        assert len(out) < len(msgs), "没有发生压缩，用例失去意义"
+        assert out[0]["role"] == "system"
+        assert "执行器规则" in str(out[0].get("content", "")), \
+            "压缩后执行器系统提示被摘要顶掉了"
+
+    def test_summary_still_present(self):
+        r = self._rollout()
+        out = r.maybe_compact(self._messages(), "目标", max_tokens=1)
+        assert any("之前的执行摘要" in str(m.get("content", "")) for m in out), \
+            "摘要没了，压缩就白做了"
+
+    def test_short_conversation_untouched(self):
+        r = self._rollout()
+        msgs = self._messages(n_pairs=1)
+        assert r.maybe_compact(msgs, "目标", max_tokens=1) == msgs

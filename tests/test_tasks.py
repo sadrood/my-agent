@@ -58,3 +58,46 @@ def test_thought_add(isolate):
     assert r.success
     assert mod.load_thoughts()[0]["content"] == "一个灵感"
     assert any(ev[0] == "thoughts" for ev in events)
+
+
+class TestTextInterface:
+    """字符串入口（legacy 决策协议 / `ToolManager.execute`）此前完全没被覆盖。
+
+    实测故障（2026-09-22 审计）：`execute()` 里对 `parts[1]`（本身就是 id）又
+    split 了一次，`rest` 恒为空串 —— 于是工具描述里承诺的
+        task status <id> <状态>
+        task log <id> <内容>
+    永远失败（"非法状态: " / "log 需要 content。"），模型会反复重试直到耗尽预算。
+    上面的 `test_status_and_log` 走的是 `execute_json`，所以一直没暴露。
+    """
+
+    def test_status_via_text(self, isolate):
+        t, _ = _mk(isolate)
+        t.execute("create 写报告")
+        tid = mod.load_tasks()[0]["id"]
+        r = t.execute(f"status {tid} in_progress")
+        assert r.success, r.error
+        assert mod.load_tasks()[0]["status"] == "in_progress"
+
+    def test_log_via_text_keeps_inner_spaces(self, isolate):
+        t, _ = _mk(isolate)
+        t.execute("create 写报告")
+        tid = mod.load_tasks()[0]["id"]
+        r = t.execute(f"log {tid} 开始写第一章 并校对")
+        assert r.success, r.error
+        assert mod.load_tasks()[0]["logs"][0].endswith("开始写第一章 并校对")
+
+    def test_complete_via_text(self, isolate):
+        t, _ = _mk(isolate)
+        t.execute("create 写报告")
+        tid = mod.load_tasks()[0]["id"]
+        assert t.execute(f"complete {tid}").success
+        assert mod.load_tasks()[0]["status"] == "done"
+
+    def test_invalid_status_still_rejected(self, isolate):
+        t, _ = _mk(isolate)
+        t.execute("create 写报告")
+        tid = mod.load_tasks()[0]["id"]
+        assert t.execute(f"status {tid} 不对劲").success is False
+        assert mod.load_tasks()[0]["status"] == "todo"
+

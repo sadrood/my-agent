@@ -8,11 +8,13 @@ cd / set / 激活环境等状态跨 tool 调用保留。会话按 key（会话 i
 执行方式：写入命令 + 哨兵行（echo __DONE_xxx__），后台 reader 线程持续
 读输出，直到哨兵出现返回该段输出。超时/会话退出则报错，不阻塞 Agent。
 """
+import atexit
 import os
 import platform
 import subprocess
 import threading
 import time
+import weakref
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -180,12 +182,38 @@ class TerminalSession:
             pass
 
 
+#: 进程退出时统一收掉常驻会话。
+#:
+#: `TerminalTool.close_all_sessions()` 此前**没有任何生产调用方**（`Agent` 也没有
+#: 退出清理钩子），于是 `terminal session start` 起的常驻 cmd.exe 在进程生命周期内
+#: 一直活着；叠加 `ToolManager.reset_tool` 超时时重建工具实例，旧实例的 sessions 与
+#: 后台 job 会被彻底孤儿化 —— 句柄、临时日志、子进程再无人回收（2026-09-22 审计）。
+#:
+#: 用 WeakSet 装"还活着的管理器"：不入 GC 的路（强引用会让被 reset 掉的旧实例
+#: 永远回收不了），进程退出时把还活着的一并关掉。只注册一次。
+_LIVE_MANAGERS: "weakref.WeakSet" = weakref.WeakSet()
+_ATEXIT_REGISTERED = False
+
+
+def _close_all_managers() -> None:
+    for mgr in list(_LIVE_MANAGERS):
+        try:
+            mgr.close_all()
+        except Exception:
+            pass
+
+
 class TerminalSessionManager:
     """按 key（会话 id）管理常驻终端会话。"""
 
     def __init__(self):
         self._sessions = {}
         self._lock = threading.Lock()
+        global _ATEXIT_REGISTERED
+        _LIVE_MANAGERS.add(self)
+        if not _ATEXIT_REGISTERED:
+            atexit.register(_close_all_managers)
+            _ATEXIT_REGISTERED = True
 
     def get(self, key: str) -> TerminalSession:
         with self._lock:

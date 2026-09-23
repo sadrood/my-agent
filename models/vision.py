@@ -73,25 +73,37 @@ class VisionModel:
     # ------------------------------------------------------------
 
     def _fallback_clients(self):
-        """按配置构建备用视觉端点 [(模型名, client), ...]（与主端点相同的跳过）。"""
-        out = []
+        """按配置构建备用视觉端点 [(模型名, client), ...]（与主端点相同的跳过）。
+
+        结果**按配置缓存**：旧实现每次 `analyze()` 都新建一批 `OpenAI` 客户端，
+        每个自带一个 httpx 连接池，而全流程没有 `close()` 也不缓存 —— 一轮浏览器
+        任务连续分析几十张截图就会创建几十个连接池，只能等 GC 回收
+        （2026-09-22 审计）。
+        """
         models = VISION_CONFIG.get("fallback_models") or []
-        if not models:
-            return out
         base = VISION_CONFIG.get("fallback_base_url") or VISION_CONFIG.get("base_url")
         key = VISION_CONFIG.get("fallback_api_key") or VISION_CONFIG.get("api_key")
         timeout = float(VISION_CONFIG.get("fallback_timeout", 60))
-        for model in models:
-            if not model:
-                continue
-            # 与主端点+主模型完全相同的条目没有意义（重试同一个东西）
-            if model == self.vision_model and str(base) == str(self.base_url):
-                continue
-            try:
-                client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
-            except Exception:                   # noqa: BLE001
-                continue
-            out.append((model, client))
+        cache_key = (tuple(models), str(base), str(key),
+                     str(self.vision_model), str(self.base_url), timeout)
+        if getattr(self, "_fallback_cache_key", None) == cache_key:
+            return self._fallback_cache
+
+        out = []
+        if models:
+            for model in models:
+                if not model:
+                    continue
+                # 与主端点+主模型完全相同的条目没有意义（重试同一个东西）
+                if model == self.vision_model and str(base) == str(self.base_url):
+                    continue
+                try:
+                    client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
+                except Exception:                   # noqa: BLE001
+                    continue
+                out.append((model, client))
+        self._fallback_cache_key = cache_key
+        self._fallback_cache = out
         return out
 
     def fallback_note(self) -> str:

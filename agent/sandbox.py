@@ -33,6 +33,18 @@ _STDOUT_FILE = ".sandbox_stdout.tmp"
 _STDERR_FILE = ".sandbox_stderr.tmp"
 
 
+def _kill_tree(pid: int) -> None:
+    """按 PID 杀整棵进程树（Windows：taskkill /T），失败再退回 TerminateProcess。
+
+    沙箱内跑的通常是 cmd.exe，只杀它自己会让孙进程活下来。
+    """
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True, timeout=15)
+    except Exception:                          # noqa: BLE001
+        pass
+
+
 @dataclass
 class SandboxOutcome:
     """沙箱执行结果。error 非空表示沙箱机制本身失败（fail-closed）。"""
@@ -454,7 +466,11 @@ def run_appcontainer(command: str, workspace: str,
         wait_ms = int(max(0.0, timeout) * 1000)
         wait_rc = kernel32.WaitForSingleObject(pi.hProcess, wait_ms)
         if wait_rc == WAIT_TIMEOUT:
-            kernel32.TerminateProcess(pi.hProcess, 1)
+            # 必须杀**整棵进程树**：`TerminateProcess` 只终止直接子进程，而沙箱里跑的
+            # 通常是 cmd.exe —— 它拉起的孙进程会活下来并继续持有文件/端口句柄，返回
+            # 文案却写着"沙箱内进程已终止"（2026-09-22 审计）。非沙箱路径用的是
+            # `taskkill /PID ... /T /F`（见 tools/terminal.py），这里对齐。
+            _kill_tree(int(pi.dwProcessId))
             kernel32.WaitForSingleObject(pi.hProcess, 5000)
             return SandboxOutcome(
                 returncode=1, stdout=_read_file(out_path), stderr=_read_file(err_path),

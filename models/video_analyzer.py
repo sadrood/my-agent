@@ -49,7 +49,12 @@ class VideoFrameAnalyzer:
     def detect_anomaly(self, screenshot_base64: str, context: str = "") -> dict:
         """检测页面异常状态（弹窗、错误、加载失败等）。"""
         if self.vision_model is None:
-            return {"has_anomaly": False, "type": "", "description": "视觉模型不可用"}
+            # 检测**失败**必须能和"检测过、确实没问题"区分开：两者 has_anomaly 都是
+            # False，而调用方只看这个字段 —— 于是视觉模型挂掉时，agent 会在完全没做过
+            # 页面检查的情况下继续操作，用户和 rollout 里都看不到任何痕迹
+            # （2026-09-22 审计）。加一个显式标记让上层能说出来。
+            return {"has_anomaly": False, "type": "detect_failed",
+                    "description": "视觉模型不可用", "detect_failed": True}
         question = (
             "请检查这个网页截图是否存在异常：\n"
             "1. 是否有弹窗（alert/confirm/prompt/登录弹窗/广告弹窗）？\n"
@@ -67,7 +72,8 @@ class VideoFrameAnalyzer:
                 return json.loads(m.group())
             return {"has_anomaly": "正常" not in result, "type": "", "description": result[:200]}
         except Exception as e:
-            return {"has_anomaly": False, "type": "", "description": str(e)}
+            return {"has_anomaly": False, "type": "detect_failed",
+                    "description": str(e), "detect_failed": True}
 
     def validate_progress(self, screenshot_base64: str, expected_state: str) -> str:
         """验证当前页面是否符合预期进度。"""

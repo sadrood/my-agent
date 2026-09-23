@@ -8,10 +8,13 @@ v2：对话（Conversation）体系
 
 旧接口（save/load/list_sessions，按名字存取）保留兼容。
 """
+import hashlib
 import json
 import os
 import re
 import secrets
+import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -43,31 +46,82 @@ def generate_conversation_id() -> str:
 
 def sanitize_name(name: str) -> str:
     """把会话名清理为安全文件名（连续分隔符折叠为单个）。"""
-    cleaned = re.sub(r"[^\w\u4e00-\u9fff-]", "_", name.strip())
+    raw = (name or "").strip()
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff-]", "_", raw)
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    return cleaned[:60] or "session"
+    if not cleaned:
+        return "session"
+    cleaned = cleaned[:60]
+    # 清理**改变了**原名时补一个短哈希：否则 `调研: 2026` 与 `调研 2026`
+    # （以及 `a/b` 与 `a_b`）会折叠成同一个文件名，而文件里存的 id 是**原始名**
+    # —— 表现为后开的会话静默覆盖前一个、/open 打开的是别的内容
+    # （2026-09-22 审计实测）。清理无改动的名字不变，所以 `conv-20260922-xxxxxx`
+    # 这类生成 ID 与 `demo` 这类纯词名完全不受影响。
+    if cleaned != raw:
+        cleaned = f"{cleaned}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
+    return cleaned
 
+
+
+#: 每个会话文件一把进程内锁：dashboard 的侧任务与主任务在**同一进程的不同线程**里
+#: 保存同一个会话（side-<main_id> 也常回写主会话），并发 `os.replace` 到同一目标
+#: 在 Windows 上会直接 WinError 5（目标被占用），两边都保存失败。
+_DUMP_LOCKS: Dict[str, threading.Lock] = {}
+_DUMP_LOCKS_GUARD = threading.Lock()
+
+
+def _dump_lock_for(path: str) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(path))
+    with _DUMP_LOCKS_GUARD:
+        lock = _DUMP_LOCKS.get(key)
+        if lock is None:
+            # RLock（可重入）：append_messages 要持锁调用 _atomic_dump，
+            # 后者也会取同一把锁 —— 普通 Lock 会死锁。
+            lock = _DUMP_LOCKS[key] = threading.RLock()
+        return lock
 
 
 def _atomic_dump(path: str, payload: dict) -> None:
     """原子写 JSON：紧凑序列化（长会话体积/耗时大幅下降）+ 临时文件替换，
     避免写入中断产生半损坏文件。"""
-    import tempfile as _temp
     # 兜底：写入前确保目标目录存在（防目录被误删 / cwd 漂移等极端情况）
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp_path, path)
+    # 临时名必须**每个写入者唯一**：主 Agent 每轮整份重写会话，dashboard 的侧任务
+    # 同时做"读→追加→写回"，两者会撞在同一个会话文件上。旧实现用固定的
+    # `path + ".tmp"`，两个写入者互相截断/互删临时文件，最坏产生两段 JSON 混杂的
+    # 损坏文件 → `_read_raw` 解析失败返回 None → `list_conversations` 跳过它，
+    # 用户看到的是"整个对话凭空消失"（2026-09-22 审计）。
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with _dump_lock_for(path):
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        # 进程内已串行，但**跨进程**（CLI 与桌面端后端）仍可能撞上同一个目标文件；
+        # Windows 的 os.replace 遇到被占用的目标会抛 PermissionError，重试即可。
+        last_error: Optional[OSError] = None
+        for attempt in range(8):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as e:
+                last_error = e
+                time.sleep(0.05 * (attempt + 1))
+        try:
+            os.remove(tmp_path)          # 彻底失败也别留垃圾
+        except OSError:
+            pass
+        raise last_error if last_error else OSError(f"写入失败: {path}")
 
 
 class SessionStore:
     """会话文件存储。"""
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict = None, on_cleanup=None):
         self.config = config or SESSION_CONFIG
+        #: cb([被删路径]) —— 让「超限清理」这件事能被前端/用户看见，而不是
+        #: 只 print 到后端控制台（桌面端用户根本看不到）（2026-09-22 审计）
+        self.on_cleanup = on_cleanup
         self.dir = _resolve_session_dir(self.config)
         os.makedirs(self.dir, exist_ok=True)
 
@@ -148,6 +202,29 @@ class SessionStore:
         _atomic_dump(path, payload)
         self._cleanup()
         return path
+
+    def append_messages(self, conv_id: str, messages: List[Dict], **fields) -> str:
+        """在**同一把锁内**读→追加→写，避免"读-改-写"被别人的全量重写切碎。
+
+        用途：dashboard 的侧任务完成后把摘要追加进主会话。旧实现在调用方那边先
+        `load_conversation` 再 `save_conversation`，中间没有任何保护（2026-09-22
+        审计）。同锁之后至少不会写出撕裂的 JSON。
+
+        ⚠️ 残留：主 Agent 的 `save_conversation` 是用它**内存里的全量历史**重写的，
+        并不知道这里追加过什么 —— 主 Agent 紧接着保存仍会覆盖这条追加。彻底解决需要
+        主侧做合并，属更大的改动。
+        """
+        path = self._path(conv_id)
+        with _dump_lock_for(path):
+            existing = self._read_raw(conv_id) or {}
+            merged = list(existing.get("messages", [])) + list(messages)
+            self.save_conversation(
+                conv_id,
+                messages=merged,
+                title=fields.get("title") or existing.get("title", ""),
+                last_summary=fields.get("last_summary") or existing.get("last_summary", ""),
+            )
+            return path
 
     def load_conversation(self, conv_id: str) -> Optional[dict]:
         """加载对话（含全部记录）；不存在返回 None。"""
@@ -275,11 +352,30 @@ class SessionStore:
                 print(f"[Session] 会话数超过上限（{max_files}），将清理最旧的 "
                       f"{len(doomed)} 个会话文件。它们是对话的唯一副本，"
                       f"如需保留请先把 {self.dir} 里的文件备份出去。")
+            removed = []
             for f in doomed:
                 try:
                     os.remove(f)
+                    removed.append(f)
                     print(f"[Session] 已清理: {os.path.basename(f)}")
                 except Exception:
+                    pass
+            if removed and self.on_cleanup is not None:
+                try:
+                    self.on_cleanup(removed)
+                except Exception:
+                    pass
+            # 顺手清掉崩溃/被杀留下的临时文件（原子写的中间产物，永不参与读取）。
+            # 只删超过 1 小时的：另一个写入者可能正开着它，删了会让它的 os.replace 失败。
+            now = time.time()
+            for name in os.listdir(self.dir):
+                if not name.endswith(".tmp"):
+                    continue
+                fp = os.path.join(self.dir, name)
+                try:
+                    if now - os.path.getmtime(fp) > 3600:
+                        os.remove(fp)
+                except OSError:
                     pass
         except Exception:
             pass
