@@ -215,6 +215,137 @@ def _check_llm(llm=None, timeout: int = 20) -> dict:
         }
 
 
+def _short_host(base_url: str) -> str:
+    """端点简写（去掉协议与路径，用于报告里少占地方）。"""
+    text = str(base_url or "")
+    for prefix in ("https://", "http://"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    return text.split("/")[0][:28] or "（未配置）"
+
+
+def _subsystem_endpoints() -> List[dict]:
+    """收集「子系统 → (端点, 密钥, 模型名)」清单，供 /models 对账。
+
+    只收录**配了模型名**的条目；端点/密钥留空时跟随主 LLM（与各子系统的实际
+    取值逻辑保持一致——否则这里会对账一个线上根本不用的组合）。
+    """
+    from config import (
+        IMAGE_GEN_CONFIG, SMALL_MODEL_CONFIG, SUPERVISOR_CONFIG,
+        VIDEO_GEN_CONFIG, VISION_CONFIG,
+    )
+
+    items: List[dict] = []
+
+    def add(name, base, key, model):
+        if model:
+            items.append({"name": name, "base_url": base or LLM_CONFIG.get("base_url"),
+                          "api_key": key or LLM_CONFIG.get("api_key"), "model": model})
+
+    add("主模型", LLM_CONFIG.get("base_url"), LLM_CONFIG.get("api_key"),
+        LLM_CONFIG.get("default_model"))
+    if VISION_CONFIG.get("enabled", True):
+        add("视觉", VISION_CONFIG.get("base_url"), VISION_CONFIG.get("api_key"),
+            VISION_CONFIG.get("vision_model"))
+        for model in VISION_CONFIG.get("fallback_models") or []:
+            add("视觉备用", VISION_CONFIG.get("fallback_base_url"),
+                VISION_CONFIG.get("fallback_api_key"), model)
+    if GUARDIAN_CONFIG.get("enabled", False):
+        add("Guardian", GUARDIAN_CONFIG.get("base_url"), GUARDIAN_CONFIG.get("api_key"),
+            GUARDIAN_CONFIG.get("model"))
+    if SMALL_MODEL_CONFIG.get("enabled", True):
+        add("小快模型", SMALL_MODEL_CONFIG.get("base_url"), SMALL_MODEL_CONFIG.get("api_key"),
+            SMALL_MODEL_CONFIG.get("model"))
+    if IMAGE_GEN_CONFIG.get("enabled", True) and IMAGE_GEN_CONFIG.get("base_url"):
+        add("文生图", IMAGE_GEN_CONFIG.get("base_url"), IMAGE_GEN_CONFIG.get("api_key"),
+            IMAGE_GEN_CONFIG.get("model"))
+        for model in IMAGE_GEN_CONFIG.get("fallback_models") or []:
+            add("文生图备用", IMAGE_GEN_CONFIG.get("fallback_base_url"),
+                IMAGE_GEN_CONFIG.get("fallback_api_key"), model)
+    if VIDEO_GEN_CONFIG.get("enabled", True) and VIDEO_GEN_CONFIG.get("base_url"):
+        add("文生视频", VIDEO_GEN_CONFIG.get("base_url"), VIDEO_GEN_CONFIG.get("api_key"),
+            VIDEO_GEN_CONFIG.get("model"))
+    if SUPERVISOR_CONFIG.get("enabled", True):
+        add("监管者", SUPERVISOR_CONFIG.get("base_url"), SUPERVISOR_CONFIG.get("api_key"),
+            SUPERVISOR_CONFIG.get("model"))
+    return items
+
+
+def _fetch_model_ids(base_url: str, api_key: str, timeout: float = 8.0) -> List[str]:
+    """问端点的 /models，返回模型 id 列表（失败抛异常，由调用方归类）。"""
+    import json as _json
+    import urllib.request
+
+    req = urllib.request.Request(
+        str(base_url).rstrip("/") + "/models",
+        headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = _json.loads(resp.read().decode("utf-8", "replace"))
+    return [str(m.get("id", "")) for m in (data.get("data") or [])]
+
+
+def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
+    """对账：各子系统的「模型名 × 端点」是否真的对得上（逐个端点问 /models）。
+
+    为什么需要（2026-09-23 实测踩到）：不少子系统的端点默认**跟随主 LLM**
+    （`SMALL_MODEL_BASE_URL`、`IMAGE_GEN_FALLBACK_API_KEY`、`VISION_*`……），
+    但模型名常是**厂商专有**的。主模型一换网关，那些名字在新端点上就不存在：
+      · 小快模型 → 503 model_not_found，杂活（会话标题）**无声**退回规则实现；
+      · 备用链 → key 与端点不匹配，401。
+    这类故障运行时不报错，只表现为"功能悄悄变差"，所以做成自检项。
+
+    端点不提供 /models（部分厂商没有该接口）时**不算失败**，只标注"未能核对"，
+    避免误报；能核对的条目里模型缺失才算失败。但 **401/403 算失败**——那说明
+    "key 与端点不匹配"，是实打实的配置错误（实测：主模型换端点后，留空即继承
+    主 LLM key 的备用链就会拿 A 家的 key 去打 B 家的端点）。
+    """
+    fetch = fetch or _fetch_model_ids
+    items = _subsystem_endpoints()
+    if not items:
+        return {"name": "子系统模型对账", "ok": True,
+                "message": "没有需要核对的条目", "hint": ""}
+
+    cache: dict = {}
+    missing, unchecked, auth_failed = [], [], []
+    for item in items:
+        key = (str(item["base_url"]), str(item["api_key"]))
+        if key not in cache:
+            try:
+                cache[key] = fetch(key[0], key[1], timeout)
+            except Exception as e:                      # noqa: BLE001
+                cache[key] = e
+        got = cache[key]
+        if isinstance(got, Exception):
+            where = f"{item['name']}@{_short_host(item['base_url'])}"
+            code = getattr(got, "code", None)
+            if code in (401, 403):
+                auth_failed.append(f"{where}（HTTP {code}：key 与该端点不匹配）")
+            else:
+                unchecked.append(f"{where}（{str(got)[:40]}）")
+        elif item["model"] not in got:
+            missing.append(f"{item['name']} 的 {item['model']}@{_short_host(item['base_url'])}")
+
+    if missing or auth_failed:
+        parts = []
+        if missing:
+            parts.append("这些模型在它配置的端点上**不存在**（会 503/404，且多在运行时"
+                         "无声降级）：" + "；".join(missing))
+        if auth_failed:
+            parts.append("这些端点的**密钥不匹配**：" + "；".join(auth_failed))
+        return {
+            "name": "子系统模型对账",
+            "ok": False,
+            "message": "  ".join(parts),
+            "hint": ("给该子系统显式配 *_BASE_URL/*_API_KEY，或换成该端点服务的模型。"
+                     "典型场景：主模型换网关后，『留空即跟随主 LLM』的备用链会拿 A 家 key"
+                     "打 B 家端点（401），厂商专有的模型名也会在新端点上消失（503）。"),
+        }
+    message = f"{len(items)} 个条目、{len(cache)} 个端点全部对得上"
+    if unchecked:
+        message += f"；{len(unchecked)} 项未能核对（端点无 /models）：" + "，".join(unchecked[:3])
+    return {"name": "子系统模型对账", "ok": True, "message": message, "hint": ""}
+
+
 def _check_tools() -> dict:
     try:
         from tools.tool_manager import ToolManager
@@ -409,6 +540,8 @@ def run_doctor(include_llm: bool = True) -> List[dict]:
     ]
     if include_llm:
         checks.insert(5, _check_llm)
+        # 需要网络（逐个端点问 /models），所以与"主模型连通"同组，离线自检不跑
+        checks.insert(6, _check_subsystem_models)
     results = []
     for fn in checks:
         try:

@@ -222,3 +222,122 @@ class TestEnvSyncCheck:
         example.write_text("A=1\n# OPTIONAL_THING=xxx\n", encoding="utf-8")
         r = doc._check_env_sync(str(env), str(example))
         assert "OPTIONAL_THING" not in r["message"]
+
+
+class TestSubsystemModelCheck:
+    """子系统「模型名 × 端点」对账。
+
+    背景（2026-09-23 实测踩到）：不少子系统的端点默认**跟随主 LLM**，模型名却是
+    厂商专有的——主模型一换网关，这些组合就失效，而且运行时不报错：
+      · 小快模型 503（杂活无声退回规则实现）；
+      · 备用链 401（留空即继承主 LLM key → 拿 A 家 key 打 B 家端点）。
+    """
+
+    ITEMS = [
+        {"name": "主模型", "base_url": "https://a.example/v1", "api_key": "k1",
+         "model": "model-x"},
+        {"name": "小快模型", "base_url": "https://b.example/v1", "api_key": "k2",
+         "model": "vendor-only-model"},
+    ]
+
+    def test_all_match(self, monkeypatch):
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: self.ITEMS)
+
+        def fetch(base, key, timeout=8.0):
+            return ["model-x"] if "a.example" in base else ["vendor-only-model", "other"]
+
+        r = doc._check_subsystem_models(fetch=fetch)
+        assert r["ok"] is True
+        assert "2 个条目" in r["message"] and "2 个端点" in r["message"]
+
+    def test_missing_model_is_reported_with_names(self, monkeypatch):
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: self.ITEMS)
+
+        def fetch(base, key, timeout=8.0):
+            return ["model-x"] if "a.example" in base else ["something-else"]
+
+        r = doc._check_subsystem_models(fetch=fetch)
+        assert r["ok"] is False
+        assert "小快模型" in r["message"] and "vendor-only-model" in r["message"]
+        assert "主模型" not in r["message"]              # 对得上的不该被点名
+        assert "*_BASE_URL" in r["hint"]
+
+    def test_auth_error_is_failure_not_warning(self, monkeypatch):
+        """401/403 = key 与端点不匹配 → 必须判失败（不是"未能核对"）。"""
+        class _Auth(Exception):
+            code = 401
+
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: self.ITEMS)
+        r = doc._check_subsystem_models(
+            fetch=lambda base, key, timeout=8.0: (_ for _ in ()).throw(_Auth("Unauthorized")))
+        assert r["ok"] is False
+        assert "密钥不匹配" in r["message"] and "401" in r["message"]
+
+    def test_endpoint_without_models_interface_is_only_a_warning(self, monkeypatch):
+        """端点没有 /models（404）不算失败，只标"未能核对"，避免误报。"""
+        class _NotFound(Exception):
+            code = 404
+
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: self.ITEMS)
+
+        def fetch(base, key, timeout=8.0):
+            if "a.example" in base:
+                return ["model-x"]
+            raise _NotFound("Not Found")
+
+        r = doc._check_subsystem_models(fetch=fetch)
+        assert r["ok"] is True
+        assert "未能核对" in r["message"] and "小快模型" in r["message"]
+
+    def test_endpoints_are_queried_once_per_pair(self, monkeypatch):
+        """同一个 (端点, key) 只问一次 /models（多个模型共用端点时别重复请求）。"""
+        items = self.ITEMS + [
+            {"name": "视觉", "base_url": "https://a.example/v1", "api_key": "k1",
+             "model": "model-x"},
+        ]
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: items)
+        calls = []
+
+        def fetch(base, key, timeout=8.0):
+            calls.append(base)
+            return ["model-x", "vendor-only-model"]
+
+        assert doc._check_subsystem_models(fetch=fetch)["ok"] is True
+        assert calls.count("https://a.example/v1") == 1
+
+    def test_no_items_is_ok(self, monkeypatch):
+        monkeypatch.setattr(doc, "_subsystem_endpoints", lambda: [])
+        assert doc._check_subsystem_models(fetch=lambda *a, **k: [])["ok"] is True
+
+    def test_real_endpoint_list_covers_key_subsystems(self):
+        """真实配置能收集到条目：主模型/视觉必须在列（离线，不联网）。"""
+        items = doc._subsystem_endpoints()
+        names = {i["name"] for i in items}
+        assert {"主模型", "视觉"} <= names
+        assert all(i["model"] and i["base_url"] and i["api_key"] for i in items)
+
+    def test_disabled_subsystems_are_skipped(self, monkeypatch):
+        """关掉的子系统不进对账清单。
+
+        注意 conftest 的 autouse fixture 全程把 `SMALL_MODEL_CONFIG["enabled"]` 关掉
+        （否则 `build_small_llm` 会建真端点、测试打外部 API），所以这里显式开一次
+        再关一次，验证开关确实被尊重。
+        """
+        from config import SMALL_MODEL_CONFIG
+        monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", True)
+        assert "小快模型" in {i["name"] for i in doc._subsystem_endpoints()}
+        monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", False)
+        assert "小快模型" not in {i["name"] for i in doc._subsystem_endpoints()}
+
+    def test_check_is_skipped_without_llm(self, monkeypatch):
+        """离线自检（include_llm=False）不能跑这项——否则测试套件会联网。"""
+        names = {r["name"] for r in doc.run_doctor(include_llm=False)}
+        assert "子系统模型对账" not in names
+
+    def test_check_runs_in_full_doctor(self, monkeypatch):
+        monkeypatch.setattr(doc, "_check_llm", lambda: {"name": "主模型连通", "ok": True,
+                                                        "message": "", "hint": ""})
+        stub = {"name": "子系统模型对账", "ok": True, "message": "stub", "hint": ""}
+        monkeypatch.setattr(doc, "_check_subsystem_models", lambda: stub)
+        names = {r["name"] for r in doc.run_doctor(include_llm=True)}
+        assert "子系统模型对账" in names

@@ -193,7 +193,7 @@ class VideoEditor:
 
         为什么是抽帧：商汤 `GET /models` 的 `input_modalities` 里，
         全端点只有 `text` 与 `text,image` 两种，**没有任何模型声明 video**
-        （2026-09-22 实测）。所以"让 agent 看视频"只能抽帧成多张图，
+        （2026-09-23 实测）。所以"让 agent 看视频"只能抽帧成多张图，
         再一次请求按时间顺序交给视觉模型——分多次问会丢掉帧间时序。
 
         Args:

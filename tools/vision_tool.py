@@ -5,7 +5,7 @@
 
 同时支持本地文件：给 `path` 就分析该图片/视频文件。视频走"等间隔抽帧 → 多图
 一次请求"——上游（商汤 / Agnes）`GET /models` 里没有任何模型声明 video 输入
-模态，视频没法直接喂给模型（2026-09-22 实测）。
+模态，视频没法直接喂给模型（2026-09-23 实测）。
 
 依赖：tools.browser.BrowserTool（截图）+ models.vision.VisionModel（分析）。
 视觉模型不可用时返回错误，模型会自行改用 text/html 等方式。
