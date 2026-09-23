@@ -28,6 +28,24 @@ def humanize_seconds(seconds: float) -> str:
     return f"{hours}h{minutes % 60:02d}m"
 
 
+def humanize_duration_cn(seconds: float) -> str:
+    """秒数 → **中文时长**（3分03秒 / 12秒 / 1时05分12秒）。
+
+    与 `humanize_seconds` 分工不同：那个是统计行里的分项（英文单位、带小数、偏技术），
+    这个是给"这次一共跑了多久"用的 —— 用户读的是墙钟，中文更好认。
+    """
+    if seconds is None or seconds < 0:
+        seconds = 0
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}时{minutes:02d}分{secs:02d}秒"
+    if minutes:
+        return f"{minutes}分{secs:02d}秒"
+    return f"{secs}秒"
+
+
 def humanize_tokens(n: int) -> str:
     """token 数 → 人类可读（312 / 1.2K / 64.5M）。"""
     if n is None or n <= 0:
@@ -47,6 +65,7 @@ class RunMetrics:
     steps: int = 0                      # 工具调用步数（含 think）
     llm_seconds: float = 0.0            # LLM 调用总耗时
     tool_seconds: float = 0.0           # 工具执行总耗时
+    started: float = field(default_factory=time.time)   # 本次运行开始（墙钟）
     first_token_seconds: List[float] = field(default_factory=list)  # 每次调用的首 token 延迟
     input_tokens: int = 0               # 输入 token 总量
     output_tokens: int = 0              # 输出 token 总量
@@ -89,6 +108,19 @@ class RunMetrics:
         if not self.first_token_seconds:
             return 0.0
         return sum(self.first_token_seconds) / len(self.first_token_seconds)
+
+    @property
+    def elapsed(self) -> float:
+        """墙钟耗时 —— 用户真正感知的"这次跑了多久"。
+
+        它与 `llm_seconds + tool_seconds` 的**差额**才是信息量所在：那部分是
+        "看不见的等待"（限流退避 / 等人工审批 / 快照 git 操作 / 压缩 / 浏览器启动 /
+        MCP 连接）。只报分项的话，用户看到"等了 5 分钟，但 LLM 42s、工具 1s"时
+        无从知道剩下的时间去哪了。
+        """
+        if not self.started:
+            return 0.0
+        return max(0.0, time.time() - self.started)
 
     @property
     def decode_seconds(self) -> float:

@@ -8,6 +8,7 @@ v3.1 起默认使用单循环执行模式（主循环式：一次对话完成目
 """
 import sys
 import os
+import time as _time
 
 from agent.state import AgentState
 from agent.planner import Planner
@@ -1385,6 +1386,9 @@ class Agent:
                     or getattr(self.config, "model", None) or "",
                     "context_tokens": getattr(metrics, "last_context_tokens", 0),
                     "compact_threshold_tokens": self._compact_threshold(),
+                    # 墙钟耗时 + 完成时刻：前端**不用**再拿 llm_seconds 当时间轴
+                    "elapsed_seconds": round(metrics.elapsed, 1),
+                    "finished_at": _time.strftime("%H:%M"),
                 }
                 try:
                     self._emit("metrics", payload)
@@ -1392,6 +1396,18 @@ class Agent:
                     pass
                 if self.config.verbose:
                     print_info(line, style="info", use_rich=True)
+            except Exception:
+                pass
+
+        # 「用时 X分XX秒」+ 完成时刻 —— 放在最显眼的位置单独一行。
+        # 用户关心的是"这次等了多久"（墙钟），而不是 LLM/工具的分项之和；
+        # 两者的差额就是那些看不见的等待（退避/审批/快照/压缩）。
+        if metrics is not None and self.config.verbose:
+            try:
+                from agent.metrics import humanize_duration_cn
+                print_info(f"用时 {humanize_duration_cn(metrics.elapsed)}",
+                           style="info", use_rich=True)
+                print_info(_time.strftime("%H:%M"), style="info", use_rich=True)
             except Exception:
                 pass
 
