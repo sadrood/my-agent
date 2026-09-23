@@ -19,6 +19,19 @@ from models.llm import LLMToolResponse, ToolCall
 from tools.tool_manager import ToolManager
 
 
+
+@pytest.fixture(autouse=True)
+def _supervisor_enabled(monkeypatch):
+    """本文件专门验证监管者本身 —— 覆盖 conftest 的默认关闭。
+
+    `tests/conftest.py` 的 `_isolate_heavy_runtime_switches` 默认把监管者关掉
+    （否则每个建 Agent 的测试都会真打外部 LLM API）。这里按那个 docstring 说的
+    方式显式打开。注意 `Supervisor.__init__` 会**拷贝**一份 config，所以夹具必须
+    在构造之前生效（autouse 夹具在测试体之前跑，满足）。
+    """
+    from config import SUPERVISOR_CONFIG
+    monkeypatch.setitem(SUPERVISOR_CONFIG, "enabled", True)
+
 class FakeJudge:
     """脚本化监管模型：按顺序返回，可抛错/返回非 JSON。"""
 

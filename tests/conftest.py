@@ -101,4 +101,41 @@ def _isolate_heavy_runtime_switches(monkeypatch):
         monkeypatch.setattr(_eb, "probe_bridge", lambda *a, **kw: False)
     except Exception:
         pass
+
+    # 关掉监管者：它默认走**真实 LLM 端点** —— SUPERVISOR_CONFIG["model"] 留空时
+    # 回退到硬编码的 "agnes-3.0-flash"，key/base 再回退 GUARDIAN_API_KEY /
+    # GUARDIAN_BASE_URL。于是任何建 Agent 的测试都会真打外部 API（12 个测试文件
+    # 都没关它），直接违反 AGENTS.md「不依赖网络的测试优先（FakeLLM 脚本化）」，
+    # 还会烧真实额度。
+    #
+    # 更隐蔽的后果：监管者的 verdict 会决定主循环要不要多跑一轮 —— 真模型回
+    # {"verdict": "continue"} 时循环继续，FakeLLM 的脚本已被前面两轮耗尽，
+    # 于是 test_agent_loop 拿到 "（脚本耗尽）" 当最终答案而间歇失败（实测 ~25%，
+    # 2026-09-23 定位）。
+    #
+    # 要验证监管者本身的测试，自行 monkeypatch 打开（test_supervisor.py 直接
+    # 构造 Supervisor，不经过这里）。
+    try:
+        from config import SUPERVISOR_CONFIG
+        monkeypatch.setitem(SUPERVISOR_CONFIG, "enabled", False)
+    except Exception:
+        pass
+
+    # 同款模式的两处，一并关掉 —— 它们的构造器都是"配置里有 model 就建真 LLM"：
+    #   · build_small_llm：SMALL_MODEL_CONFIG["model"] 非空即建真端点，被**会话标题**
+    #     用到（`_save_session_if_requested` 的 title_fn）；
+    #   · _build_guardian：GUARDIAN_* 与主 LLM 端点不同就建独立客户端，中高风险工具
+    #     调用会真打出去。
+    # 关掉之后测试套件才是真正的离线（AGENTS.md：不依赖网络的测试优先）。
+    # 验证它们本身的测试自行覆盖打开（test_supervisor.py / test_small_model.py 等）。
+    try:
+        from config import SMALL_MODEL_CONFIG
+        monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", False)
+    except Exception:
+        pass
+    try:
+        from config import GUARDIAN_CONFIG
+        monkeypatch.setitem(GUARDIAN_CONFIG, "enabled", False)
+    except Exception:
+        pass
     yield
