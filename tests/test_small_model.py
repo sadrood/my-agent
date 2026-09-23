@@ -16,6 +16,18 @@ from agent.small_model import SmallModel, build_small_llm
 from agent.session import SessionStore
 
 
+
+@pytest.fixture(autouse=True)
+def _small_model_enabled(monkeypatch):
+    """本文件专门验证小快模型 —— 覆盖 conftest 的默认关闭。
+
+    `tests/conftest.py` 默认关掉它，否则 `build_small_llm` 会按
+    SMALL_MODEL_CONFIG["model"] 建出**真实端点**的客户端，测试就会打外部 API
+    （它被会话标题用到）。
+    """
+    from config import SMALL_MODEL_CONFIG
+    monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", True)
+
 class FakeLLM:
     def __init__(self, out="海边五章连载", error=None):
         self.out = out
