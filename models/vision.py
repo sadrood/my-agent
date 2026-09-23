@@ -8,6 +8,7 @@
 """
 import base64
 import json
+import os
 import re
 
 from openai import OpenAI
@@ -221,6 +222,80 @@ class VisionModel:
     # ================================================================
     # 高级封装：常用分析场景
     # ================================================================
+
+    #: 一条视频消息里最多放几帧（帧数×单帧 token 决定请求大小）
+    MAX_VIDEO_FRAMES = 16
+
+    def analyze_video(self, video_path: str, question: str = "",
+                      frames: int = 6, max_tokens: int = 1500,
+                      detail: str = "auto") -> str:
+        """分析本地**视频文件**：等间隔抽帧 → 一次请求发出全部帧，按时间顺序理解。
+
+        为什么是抽帧：`GET /models` 显示商汤端点所有模型的 `input_modalities`
+        只有 `text` 与 `text,image`，**没有任何模型声明 video**（2026-09-22 实测），
+        所以视频没法直接喂给模型。帧必须**放在同一个请求**里 —— 分多次问
+        "第 N 帧是什么"只能拿到各帧的孤立描述，答不了"视频里发生了什么变化"。
+
+        Args:
+            video_path: 视频文件路径。
+            question: 要问的问题；留空走 VISION_VIDEO_ANALYSIS_QUESTION。
+            frames: 抽几帧（1-16）：越长/变化越快的片子要越多，也越费 token。
+            max_tokens / detail: 同 analyze()。
+
+        Returns:
+            模型的分析文本。
+
+        Raises:
+            RuntimeError: 视频不存在、缺 ffmpeg、或视觉调用全部失败。
+        """
+        from models.prompts import (VISION_VIDEO_ANALYSIS_QUESTION,
+                                    VISION_VIDEO_FRAME_PREAMBLE)
+        from models.video_edit import VideoEditError, VideoEditor, ffmpeg_path
+
+        if not video_path:
+            raise RuntimeError("未提供视频路径，无法分析。")
+        if not os.path.exists(video_path):
+            raise RuntimeError(f"视频不存在: {video_path}")
+        if not ffmpeg_path():
+            raise RuntimeError(
+                "分析视频需要 ffmpeg 抽帧，当前未找到。请安装"
+                "（winget install Gyan.FFmpeg）或在 .env 设置 FFMPEG_PATH。")
+
+        try:
+            frame_paths = VideoEditor().extract_frames(video_path, count=frames)
+        except VideoEditError as e:
+            raise RuntimeError(f"视频抽帧失败: {e}")
+
+        try:
+            images = []
+            for path in frame_paths:
+                with open(path, "rb") as fh:
+                    images.append(base64.b64encode(fh.read()).decode())
+            n = len(images)
+            full_question = VISION_VIDEO_FRAME_PREAMBLE.format(
+                n=n,
+                question=(question or "").strip() or VISION_VIDEO_ANALYSIS_QUESTION)
+            return self.analyze(images, full_question, image_type="image/jpeg",
+                                detail=detail, max_tokens=max_tokens)
+        finally:
+            # 抽出来的帧是中间产物，成败都要清掉（AGENTS.md 规则 9）
+            self._cleanup_frames(frame_paths)
+
+    @staticmethod
+    def _cleanup_frames(paths) -> None:
+        """删除临时帧与（空）目录；目录非空就不动，避免误删用户指定的目录。"""
+        parent = ""
+        for path in paths or []:
+            try:
+                parent = parent or os.path.dirname(path)
+                os.remove(path)
+            except OSError:
+                pass
+        if parent:
+            try:
+                os.rmdir(parent)
+            except OSError:
+                pass
 
     def describe_page(self, screenshot_base64: str) -> str:
         """

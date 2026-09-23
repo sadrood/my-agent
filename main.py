@@ -441,6 +441,11 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print(f"[dim]  主模型    {agent.llm.default_model} @ {agent.llm.client.base_url}[/dim]")
             c.print(f"[dim]  主 key     {masked}[/dim]")
             c.print(f"[dim]  视觉      {VISION_CONFIG.get('vision_model') or LLM_CONFIG.get('default_model')} @ {VISION_CONFIG.get('base_url')}[/dim]")
+            _vis_fb = VISION_CONFIG.get("fallback_models") or []
+            if _vis_fb:
+                c.print(f"[dim]  视觉备用  {'/'.join(_vis_fb)} @ {VISION_CONFIG.get('fallback_base_url')}"
+                        f"（单次超时 {VISION_CONFIG.get('timeout')}s 后自动换）[/dim]")
+            c.print("[dim]  看图/看视频 see 工具（视频=等间隔抽帧后多图理解；OCR 兜底识字）[/dim]")
             c.print(f"[dim]  Guardian  {'开' if GUARDIAN_CONFIG.get('enabled') else '关'}"
                     f"{' · ' + (GUARDIAN_CONFIG.get('model') or '') if GUARDIAN_CONFIG.get('model') else ''}[/dim]")
             _sup = getattr(agent, "supervisor", None)

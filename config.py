@@ -180,6 +180,12 @@ BROWSER_CONFIG = {
 #   VISION_API_KEY=<商汤key>
 #   VISION_BASE_URL=https://token.sensenova.cn/v1
 #   VISION_MODEL=<商汤视觉模型名>
+#
+# 2026-09-22 实测（同一张答案已知的图；单图 2 次 + 多图/时序 2 次）：
+#   agnes-3.0-flash 30s×2 全超时；deepseek-flash（= DeepSeek V4.1 Flash）与
+#   sensenova-6.8-flash-lite 都 3/3 命中、多图 4/4，1-4s。**关键：商汤
+#   `GET /models` 把 deepseek-flash 的 input_modalities 标成 ["text"]，实测却
+#   完全能读图** —— 判断某模型能不能读图不能只看元数据，要拿答案已知的图打一次。
 VISION_CONFIG = {
     "screenshot_path": os.getenv("VISION_SCREENSHOT_PATH", "./screenshots"),
     "vision_model": os.getenv("VISION_MODEL", ""),  # 留空则自动选择
@@ -190,7 +196,9 @@ VISION_CONFIG = {
     # browser visionclick 仅 60s），必须显式收紧
     "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
     # 备用视觉模型：主模型超时/报错/不支持图片时按顺序接着试
-    # （实测商汤 sensenova-6.8-flash-lite 能读图，Agnes 抖动时可顶上）。
+    # （实测商汤 sensenova-6.8-flash-lite 能读图，主模型抖动时可顶上）。
+    # 注意**只有一组 base_url/api_key**：多个模型名共用同一个备用端点，
+    # 所以"跨厂商兜底"只能选一家——要主备分属两家就：主走 VISION_*、备用放这里。
     # 逗号分隔多个模型；base_url/api_key 留空 = 用主 LLM 端点（商汤）。
     "fallback_models": [m.strip() for m in
                         os.getenv("VISION_FALLBACK_MODELS",

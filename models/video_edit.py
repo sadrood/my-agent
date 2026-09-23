@@ -15,10 +15,12 @@
 依赖：ffmpeg / ffprobe（PATH 或 FFMPEG_PATH 环境变量）。
 配置：config.VIDEO_EDIT_CONFIG（环境变量 VIDEO_EDIT_*）。
 """
+import glob
 import json
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 from typing import List, Optional
 
@@ -178,6 +180,61 @@ class VideoEditor:
             return float(self.probe(path).get("duration") or 0.0)
         except Exception:
             return 0.0
+
+    # ------------------------------------------------------------
+    # 抽帧（"看懂视频"用：上游没有支持视频输入的模型）
+    # ------------------------------------------------------------
+
+    MAX_FRAMES = 16
+
+    def extract_frames(self, video: str, count: int = 6, max_width: int = 768,
+                       out_dir: str = None) -> List[str]:
+        """等间隔抽取 count 帧存成 jpg，返回**按时间顺序**排列的路径列表。
+
+        为什么是抽帧：商汤 `GET /models` 的 `input_modalities` 里，
+        全端点只有 `text` 与 `text,image` 两种，**没有任何模型声明 video**
+        （2026-09-22 实测）。所以"让 agent 看视频"只能抽帧成多张图，
+        再一次请求按时间顺序交给视觉模型——分多次问会丢掉帧间时序。
+
+        Args:
+            video: 视频文件路径。
+            count: 抽几帧（1-16；越长/变化越快的片子要越多帧，也越费 token）。
+            max_width: 单帧宽度的上限（等比缩放，用来控制单帧 token）。
+            out_dir: 帧存放目录；默认新建系统临时目录，**调用方负责清理**。
+
+        Returns:
+            帧文件路径列表（时间顺序）。
+        """
+        if not video or not os.path.exists(video):
+            raise VideoEditError(f"视频不存在: {video}")
+        # 注意 `count or 6` 会把显式的 0 也当成"没给"：0 帧没有意义，
+        # 按文档收敛到 1（而不是悄悄变成 6）
+        if count is None or count == "":
+            count = 6
+        try:
+            count = max(1, min(int(count), self.MAX_FRAMES))
+        except (TypeError, ValueError):
+            count = 6
+
+        out_dir = out_dir or tempfile.mkdtemp(prefix="vframes-")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # 帧率 = 目标帧数 / 时长：fps 滤镜按固定间隔吐帧，正好覆盖全片
+        duration = self.duration(video)
+        fps = (count / duration) if duration > 0 else 1.0
+        fps = max(0.02, min(fps, 30.0))          # 极短/极长片子都别炸
+        # 表达式里带逗号（min(...)）在不过 shell 的 argv 里会被当成滤镜分隔符，
+        # 所以这里用定宽缩放，不做条件表达式
+        vf = f"fps={fps:.6f},scale={int(max_width)}:-2"
+
+        pattern = os.path.join(out_dir, "f%03d.jpg")
+        self._run(["-i", video, "-vf", vf, "-frames:v", str(count),
+                   "-q:v", "3", pattern])
+        files = sorted(glob.glob(os.path.join(out_dir, "f*.jpg")))
+        if not files:
+            raise VideoEditError(
+                "抽帧失败：没有生成任何帧（文件可能损坏、没有视频轨，或时长探测为 0）")
+        return files
 
     # ------------------------------------------------------------
     # 图 → 运镜视频（Ken Burns）
