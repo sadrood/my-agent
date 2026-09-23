@@ -12,8 +12,31 @@
 import os
 from dotenv import load_dotenv
 
+def _drop_empty_env_values() -> None:
+    """把**空值**环境变量当成"没设置"。
+
+    `os.getenv(key, "默认")` 在变量被设成空串时返回 `""` 而不是默认值，于是
+    `int(os.getenv("LLM_DEFAULT_TEMPERATURE", "0.7"))` 这类直接抛
+    `ValueError: could not convert string to float: ''` —— `import config` 崩，
+    `python main.py` 连欢迎界面都出不来（2026-09-22 审计实测）。
+
+    而"留空"恰恰是这个项目里最常见的写法：`.env.example` 自己就用
+    `VISION_API_KEY=` 引导用户按需填值，照抄给数字项留空太自然了；本文件 64 处
+    `int(os.getenv(` 与 34 处 `float(os.getenv(` 里只有两处写了空值保护。
+    与其逐个补，不如在读到配置之后统一收掉：**空 = 未设置**。
+
+    安全性：全仓库没有一处依赖"空串 ≠ 未设置"来区分行为 —— 无默认值的
+    `os.getenv(...)` 调用点要么做真值判断、要么串在 `or` 链里，而 `""` 与 `None`
+    同为假值，删除后语义不变。
+    """
+    for key in [k for k, v in os.environ.items() if v == ""]:
+        os.environ.pop(key, None)
+
+
 # 加载 .env 文件中的环境变量
 load_dotenv()
+# 留空的项当"未设置"：否则 int()/float() 解析会抛 ValueError，整个配置导入即崩
+_drop_empty_env_values()
 
 # 项目根目录（config.py 位于仓库顶层）：默认存储路径（记忆/会话/缓存）统一
 # 锚定到这里，杜绝进程 cwd 漂移导致数据写到 output/ 等子目录造成分叉。
@@ -404,7 +427,11 @@ def _merge_user_mcp_servers(env_servers: list) -> list:
 
 
 MCP_CONFIG = {
-    "enabled": os.getenv("MCP_ENABLED", "false").lower() == "true",
+    # 客户端侧总开关（连接外部 MCP 服务器）。默认 true = 与**当前实际行为**一致：
+    # 这个键此前从未被任何代码读取（2026-09-22 审计），也就是说不管 `.env` 里
+    # 写什么，MCP 客户端都在跑。改默认值而不是直接照读 false，是为了让
+    # `MCP_ENABLED=false` 这个开关真正可用，同时不悄悄关掉别人现有的 MCP。
+    "enabled": os.getenv("MCP_ENABLED", "true").lower() == "true",
     "servers": _merge_user_mcp_servers(_mcp_servers),
     "user_config_file": MCP_USER_CONFIG_FILE,
 }
@@ -491,8 +518,11 @@ LEARN_CONFIG = {
 #   workspace-write     - 默认：允许项目目录内读写，高风险操作需批准
 #   danger-full-access  - 除硬性黑名单外全部放行
 APPROVAL_CONFIG = {
-    "approval_policy": os.getenv("APPROVAL_POLICY", "on-failure"),
-    "sandbox_mode": os.getenv("SANDBOX_MODE", "workspace-write"),
+    # 这两个值会被拿去和**小写**枚举比对（ApprovalPolicy 的 mode、SANDBOX_LEVELS
+    # 的键），写 `Never` / `Workspace-Write` 会直接抛 ValueError、启动即 traceback
+    # （2026-09-22 审计）。统一归一化，和本文件其它布尔量保持一致。
+    "approval_policy": os.getenv("APPROVAL_POLICY", "on-failure").strip().lower(),
+    "sandbox_mode": os.getenv("SANDBOX_MODE", "workspace-write").strip().lower(),
     "interactive": os.getenv("APPROVAL_INTERACTIVE", "true").lower() == "true",
     "default_answer_when_not_interactive": os.getenv("APPROVAL_NONINTERACTIVE_ANSWER", "deny"),
     "workspace_dir": os.getenv("APPROVAL_WORKSPACE_DIR", os.getcwd()),
@@ -717,12 +747,29 @@ REPOMAP_CONFIG = {
 # ============================================================
 # OS 级沙箱（Windows AppContainer，BEST_PRACTICES「下一步优先级」）
 # ============================================================
+def _normalize_sandbox_mode(raw) -> str:
+    """把 SANDBOX_EXECUTION 归一化到 off / appcontainer。
+
+    只做 `.lower()` 不够：下游判的是 `sandbox_mode() != "off"`，所以 `False` / `0` /
+    `OFF` 这些"显然是想关"的写法都会被判成"开着" —— 在非 Windows 上表现为每条
+    终端命令都返回"沙箱模式 OFF 在当前平台不可用"，终端工具整体瘫痪
+    （2026-09-22 审计）。未知取值原样返回，交给沙箱层按 fail-closed 处理。
+    """
+    value = str(raw or "").strip().lower()
+    if value in ("", "off", "false", "0", "no", "none", "disabled"):
+        return "off"
+    if value in ("appcontainer", "on", "true", "1", "yes", "enabled"):
+        return "appcontainer"
+    return value
+
+
 SANDBOX_EXEC_CONFIG = {
     # 沙箱执行模式：off（默认，行为不变）/ appcontainer
     # appcontainer = 终端前台命令在 Windows AppContainer 内执行：
     # 默认不可访问用户文件/注册表/网络，仅可写工作区（icacls 授权）。
     # fail-closed：容器创建/启动失败时返回错误，不静默回退明文执行。
-    "mode": os.getenv("SANDBOX_EXECUTION", "off"),
+    # 归一化到规范词表（见 _normalize_sandbox_mode）：
+    "mode": _normalize_sandbox_mode(os.getenv("SANDBOX_EXECUTION", "off")),
     # 沙箱内命令硬超时秒数
     "timeout": float(os.getenv("SANDBOX_EXEC_TIMEOUT", "120")),
     # AppContainer 档案名（确定性 GUID 由此派生，跨会话复用授权）

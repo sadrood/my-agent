@@ -147,6 +147,41 @@ class TestTerminalIntegration:
         assert result.success is True
 
 
+class TestUnsandboxablePathsFailClosed:
+    """沙箱模式下，走不到 AppContainer 的执行路径必须拒绝，而不是放行。
+
+    实测故障（2026-09-22 审计）：`session=true` 走 `_session_run`，那条路径既不过
+    `CommandSafety.classify`、也不进沙箱；桌面端内嵌终端把命令交给 Electron 桥执行，
+    同样套不上 AppContainer。而 `session` 是 schema 里公开给模型的参数 ——
+    等于模型可以单方面放弃 SANDBOX_EXECUTION 承诺的 fail-closed。
+    """
+
+    def test_session_run_refused_when_sandbox_enabled(self, monkeypatch):
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        r = TerminalTool()._session_run("echo hi")
+        assert r.success is False
+        assert "沙箱" in r.error
+
+    def test_session_run_still_blocks_hard_blacklist(self):
+        """黑名单与 _run_command 对齐：沙箱关着也不能从会话这条路径绕过去。"""
+        r = TerminalTool()._session_run("mkfs.ext4 /dev/sda1")
+        assert r.success is False
+        assert "黑名单" in r.error
+
+    def test_embedded_terminal_refused_when_sandbox_enabled(self, monkeypatch):
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        from tools.embedded_terminal import EmbeddedTerminalTool
+        r = EmbeddedTerminalTool().execute("echo hi")
+        assert r.success is False
+        assert "沙箱" in r.error
+
+    def test_embedded_terminal_blocks_hard_blacklist(self):
+        from tools.embedded_terminal import EmbeddedTerminalTool
+        r = EmbeddedTerminalTool().execute("mkfs.ext4 /dev/sda1")
+        assert r.success is False
+        assert "黑名单" in r.error
+
+
 class TestInterpreterGrants:
     """解释器目录 AC RX 授权：让容器内能跑 python/node/git（best-effort）。"""
 

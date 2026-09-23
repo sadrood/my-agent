@@ -456,9 +456,17 @@ class ZhihuClient:
         data = self.get(path)
         return data if isinstance(data, dict) else {}
 
-    def wait_task(self, kind: str, task_id: str) -> Dict[str, Any]:
-        """轮询到终态；超时抛 ZhihuError（附最后一次进度）。"""
-        deadline = time.time() + self.task_timeout
+    def wait_task(self, kind: str, task_id: str,
+                  timeout: float = None) -> Dict[str, Any]:
+        """轮询到终态；超时抛 ZhihuError（附最后一次进度）。
+
+        `timeout` 不传时用实例的 `task_timeout`。调用方**必须**约束它落在
+        executor 的工具硬超时之内（见 tools/zhihu.py 的 `_wait_budget`）——
+        否则工具被上层判超时、整个 ToolResult（含 task_id）被丢掉，而任务在知乎侧
+        还在跑、额度已经消耗（2026-09-22 审计实测：默认 600s > 工具硬超时 300s）。
+        """
+        budget = float(timeout if timeout is not None else self.task_timeout)
+        deadline = time.time() + budget
         last = {}
         while True:
             last = self.task_status(kind, task_id)
@@ -467,7 +475,7 @@ class ZhihuClient:
                 return last
             if time.time() >= deadline:
                 raise ZhihuError(
-                    f"{kind} 任务 {task_id} 等待超时（{self.task_timeout:.0f}s，"
+                    f"{kind} 任务 {task_id} 等待超时（{budget:.0f}s，"
                     f"最后状态={status}，进度={last.get('progress')}）。"
                     "可用 task 命令继续查询该任务。")
             time.sleep(self.poll_interval)

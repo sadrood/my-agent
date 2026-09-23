@@ -134,6 +134,30 @@ class TestDistill:
         assert len(llm.calls) - calls_before == 1, "重跑不该再动已蒸馏的类别"
         shutil.rmtree(tmp)
 
+    def test_rerun_keeps_previous_distilled_entries(self):
+        """重跑压缩不能删掉上一轮提炼出来的高层条目。
+
+        实测故障（2026-09-22 审计）：`keep` 按 task_category 一刀切，凡是本轮处理过的
+        类别，**该类别全部条目**都被清掉（含上一轮 `plan_steps=["distilled"]` 的成果），
+        只留本轮结果 —— 与 `_is_distilled` 那条"已蒸馏的不再回炉"的设计自相矛盾。
+        实测：5 条 coding 记录第 1 轮提炼出 1 条，再来 3 条新记录做第 2 轮后，第 1 轮
+        那条消失了（只在归档文件里）。
+        """
+        m, tmp = _mem()
+        _add(m, "coding 任务", "coding", 4)
+        m.distill_experiences(FakeLLM(script={"coding": _OK}), min_group=3)
+        assert [e.goal for e in m.experiences if m._is_distilled(e)] == ["当排查 profile 丢失时"]
+        assert not [e for e in m.experiences if not m._is_distilled(e)], "原始记录应已被替换"
+
+        _add(m, "coding 任务", "coding", 3)          # 新一批原始记录，触发第二轮
+        m.distill_experiences(FakeLLM(script={"coding": _OK}), min_group=3)
+
+        titles = [e.goal for e in m.experiences]
+        assert "当排查 profile 丢失时" in titles, "上一轮提炼的条目被删了"
+        assert len([e for e in m.experiences if m._is_distilled(e)]) == 2
+        assert not [e for e in m.experiences if not m._is_distilled(e)], "本轮的原始记录应被替换掉"
+        shutil.rmtree(tmp)
+
     def test_raw_records_are_archived(self):
         m, tmp = _mem()
         _add(m, "coding 任务", "coding", 5)

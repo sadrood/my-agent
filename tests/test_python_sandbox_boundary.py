@@ -55,6 +55,66 @@ class TestOSExecutionBlocked:
         assert "file" in msg, "应告诉模型复制文件改用 file 工具"
 
 
+class TestRealOSBackdoorClosed:
+    """护栏不能挂在实例属性上——`__getattr__` 对已存在的名字根本不触发。
+
+    实测（2026-09-22 审计）：旧的 `_RestrictedOS.__init__` 用
+    `object.__setattr__(self, "_real", real)` 存真实模块，而 `__getattr__` 只在
+    常规查找**失败**时才被调用——`_real` 就在实例 `__dict__` 里，查找成功，
+    于是 `os._real.system('...')` / `vars(os)['_real'].popen(...)` 直接执行了命令，
+    上面那批 `_DENIED` 入口形同虚设（连 stdout 捕获都被绕过）。
+
+    现在真实模块保存在闭包里、代理是 `__slots__ = ()` 的空壳。
+    """
+
+    @pytest.mark.parametrize("code", [
+        "import os\nos._real.system('echo LEAK')",
+        "import os\nvars(os)['_real'].system('echo LEAK')",
+        "import os\nos._real.popen('echo LEAK').read()",
+        "import os\nobject.__getattribute__(os, '_real').system('echo LEAK')",
+    ])
+    def test_real_module_not_reachable(self, tool, code):
+        r = run(tool, code)
+        assert r.success is False, f"不应可达真实 os：{code!r}"
+        assert "LEAK" not in (r.output or ""), "命令被执行了 —— 后门仍开着"
+
+    def test_no_instance_dict(self, tool):
+        """代理上不该留下任何可读实例属性：`__dict__` 同样可以是跳板。"""
+        r = run(tool, "import os\nprint(os.__dict__)")
+        assert r.success is False
+
+    def test_underscore_attrs_denied(self, tool):
+        r = run(tool, "import os\nprint(os._name)")
+        assert r.success is False
+
+    def test_dir_does_not_advertise_denied(self, tool):
+        """dir() 不应宣传拿不到的名字，否则模型会照着清单一个个去试。"""
+        r = run(tool, "import os\nprint('system' in dir(os))\n"
+                      "print([n for n in dir(os) if n.startswith('_')])")
+        assert r.success is True
+        lines = (r.output or "").strip().splitlines()
+        assert lines[0].strip() == "False", "被禁用的入口仍出现在 dir() 里"
+        assert lines[1].strip() == "[]", "dir() 仍暴露前导下划线名字"
+
+
+class TestLowLevelOSModulesBlocked:
+    """nt / posix 是 os 的底层实现模块（`os.system` 就是它们的 `system`），
+    `_winapi` 直接给 CreateProcess。漏掉它们等于把 os 那层的封锁整个让开：
+    `import nt; nt.system(...)` 既不经 os 代理，也不经 terminal 的审批门。
+    """
+
+    @pytest.mark.parametrize("mod", ["nt", "posix", "_winapi"])
+    def test_blocked(self, tool, mod):
+        r = run(tool, f"import {mod}\nprint({mod})")
+        assert r.success is False
+        assert "terminal" in f"{r.output}{r.error}", "应告诉模型改用 terminal 工具"
+
+    def test_nt_system_never_runs(self, tool):
+        r = run(tool, "import nt\nnt.system('echo LEAK')")
+        assert r.success is False
+        assert "LEAK" not in (r.output or "")
+
+
 class TestNormalOSOpsStillWork:
     def test_path_helpers_available(self, tool):
         r = run(tool, "import os\nprint(os.path.join('a', 'b'))")

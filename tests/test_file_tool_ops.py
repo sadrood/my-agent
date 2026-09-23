@@ -283,3 +283,24 @@ class TestPathsWithSpaces:
         assert target.read_text(encoding="utf-8") == "hi there"
         assert tool.execute(f"append {target} !").success
         assert target.read_text(encoding="utf-8") == "hi there!"
+
+
+class TestWriteDoesNotTranslateNewlines:
+    """`file write/append` 不能做隐式换行翻译，否则与 `edit` 策略相反。
+
+    实测故障（2026-09-22 审计）：文本模式在 Windows 上把 LF 自动翻成 CRLF，而
+    `edit` 保留文件原有风格 —— 两个写工具交替使用会把整个文件的行尾来回翻。
+    """
+
+    def test_write_keeps_lf(self, tool, tmp_path):
+        p = tmp_path / "a.txt"
+        r = tool.execute_json({"operation": "write", "path": str(p), "content": "a\nb\n"})
+        assert r.success is True, r.error
+        assert p.read_bytes() == b"a\nb\n"
+
+    def test_append_keeps_lf(self, tool, tmp_path):
+        p = tmp_path / "a.txt"
+        p.write_bytes(b"x\n")
+        r = tool.execute_json({"operation": "append", "path": str(p), "content": "y\n"})
+        assert r.success is True, r.error
+        assert p.read_bytes() == b"x\ny\n"

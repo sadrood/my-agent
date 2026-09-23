@@ -6,9 +6,15 @@
 """
 import json
 import os
+
 import re
 
-_GOAL_DIR = os.path.join("memory", "goals")
+from config import resolve_under_root
+
+# 锚定项目根（理由同 agent/scheduler.py）：否则 /goal 存的目标会随 cwd 漂移，
+# 换个目录启动就查不到，模块 docstring 承诺的"失败/重启后目标仍在"失效
+# （2026-09-22 审计）。
+_GOAL_DIR = resolve_under_root(os.path.join("memory", "goals"))
 
 
 def _safe_name(key: str) -> str:

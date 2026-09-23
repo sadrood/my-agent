@@ -800,7 +800,7 @@ class TestTaskCommands:
         def create_ppt_task(self, url, num_pages=12):
             return "ppt_1"
 
-        def wait_task(self, kind, task_id):
+        def wait_task(self, kind, task_id, timeout=None):
             return self._final
 
         def download(self, url, filename=None):
@@ -861,6 +861,58 @@ class TestTaskCommands:
             {"command": "pdf_parse", "path": self._pdf(tmp_path), "wait": False})
         assert res.success is True
         assert "pdf_1" in res.output and c.downloaded == []
+
+
+class TestTaskWaitBudget:
+    """知乎轮询上限必须落在 executor 的工具硬超时之内。
+
+    实测故障（2026-09-22 审计）：`ZHIHU_TASK_TIMEOUT` 默认 600s，而
+    `agent/executor.py` 对非 browser 工具一律 300s 硬超时 —— 工具侧还在轮询，
+    上层已经判超时并把整个 ToolResult 丢掉（含 task_id），任务却在知乎侧继续跑、
+    小工具额度已经消耗，模型只能再建一个。
+    """
+
+    def test_budget_within_tool_timeout(self):
+        from config import TOOL_CONFIG
+        from tools.zhihu import _wait_budget
+        assert _wait_budget() <= float(TOOL_CONFIG.get("tool_timeout", 300))
+
+    def test_budget_never_absurdly_small(self):
+        from tools.zhihu import _wait_budget
+        assert _wait_budget() >= 30.0
+
+    def test_timeout_returns_task_id_not_failure(self):
+        """轮询超时要按"仍在进行"返回，并**保住 task_id**，不能报失败。"""
+        from models.zhihu import ZhihuError
+        from tools.zhihu import _wait_task_or_pending
+
+        class _Client:
+            def wait_task(self, kind, task_id, timeout=None):
+                raise ZhihuError(f"{kind} 任务 {task_id} 等待超时（{timeout:.0f}s）")
+
+        final, early = _wait_task_or_pending(_Client(), "pdf", "task_777")
+        assert final is None
+        assert early is not None and early.success is True, "超时不该报成失败"
+        assert "task_777" in early.output, "task_id 丢了，模型没法继续查"
+        assert early.metadata["task_id"] == "task_777"
+
+    def test_wait_task_honors_passed_timeout(self):
+        """`wait_task(timeout=...)` 要真的按传入值收手，而不是用实例默认值。"""
+        import time as _t
+
+        from models.zhihu import ZhihuError
+
+        c = make_client()
+        c.poll_interval = 0.01
+
+        def fake_status(kind, task_id):
+            return {"task_status": "running", "progress": 10}
+
+        c.task_status = fake_status
+        t0 = _t.time()
+        with pytest.raises(ZhihuError):
+            c.wait_task("pdf", "t1", timeout=0.05)
+        assert _t.time() - t0 < 2, "没有按传入的 timeout 收手"
 
 
 class TestFormatting:

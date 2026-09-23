@@ -73,6 +73,44 @@ class TestDeleteGuards:
         assert r.success is False and "盘根" in r.error
 
 
+class TestDeleteGuardCaseInsensitive:
+    """Windows 上守卫必须按大小写不敏感比较（`os.path.normcase`）。
+
+    实测故障（2026-09-22 审计）：`_delete_guard` 原先用大小写敏感的
+    `target == root` / `root.startswith` / `bad in parts`，而 Windows 文件系统
+    不区分大小写，于是：
+    - `...\\.GIT` / `.ENV` → 放行，而 `os.path.isdir` 为真（就是真 .git / .env）
+    - `D:\\AAA\\WORK\\WORK\\MY_AGENT` → 放行，`recursive: true` 会删掉整个仓库
+    """
+
+    _posix = pytest.mark.skipif(
+        os.path.normcase("A") == "A",
+        reason="POSIX 大小写敏感，大小写变体本就是不同路径")
+
+    @pytest.mark.parametrize("variant", [".GIT", ".Git", ".ENV", ".Env"])
+    @_posix
+    def test_case_variant_of_protected_name_denied(self, tool, variant):
+        assert tool._delete_guard(os.path.join(FileTool._project_root(), variant)) != ""
+
+    @_posix
+    def test_case_variant_of_project_root_denied(self, tool):
+        root = FileTool._project_root()
+        for variant in (root.upper(), root.swapcase()):
+            assert "项目根" in tool._delete_guard(variant), variant
+
+    @_posix
+    def test_case_variant_of_parent_denied(self, tool):
+        parent = os.path.dirname(FileTool._project_root())
+        assert "上级" in tool._delete_guard(parent.upper())
+
+    def test_normal_path_still_allowed(self, tool, tmp_path):
+        assert tool._delete_guard(str(tmp_path / "junk.txt")) == ""
+
+    def test_similar_name_is_not_a_match(self, tool, tmp_path):
+        """`.gitx` 不是 `.git`：按路径分量精确比较，不是子串匹配。"""
+        assert tool._delete_guard(str(tmp_path / "a" / ".gitx")) == ""
+
+
 class TestApprovalMetadata:
     def test_delete_is_workspace_write(self, tool, tmp_path):
         req = tool.build_approval_request(

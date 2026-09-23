@@ -257,10 +257,14 @@ class MCPClient:
         self._send_notification(server_name, "notifications/initialized", {})
 
         # 发现工具
-        self._discover_tools(server_name)
-        
+        found = self._discover_tools(server_name)
+        if found is None:
+            # 连上了但 tools/list 没成功：不能报"已连接"就完事 —— 安装器会据此把这条
+            # 配置写进持久化、重启后自动重连，而实际一个工具都没有（2026-09-22 审计）。
+            print(f"[MCP] 已建立连接，但 tools/list 失败：服务器 '{server_name}' 的工具未注册。")
+            return False
         print(f"[MCP] 已连接服务器 '{server_name}' ({command} {' '.join(args)})")
-        print(f"[MCP] 发现 {len([t for t in self._tools if t.startswith(f'mcp_{server_name}_')])} 个工具")
+        print(f"[MCP] 发现 {found} 个工具")
         return True
 
     def connect_sse(self, server_name: str, url: str, headers: dict = None) -> bool:
@@ -328,10 +332,16 @@ class MCPClient:
     # ================================================================
 
     def _discover_tools(self, server_name: str):
-        """发现并注册 MCP 服务器的工具。"""
+        """发现并注册工具。返回注册数量；`tools/list` **调用失败**时返回 None。
+
+        调用方据此区分「服务器本来就没有工具」和「根本没调通」—— 旧实现两者都只是
+        静默 `return`，`connect_stdio` 照样打印「已连接」并返回 True，安装器据此
+        写进持久化配置，用户以为接上了、实际 0 个工具（2026-09-22 审计）。
+        """
         result = self._send_request(server_name, "tools/list", {})
         if result is None:
-            return
+            return None
+        registered = 0
 
         tools_list = result.get("tools", [])
         for tool_info in tools_list:
@@ -347,11 +357,13 @@ class MCPClient:
                     server_name=server_name,
                 )
                 self._tools[mcp_tool.name] = mcp_tool
+                registered += 1
                 if self._tool_manager:
                     self._tool_manager.register(mcp_tool)
             except Exception as e:
                 # 单个工具构造/注册失败不阻塞整批（坏 schema 等）
                 print(f"[MCP] 跳过工具 '{tool_name}': {e}")
+        return registered
 
     def call_tool(self, tool_full_name: str, arguments: dict) -> Any:
         """
@@ -361,17 +373,31 @@ class MCPClient:
             tool_full_name: 完整工具名（mcp_<server>_<tool>）
             arguments: 工具参数
         """
-        # 从工具名提取服务器名
+        # 从工具名提取服务器名。
+        # ⚠️ 不能简单按第一个 `_` 切：服务器名本身可能含下划线，而工具的注册名是
+        # `mcp_{server}_{tool}`。旧写法 `tool_full_name[4:].split("_", 1)` 对
+        # `mcp_my_fs_read_file` 得到 `["my", "fs_read_file"]` → 服务器名解成 "my"
+        # 查不到、`_send_request` 返回 None，调用方只看到"MCP 工具无响应"，
+        # 与超时/崩溃无法区分（2026-09-22 审计）。改为在**已连接的服务器名**里
+        # 找最长前缀匹配。
         if not tool_full_name.startswith("mcp_"):
-            return {"isError": True, "content": [{"text": f"无效的 MCP 工具名: {tool_full_name}"}]}
-        
-        parts = tool_full_name[4:].split("_", 1)
-        if len(parts) < 2:
-            return {"isError": True, "content": [{"text": f"无效的 MCP 工具名格式: {tool_full_name}"}]}
-        
-        server_name = parts[0]
-        tool_name = parts[1]
-        
+            return {"isError": True,
+                    "content": [{"text": f"无效的 MCP 工具名: {tool_full_name}"}]}
+        body = tool_full_name[4:]
+        server_name = tool_name = ""
+        for name in sorted(self._servers, key=len, reverse=True):
+            prefix = f"{name}_"
+            if body.startswith(prefix):
+                server_name, tool_name = name, body[len(prefix):]
+                break
+        if not server_name:
+            # 兜底：服务器还没登记（或名字确实不含下划线）时按老办法切
+            parts = body.split("_", 1)
+            if len(parts) < 2:
+                return {"isError": True,
+                        "content": [{"text": f"无效的 MCP 工具名格式: {tool_full_name}"}]}
+            server_name, tool_name = parts
+
         return self._send_request(server_name, "tools/call", {
             "name": tool_name,
             "arguments": arguments,

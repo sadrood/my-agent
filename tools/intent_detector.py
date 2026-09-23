@@ -167,9 +167,20 @@ class IntentDetector:
 
         for name in self._sorted_keys:
             name_lower = name.lower()
-            idx = lowered.find(name_lower)
-            if idx == -1:
-                continue
+            # 短 ASCII 站名（qq / 360 / yy…）必须**词边界**匹配：裸子串会把
+            # "帮我算一下 3600 元是多少美金" 认成命中 360、把 "分析一下 ayy 这个缩写"
+            # 认成命中 yy，然后把这些站点写进 enriched_goal 让模型去 goto
+            # （2026-09-22 审计实测）。中文站名没有词边界，仍用子串。
+            if not self._contains_chinese(name_lower) and len(name_lower) <= 3:
+                m = re.search(
+                    rf"(?<![0-9a-z]){re.escape(name_lower)}(?![0-9a-z])", lowered)
+                if not m:
+                    continue
+                idx = m.start()
+            else:
+                idx = lowered.find(name_lower)
+                if idx == -1:
+                    continue
 
             # 检查这个位置是否已经被一个更长的匹配覆盖
             overlap = False
@@ -193,9 +204,21 @@ class IntentDetector:
         return result
 
     def _has_nav_command(self, text: str) -> bool:
-        """检测文本是否包含浏览器导航命令。"""
+        """检测文本是否包含浏览器导航命令。
+
+        用**词边界**而不是裸子串：`back` 会命中 `backup`、`close` 会命中 `closed`，
+        于是"打开淘宝，顺便看下 backup 目录"被判成含导航命令并触发跳转
+        （2026-09-22 审计实测）。中文命令没有词边界，仍按子串判。
+        """
         lowered = text.lower()
-        return any(cmd.lower() in lowered for cmd in NAVIGATION_COMMANDS)
+        for cmd in NAVIGATION_COMMANDS:
+            c = cmd.lower()
+            if self._contains_chinese(c):
+                if c in lowered:
+                    return True
+            elif re.search(rf"(?<![0-9a-z]){re.escape(c)}(?![0-9a-z])", lowered):
+                return True
+        return False
 
     def _enrich(self, user_input: str, result: IntentResult) -> str:
         """
@@ -254,10 +277,17 @@ class IntentDetector:
         if not self._contains_chinese(name_or_url):
             return name_or_url.strip()
 
-        # 包含中文但不在映射表中，尝试模糊匹配
-        for name in self._sorted_keys:
-            if name.lower() in lowered or lowered in name.lower():
-                return self.site_map[name]
+        # 包含中文但不在映射表中，尝试模糊匹配。
+        # ⚠️ 只保留**正向**匹配（站名出现在查询里），而且要 ≥2 字。
+        # 旧实现还允许 `lowered in name.lower()`（查询是站名的一部分），于是
+        # `goto 微信` 会因为"企业微信"这个键含"微信"被解析成 work.weixin.qq.com、
+        # `goto 云盘` 解析成 music.163.com、`goto 书` 解析成 www.xiaohongshu.com
+        # —— 而这些结果会**直接进 browser goto**，用户被带到完全不相干的站点
+        # （2026-09-22 审计实测）。宁可返回 None 让上层报"未识别"。
+        if len(lowered) >= 2:
+            for name in self._sorted_keys:
+                if name.lower() in lowered:
+                    return self.site_map[name]
 
         return None
 

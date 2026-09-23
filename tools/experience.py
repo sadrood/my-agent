@@ -24,7 +24,9 @@ from config import EXPERIENCE_CONFIG, resolve_under_root
 from tools.base import BaseTool, ToolResult
 
 _SECRET_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"),
+    # 允许 key 体内出现 `-` / `_`：`sk-ant-api03-…`、`sk-proj-…` 这类带连字符的
+    # 形态此前完全匹配不到（2026-09-22 审计实测）。
+    re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{14,}"),
     re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -35,8 +37,53 @@ _SECRET_PATTERNS = [
 ]
 
 
+def _safe_domain_dir(repo_path: str, domain: str) -> str:
+    """把 domain 映射成经验仓**之内**的安全子目录。
+
+    旧实现只把 `/` 换成平台分隔符就 join —— 既不挡 `..`，也不挡绝对路径
+    （`os.path.join` 遇绝对路径会丢弃前面的部分）。于是
+    `domain: "C:/Windows/Temp/pwn"` 能把文件写到仓外，而随后的 `git add` 因为
+    relpath 指向仓外而失败，工具报"保存失败"**却把文件留在了磁盘上**
+    （2026-09-22 审计，实测可复现）。
+
+    逐段净化：丢掉空段 / `.` / `..`，把分隔符、盘符、非法字符统一换成 `_`；
+    最后再兜一次"必须落在 experiences/ 之内"，防平台差异（大小写、短名）漏网。
+    """
+    base = os.path.join(repo_path, "experiences")
+    segments: List[str] = []
+    for raw in str(domain or "").replace("\\", "/").split("/"):
+        seg = raw.strip().strip(".")
+        # `\w` 在 Python 3 里是 Unicode 语义，已覆盖中日韩字符；保留 `-` 便于
+        # 目录名可读。其余（分隔符、`:`、`*`、盘符…）统一换成 `_`。
+        seg = re.sub(r"[^\w-]+", "_", seg).strip("_")
+        if seg:
+            segments.append(seg[:60])
+    target = os.path.join(base, *segments) if segments else base
+    base_cmp = os.path.normcase(os.path.abspath(base))
+    target_cmp = os.path.normcase(os.path.abspath(target))
+    if target_cmp != base_cmp and not target_cmp.startswith(base_cmp + os.sep):
+        return base
+    return target
+
+
+def _clear_stale_lock(repo_dir: str) -> None:
+    """清掉**残留**的 `.git/index.lock`（只清超过 5 分钟的，新鲜的留着）。"""
+    lock = os.path.join(repo_dir, ".git", "index.lock")
+    try:
+        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > 300:
+            os.remove(lock)
+    except OSError:
+        pass
+
+
 def _git(args: List[str], cwd: str, check: bool = True) -> Tuple[int, str]:
-    """执行 git（禁交互提示；继承项目仓库 http.proxy 以便走本机代理）。"""
+    """执行 git（禁交互提示；继承项目仓库 http.proxy 以便走本机代理）。
+
+    对 `index.lock` 冲突做重试：本机常同时跑多个 Agent 会话（AGENTS.md 第 12 条），
+    它们共用同一份经验仓缓存克隆，`add`/`commit`/`push` 会撞锁。旧实现直接失败，
+    表现为"保存失败"且工作区留下未提交的 md；更糟的是 git 被 180s 超时杀掉时会
+    **残留 index.lock**，之后所有 save 一直失败、只能人工删（2026-09-22 审计）。
+    """
     cmd = ["git"]
     try:
         proxy = subprocess.run(["git", "config", "--get", "http.proxy"],
@@ -49,15 +96,27 @@ def _git(args: List[str], cwd: str, check: bool = True) -> Tuple[int, str]:
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0",
                GIT_AUTHOR_NAME="my-agent", GIT_AUTHOR_EMAIL="my-agent@local",
                GIT_COMMITTER_NAME="my-agent", GIT_COMMITTER_EMAIL="my-agent@local")
-    try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=180, env=env)
-    except Exception as e:
-        return 1, str(e)
-    out = (r.stdout or "") + (r.stderr or "")
-    if check and r.returncode != 0:
-        raise RuntimeError(out.strip()[:600])
-    return r.returncode, out.strip()
+    last_rc, last_out = 1, ""
+    for attempt in range(4):
+        try:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=180, env=env)
+        except Exception as e:
+            return 1, str(e)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 or "index.lock" not in out.lower():
+            if check and r.returncode != 0:
+                raise RuntimeError(out.strip()[:600])
+            return r.returncode, out.strip()
+        last_rc, last_out = r.returncode, out.strip()
+        if attempt == 2:
+            _clear_stale_lock(cwd)          # 可能是超时被杀留下的残留锁
+        time.sleep(0.4 * (attempt + 1))
+    if check:
+        raise RuntimeError(
+            f"{last_out[:400]}\n（重试多次仍被 git index.lock 挡住：可能有另一个 "
+            f"Agent 会话正在写同一个经验仓。稍后重试即可。）")
+    return last_rc, last_out
 
 
 def _cfg() -> dict:
@@ -273,7 +332,10 @@ class ExperienceTool(BaseTool):
         if len(body) > int(cfg.get("entry_max_chars", 8000)):
             return ToolResult(success=False, output="",
                               error=f"body 过长（>{cfg.get('entry_max_chars')} 字），请精简。")
-        scan = body + "\n" + " ".join(tags)
+        # topic / domain 也要扫：它们会写进 frontmatter（见下面的 entry）和 git
+        # commit message，只扫 body+tags 时把 key 写进 topic 就能明文推上远端仓
+        # （2026-09-22 审计）。
+        scan = "\n".join([body, topic, domain, " ".join(tags)])
         for pat in _SECRET_PATTERNS:
             if pat.search(scan):
                 return ToolResult(success=False, output="",
@@ -287,7 +349,7 @@ class ExperienceTool(BaseTool):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 _git(["clone", "--depth", "1", "--single-branch", "--branch",
                       str(cfg.get("branch") or "main"), url, path], cwd=os.getcwd())
-            target_dir = os.path.join(path, "experiences", domain.replace("/", os.sep))
+            target_dir = _safe_domain_dir(path, domain)
             os.makedirs(target_dir, exist_ok=True)
             tag_line = ", ".join(f'"{t}"' for t in tags)
             entry = ("---\n"

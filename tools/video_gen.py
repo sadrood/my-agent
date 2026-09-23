@@ -219,13 +219,21 @@ class VideoGenTool(BaseTool):
         elif url:
             lines.append(f"✅ 已生成: {url}")
         else:
-            lines.append(f"状态: {status}（暂无结果）")
+            lines.append(
+                f"状态: {status}（暂无结果；任务已创建并计费）。"
+                f"稍后用 video_gen(command=\"status\", task_id=\"{vid}\") 取结果。")
 
+        # `wait=false`（schema 推荐的"超长视频"用法）时任务刚 queued，local/url 必然都
+        # 为空 —— 旧实现 `success=bool(local or url)` 把它报成"执行失败"，而
+        # agent/executor.py 对失败结果只回"执行失败（无错误信息）"、把 output（含
+        # task_id）整段丢掉 ⇒ 模型拿不到 task_id，只能重新创建任务，重复烧配额。
+        # 任务**已经创建**就该算成功，与上面的 timed_out 分支保持一致
+        # （2026-09-22 审计实测：任务已计费却报失败）。
         return ToolResult(
-            success=bool(local or url),
+            success=bool(local or url or vid),
             output="\n".join(lines),
             metadata={"video_id": vid, "url": url, "local_path": local,
-                      "prompt": prompt},
+                      "prompt": prompt, "pending": not (local or url)},
         )
 
     def _status(self, task_id: str) -> ToolResult:

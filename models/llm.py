@@ -86,6 +86,28 @@ def unwrap_raw_arguments(arguments: dict, max_depth: int = 5) -> dict:
 RETRYABLE_ERRORS = ()
 
 
+def _first_choice_message(response):
+    """取第一个 choice 及其 message；空 choices / 缺 message 时给一句能看懂的报错。
+
+    网关把上游错误包成 **HTTP 200 + `{"choices": []}`** 是常见形态（内容被安全策略
+    拦截时也这样）。直接 `response.choices[0].message` 会抛
+    `IndexError: list index out of range` 或 `AttributeError: 'NoneType'`，
+    调用方（文章流水线、主循环）只能拿到一个与模型无关的晦涩异常，排查方向被带偏。
+    `models/vision.py` 对同一问题专门加了保护，主 LLM 这两条非流式路径反而没有
+    （2026-09-22 审计）。
+    """
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        raise RuntimeError(
+            "上游返回了空的 choices（HTTP 200 但无候选）。常见原因：内容被安全策略"
+            "拦截，或网关把上游错误包成了 200。请调整输入后重试。")
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    if message is None:
+        raise RuntimeError("上游返回的 choice 缺少 message 字段（响应不完整）。")
+    return choice, message
+
+
 def _is_minute_quota_error(e: Exception) -> bool:
     """是否为**按分钟窗口**重置的配额耗尽（TPM/RPM）。
 
@@ -502,7 +524,8 @@ class LLM:
         t0 = time.time()
         response = self._create_with_retry(kwargs)
         self._record_usage(getattr(response, "usage", None), time.time() - t0)
-        content = response.choices[0].message.content
+        _choice, message = _first_choice_message(response)
+        content = message.content
         return content if content is not None else ""
 
     def chat_with_tools(
@@ -542,8 +565,7 @@ class LLM:
         response = self._create_with_retry(payload)
         self._record_usage(getattr(response, "usage", None), time.time() - t0)
 
-        choice = response.choices[0]
-        message = choice.message
+        choice, message = _first_choice_message(response)
 
         # 思考模式：捕获推理内容（需在下一轮回传，否则服务器 400）
         # 关键：字段存在（即使空串）也要标记，thinking 服务要求每条 assistant 消息回传该字段

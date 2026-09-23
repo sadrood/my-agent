@@ -118,6 +118,24 @@ class TestAgentLoopMode:
         # 发生了回退：exec_mode 被切换为 plan
         assert agent.config.exec_mode == "plan"
 
+    def test_max_steps_is_enforced(self, tmp_path):
+        """`--max-steps` 必须真的生效。
+
+        实测故障（2026-09-22 审计）：判断写在计划循环体的**末尾**，而那之前每条路径
+        都以 continue / break 收尾（执行成功 continue、重规划 continue、重规划失败
+        break、超重规划 break），那句判断**永远执行不到** —— 7 步的计划配
+        `max_steps=3` 会一路跑完，从不提示"已达最大步骤数"。
+        """
+        plan = "\n".join(f"{i}. 第{i}步" for i in range(1, 8))    # 7 步
+        script = [NotImplementedError("tools not supported by provider"), plan] + [
+            json.dumps({"action": "think", "reasoning": "想了下"})   # 每步都成功
+            for _ in range(7)
+        ] + ["总结完毕"]
+        agent = make_agent(tmp_path, script, max_steps=3)
+        agent.run("跑个多步计划")
+        assert agent.state.current_step == 3, (
+            f"max_steps=3 没生效，实际跑了 {agent.state.current_step} 步")
+
     def test_dashboard_events_emitted(self, tmp_path):
         agent = make_agent(tmp_path, [
             LLMToolResponse(content="", tool_calls=[ToolCall("1", "python", {"code": "print(1)"})]),

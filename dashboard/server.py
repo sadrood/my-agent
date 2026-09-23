@@ -32,6 +32,33 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 hub = get_dashboard_hub()
 
 
+
+_LOCAL_IPS: list = []
+
+
+def _binds_non_loopback() -> bool:
+    """服务是否被要求绑到非回环地址（`--host 0.0.0.0` / 具体网卡 IP）。"""
+    for var in ("DASHBOARD_HOST", "MY_AGENT_DASHBOARD_HOST", "HOST"):
+        host = (os.getenv(var) or "").strip().lower()
+        if host and host not in ("127.0.0.1", "localhost", "::1"):
+            return True
+    return False
+
+
+def _local_host_ips() -> set:
+    """本机所有网卡的 IPv4 地址（解析一次后缓存）。"""
+    global _LOCAL_IPS
+    if not _LOCAL_IPS:
+        ips = set()
+        try:
+            import socket
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(str(info[4][0]).strip().lower())
+        except Exception:                      # noqa: BLE001
+            pass
+        _LOCAL_IPS = [sorted(ips)]
+    return set(_LOCAL_IPS[0])
+
 class _LivePermission:
     """运行中实时权限模式：桌面端任务进行中切换 auto/ask/block 立即生效
     （下次工具审批询问即按新模式；正在等待中的审批卡也会被新模式打断裁决）。"""
@@ -155,7 +182,7 @@ approval_broker = ApprovalBroker()
 
 
 class RunControl:
-    """按会话的运行停止控制：前端按"停止"→ 置位对应会话的 stop_event，
+    """按会话的运行停止控制：前端按「停止」→ 置位对应会话的 stop_event，
     Agent/Executor 在下一个检查点优雅退出，TerminalTool 会强杀正在跑的子进程。
 
     多标签 Agent：按 session_id 隔离，每个会话可独立运行、独立停止（互不干扰）。
@@ -163,22 +190,39 @@ class RunControl:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._events: dict = {}   # session_id -> threading.Event
+        self._events: dict = {}    # session_id -> threading.Event
+        self._started: dict = {}   # session_id -> 开始序号（单调递增）
+        self._seq = 0
 
     def begin(self, session_id: str = "") -> threading.Event:
-        """任务开始时为指定会话注册一个 stop_event。"""
+        """任务开始时为指定会话注册一个 stop_event。
+
+        同一会话重复 begin 时，把**上一个** event 也置位：旧的 worker 还在跑，而
+        `stop()` 之后只拿得到新的那个 —— 不置位等于它永远停不下来，而
+        `running_count()` 还会误报（2026-09-22 审计）。
+        """
         ev = threading.Event()
+        key = session_id or ""
         with self._lock:
-            self._events[session_id or ""] = ev
+            self._seq += 1
+            old = self._events.get(key)
+            if old is not None and not old.is_set():
+                old.set()
+            self._events[key] = ev
+            self._started[key] = self._seq
         return ev
 
     def stop(self, session_id: str = "") -> bool:
-        """请求停止指定会话的任务；缺省停最近一个。返回是否命中可停任务。"""
+        """请求停止指定会话的任务；缺省停**最近开始**的那一个。"""
         with self._lock:
             if session_id:
                 ev = self._events.get(session_id)
             else:
-                ev = next(reversed(self._events.values()), None) if self._events else None
+                # 不能靠 dict 的插入顺序：对已存在的 key 重新赋值**不改变它的位置**，
+                # 于是 `next(reversed(...))` 取到的是「最早开始」而不是「最近开始」，
+                # 点停止会停错会话（2026-09-22 审计）。用显式序号。
+                key = max(self._started, key=self._started.get, default=None)
+                ev = self._events.get(key) if key is not None else None
         if ev is None or ev.is_set():
             return False
         ev.set()
@@ -186,7 +230,9 @@ class RunControl:
 
     def end(self, session_id: str = "") -> None:
         with self._lock:
-            self._events.pop(session_id or "", None)
+            key = session_id or ""
+            self._events.pop(key, None)
+            self._started.pop(key, None)
 
     def running_count(self) -> int:
         with self._lock:
@@ -282,9 +328,12 @@ if HAS_FASTAPI:
         "null",                                             # 打包后的 file:// 桌面端
     ]
     _extra = [o.strip() for o in os.getenv("DASHBOARD_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    _allowed_origins = _default_origins + _extra
+    # WebSocket 握手单独查这一份（CORS 中间件对 ws scope 不生效，见 websocket_endpoint）
+    _allowed_origins_set = {o for o in _allowed_origins if o}
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_default_origins + _extra,
+        allow_origins=_allowed_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -301,6 +350,13 @@ if HAS_FASTAPI:
         allowed = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
         allowed |= {h.strip().lower()
                     for h in os.getenv("DASHBOARD_ALLOWED_HOSTS", "").split(",") if h.strip()}
+        # 本机自己的网卡 IP 也要放行：`--host 0.0.0.0` 时 start_server 会打印
+        # 「局域网访问: http://<lan_ip>:<port>」，而那个地址此前必然 403 —— 打印出来的
+        # 用法根本不能用，且提示里完全没提还要另外配 DASHBOARD_ALLOWED_HOSTS
+        # （2026-09-22 审计）。DNS rebinding 挡的是"攻击者域名解析到 127.0.0.1"，
+        # 放行本机 IP 不影响这层防护，所以只在本机绑非回环地址时才加。
+        if _binds_non_loopback():
+            allowed |= _local_host_ips()
         if host not in allowed:
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -311,6 +367,23 @@ if HAS_FASTAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
+        # Origin 校验必须在这里自己做：上面两道防线**都只覆盖 http scope** ——
+        # `@app.middleware("http")` 用的 BaseHTTPMiddleware 和 CORSMiddleware 遇到
+        # websocket scope 都是直接透传，starlette 的 WebSocket 也不做 origin 检查。
+        # 漏掉的后果正是上面 CORS 注释要堵的"本地 RCE"：用户浏览器里任意一个页面
+        # `new WebSocket("ws://127.0.0.1:8090/ws")` 就能 ① 收到全部事件流（含审批
+        # 卡片的 id、工具命令原文、截图）；② 回发 approval_response 直接批准本该由
+        # 用户裁决的高危命令；③ 发 stop 停掉正在跑的任务（2026-09-22 审计）。
+        #
+        # 没有 Origin 的一律放行：浏览器发起 WebSocket 时**必然**带 Origin，能省掉它
+        # 的只有本机进程（curl / python / Electron 主进程），那些本来就有本地执行权，
+        # 拦它们没有意义。
+        origin = (websocket.headers.get("origin") or "").strip()
+        if origin and origin not in _allowed_origins_set:
+            print(f"[dashboard] 拒绝 WebSocket 连接：Origin '{origin}' 不在白名单"
+                  f"（可用 DASHBOARD_ALLOWED_ORIGINS 追加）", file=sys.stderr)
+            await websocket.close(code=1008)      # policy violation
+            return
         await websocket.accept()
         client_id = str(uuid.uuid4())[:8]
         queue = hub.subscribe(client_id)
@@ -514,10 +587,14 @@ if HAS_FASTAPI:
             import subprocess as _sub
             try:
                 rel = os.path.relpath(abs_path, WORKSPACE_ROOT)
-                proc = _sub.run(
-                    ["git", "diff", "--no-color", "--unified=3", "HEAD", "--", rel],
-                    cwd=WORKSPACE_ROOT, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=15,
+                # 挪到线程里：大仓库上 git diff 最长 15s，同步跑会把事件循环连同
+                # /ws 推送一起冻住（2026-09-22 审计）。
+                proc = await asyncio.to_thread(
+                    lambda: _sub.run(
+                        ["git", "diff", "--no-color", "--unified=3", "HEAD", "--", rel],
+                        cwd=WORKSPACE_ROOT, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=15,
+                    )
                 )
             except Exception as e:
                 return {"ok": False, "error": f"git diff 不可用: {str(e)[:120]}"}
@@ -764,17 +841,30 @@ if HAS_FASTAPI:
         note = str((payload or {}).get("note", "") or "").strip()[:500]
         if rating not in ("up", "down"):
             return {"ok": False, "error": "rating 需要 up/down"}
-        path = os.path.join("memory", "feedback.json")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = _json.load(f)
-            if not isinstance(data, list):
+        # 路径锚定项目根（cwd 漂移会写到别处）；坏文件**不能**当空列表覆盖 ——
+        # 那是把用户全部历史反馈（唯一副本）静默清掉（2026-09-22 审计）。
+        from config import resolve_under_root
+        path = resolve_under_root(os.path.join("memory", "feedback.json"))
+        data = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = _json.load(f)
+                if isinstance(loaded, list):
+                    data = loaded
+                else:
+                    raise ValueError("feedback.json 不是数组")
+            except Exception as e:
+                # 保留原件、另起新文件：宁可多一个 .corrupt 也不丢数据
+                try:
+                    os.replace(path, path + ".corrupt")
+                    print(f"[dashboard] feedback.json 无法解析（{e}），已改名保留为 .corrupt")
+                except OSError:
+                    return {"ok": False, "error": "feedback.json 损坏且无法改名，已放弃本次写入以保住历史"}
                 data = []
-        except Exception:
-            data = []
         data.append({"message_id": msg_id, "rating": rating, "note": note,
                      "time": _t.strftime("%Y-%m-%d %H:%M")})
-        os.makedirs("memory", exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             _json.dump(data, f, ensure_ascii=False, indent=2)
         return {"ok": True, "count": len(data)}
@@ -800,11 +890,20 @@ if HAS_FASTAPI:
     async def api_git():
         """当前工作区 Git 分支与状态（modified/untracked）。非 git 仓库返回 in_repo=False。"""
         import subprocess as _sub
+
+        def _collect():
+            b = _sub.run(["git", "branch", "--show-current"], cwd=os.getcwd(),
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=10)
+            s = _sub.run(["git", "status", "--porcelain"], cwd=os.getcwd(),
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=10)
+            return b, s
+
         try:
-            branch = _sub.run(["git", "branch", "--show-current"], cwd=os.getcwd(),
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
-            status = _sub.run(["git", "status", "--porcelain"], cwd=os.getcwd(),
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+            # 同步 subprocess 会**卡住整个事件循环**（含 /ws 的事件推送），必须挪到线程里
+            # （2026-09-22 审计：主任务跑着时点一下 git 面板，前端就"停住"了）。
+            branch, status = await asyncio.to_thread(_collect)
         except Exception:
             return {"ok": False, "in_repo": False, "branch": "", "files": []}
         files = []
@@ -897,14 +996,20 @@ if HAS_FASTAPI:
                 clean.append({"role": role, "content": content})
         if len(clean) <= 1:
             return {"ok": False, "error": "messages 为空"}
-        try:
+        def _call_llm():
             client = OpenAI(api_key=LLM_CONFIG["api_key"], base_url=LLM_CONFIG["base_url"])
-            resp = client.chat.completions.create(
+            return client.chat.completions.create(
                 model=LLM_CONFIG.get("default_model") or "gpt-4o-mini",
                 messages=clean,
                 max_tokens=2000,
                 temperature=0.6,
             )
+
+        try:
+            # 同步 LLM 调用（可能几秒到几十秒，且这里**没有超时**）会冻住整个事件循环：
+            # 主任务经 hub 推的事件全卡在队列里、/api/stop 与 /api/approve 也一起排队，
+            # 前端表现为"任务卡住"（2026-09-22 审计）。挪到线程。
+            resp = await asyncio.to_thread(_call_llm)
         except Exception as e:
             return {"ok": False, "error": f"辅助对话调用失败: {str(e)[:200]}"}
         choices = getattr(resp, "choices", None)
@@ -1050,7 +1155,17 @@ if HAS_FASTAPI:
         """
         from agent.session import SessionStore, generate_conversation_id
         conv_id = generate_conversation_id()
-        store = SessionStore()
+        # 会话文件是**用户对话的唯一副本**，超限清理会静默删掉最旧的那些。
+        # 建新会话恰好会触发 _cleanup，所以这里把"删了什么"推给前端，别让
+        # 用户在不知情的情况下丢对话（2026-09-22 审计）。
+        def _on_cleanup(paths):
+            hub.emit("sessions_cleaned", {
+                "deleted": [os.path.basename(x) for x in paths],
+                "hint": "会话文件超过上限，最旧的已被删除（它们是对话的唯一副本）。"
+                        "如需保留请先备份 memory/sessions/。",
+            })
+
+        store = SessionStore(on_cleanup=_on_cleanup)
         store.save_conversation(conv_id, messages=[], title="新对话")
         conv = store.load_conversation(conv_id) or {}
         return {"ok": True, "session": {
@@ -1281,18 +1396,12 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
             try:
                 from agent.session import SessionStore
                 summary = (result_text or "")[:500]
-                store = SessionStore()
-                main_conv = store.load_conversation(main_id) or {}
-                msgs = list(main_conv.get("messages", []))
-                msgs.append({
+                # 用 append_messages：读→追加→写在 session 层**同一把锁**里完成，
+                # 不再由调用方分两步做（中间会被主 Agent 的全量重写切进去）。
+                store.append_messages(main_id, [{
                     "role": "system",
-                    "content": f"[辅助Agent] 完成子任务「{goal[:60]}」：\n{summary}",
-                })
-                store.save_conversation(
-                    main_id, messages=msgs,
-                    title=main_conv.get("title", ""),
-                    last_summary=main_conv.get("last_summary", ""),
-                )
+                    "content": f"[辅助Agent] 完成子任务「{goal[:60]}」：" + chr(10) + summary,
+                }])
                 hub.emit("side_complete", {
                     "panel": "side",
                     "main_session_id": main_id,

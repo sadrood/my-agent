@@ -28,6 +28,48 @@ def test_list_agent_tools():
     assert "see" in tools
 
 
+class TestSandboxModeClamp:
+    """宿主不能靠 run_agent 的参数给自己提权到 danger-full-access。
+
+    实测漏洞（2026-09-22 审计）：`run_agent` 的 `sandbox_mode` 是**宿主 LLM 自己填的**
+    普通参数，而 `danger-full-access` 是唯一能解锁硬黑名单的取值 ——
+    `agent/approval.py` 的 `decide()` 在 `risk == "blocked"` 时只在这一种组合下放行：
+    `sandbox_mode == "danger-full-access" and mode == "never"`（MCP 默认就是 never）。
+    于是宿主一句 `run_agent(goal, sandbox_mode="danger-full-access")` 就能执行
+    mkfs / diskpart / format c: / rm -rf / 这类"任何情况下均被拒绝"的命令。
+    """
+
+    @pytest.mark.parametrize("requested", [
+        "danger-full-access",            # 唯一能解锁硬黑名单的值
+        "DANGER-FULL-ACCESS",            # 大小写变体
+        " danger-full-access ",          # 带空白
+        "bogus",                         # 非法值
+        "", None,                        # 空
+    ])
+    def test_escalation_requests_are_clamped(self, requested):
+        assert mcp_server._clamp_sandbox_mode(requested) == "workspace-write"
+
+    @pytest.mark.parametrize("requested", ["read-only", "workspace-write"])
+    def test_stricter_or_equal_kept(self, requested):
+        assert mcp_server._clamp_sandbox_mode(requested) == requested
+
+    def test_run_agent_applies_the_clamp(self, monkeypatch):
+        """夹取要落在真实入口上，不能只是 helper 里有。"""
+        captured = {}
+
+        class _FakeAgent:
+            def __init__(self, tool_manager=None, config=None):
+                captured["config"] = config
+
+            def run(self, goal):
+                return "ok"
+
+        import agent as agent_pkg
+        monkeypatch.setattr(agent_pkg, "Agent", _FakeAgent)
+        assert mcp_server._run_agent("写个文件", sandbox_mode="danger-full-access") == "ok"
+        assert captured["config"].sandbox_mode == "workspace-write"
+
+
 def test_run_agent_mcp_config_built():
     """验证 MCP 模式的 AgentConfig 是无人值守安全配置（不实际执行任务）。"""
     from agent import AgentConfig

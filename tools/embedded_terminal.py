@@ -55,6 +55,14 @@ class EmbeddedTerminalTool(TerminalTool):
         # 后台任务管理命令走本地（后台进程本就跑在 Agent 机器上，无需桥接）
         if command.lower().startswith("bg "):
             return super().execute(command)
+        # 持久会话不支持：桥只跑单条命令。当 shell 命令发过去，用户只会看到
+        # "不是内部或外部命令"；而 execute_json 的 session_op 分支会走**本地** PTY，
+        # 命令不进桌面终端面板 —— 与模块承诺的"所见即所跑"相反（2026-09-22 审计）。
+        if command.lower().startswith("session"):
+            return ToolResult(
+                success=False, output="",
+                error="桌面内嵌终端不支持持久会话（session）。请用单条命令，"
+                      "或改用 CLI 模式（那里的 session 走本地常驻 shell）。")
 
         # 硬性黑名单在工具层同样拦截（与本地 terminal 一致的安全底线）
         from agent.approval import CommandSafety
@@ -63,6 +71,18 @@ class EmbeddedTerminalTool(TerminalTool):
                 success=False,
                 output="",
                 error=f"安全限制：命令 '{command[:100]}' 命中硬性黑名单，已拒绝执行。",
+            )
+
+        # 沙箱模式：命令会经桌面桥交给 Electron 主进程执行，那条路径套不上
+        # AppContainer。放行等于绕过 SANDBOX_EXECUTION 承诺的 fail-closed
+        # （与 _session_run 同因，2026-09-22 审计）。
+        from agent.sandbox import sandbox_enabled
+        if sandbox_enabled():
+            return ToolResult(
+                success=False, output="",
+                error=("沙箱模式（SANDBOX_EXECUTION）下不支持桌面内嵌终端：命令经桌面桥在 "
+                       "Electron 主进程里执行，无法套用 AppContainer。请改用 CLI 模式"
+                       "（无桌面桥）以正常进沙箱，或显式设置 SANDBOX_EXECUTION=off。"),
             )
 
         resp = self._call_bridge(command)
@@ -75,6 +95,14 @@ class EmbeddedTerminalTool(TerminalTool):
         return ToolResult(
             success=False, output="", error=str(resp.get("error", "桥调用失败"))
         )
+
+    def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
+        """结构化入口：同样拒绝持久会话（否则会静默走本地 PTY，面板里看不到）。"""
+        if arguments.get("session") or str(arguments.get("session_op") or "").strip():
+            return ToolResult(
+                success=False, output="",
+                error="桌面内嵌终端不支持持久会话（session）。请用单条命令。")
+        return super().execute_json(arguments)
 
     def _run_command(self, command: str, background: bool = False) -> ToolResult:
         # 桌面端一律走桥（本地只保留 bg 管理的兜底路径）

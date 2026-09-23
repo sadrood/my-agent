@@ -28,6 +28,45 @@ def test_registered_in_manager():
     assert t.min_sandbox_mode == "danger-full-access"
 
 
+def test_on_request_survives_into_approval_request():
+    """`approval="on-request"` 必须真的传进 ApprovalRequest —— 断言类属性是不够的。
+
+    实测故障（2026-09-22 审计）：工具层 8 份 `build_approval_request` 覆写
+    （terminal / file / patch / browser / python / installer / toonflow / zhihu）
+    谁都没传 `approval`，字段恒为 dataclass 默认的 "auto"，于是
+    `ApprovalPolicy.decide` 第 3 步（`request.approval == "on-request"`）在真实
+    链路上永不触发。而 computer 的 `min_sandbox_mode` 是 danger-full-access，
+    恰好让 decide() 的高危分支（`risk=="high" and sandbox != danger-full-access`）
+    也不生效 ⇒ 点击/输入变成零确认执行。
+    上面 `test_registered_in_manager` 只断言类属性、`test_approval.py` 手工塞字段，
+    两端都盖不到这条链路。
+    """
+    from tools.tool_manager import ToolManager
+    from agent.approval import ApprovalPolicy
+
+    tm = ToolManager()
+    req = tm.build_approval_request("computer", {"action": "type", "text": "hi"})
+    assert req is not None
+    assert req.approval == "on-request", "on-request 元数据在链路中丢了"
+
+    # on-request 必须走到询问：approver 说不行就不行
+    p = ApprovalPolicy(mode="on-failure", sandbox_mode="danger-full-access",
+                       interactive=False, approver=lambda r: False)
+    assert p.decide(req).allowed is False
+
+    # never（无人值守）：工具主动要求批准 → 直接拒
+    p2 = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access",
+                        interactive=False)
+    assert p2.decide(req).allowed is False
+
+
+def test_default_approval_metadata_still_auto():
+    """没声明 on-request 的工具不受影响，走的还是原来的 auto 路径。"""
+    from tools.tool_manager import ToolManager
+    req = ToolManager().build_approval_request("terminal", {"command": "pip list"})
+    assert req.approval == "auto"
+
+
 def test_schema_actions():
     tool = DesktopTool()
     s = tool.schema

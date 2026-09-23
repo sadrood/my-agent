@@ -51,6 +51,43 @@ class TestOriginAllowlist:
         assert r.headers.get("access-control-allow-origin") in ("null", "*")
 
 
+class TestWebSocketOriginAllowlist:
+    """WebSocket 握手必须自己查 Origin。
+
+    实测漏洞（2026-09-22 审计）：上面两道防线**都只覆盖 http scope** ——
+    `@app.middleware("http")` 用的 BaseHTTPMiddleware 与 CORSMiddleware 遇到
+    websocket scope 都是直接透传，`websocket_endpoint` 自己也不读 origin。
+    于是用户浏览器里任意一个页面 `new WebSocket("ws://127.0.0.1:8090/ws")` 就能：
+    ① 收到全部事件流（含审批卡片的 id、工具命令原文、截图）；② 回发
+    `approval_response` 直接批准本该由用户裁决的高危命令；③ 发 `stop` 停任务。
+    """
+
+    @pytest.mark.parametrize("origin", [
+        "https://evil.example.com",
+        "http://evil.example.com",
+        "http://localhost:9999",        # 回环但不在白名单
+    ])
+    def test_foreign_origin_rejected(self, client, origin):
+        from starlette.websockets import WebSocketDisconnect
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws", headers={"Origin": origin}):
+                pass
+
+    @pytest.mark.parametrize("origin", [
+        "http://localhost:5173",        # Vite dev
+        "http://127.0.0.1:8080",        # 浏览器版面板
+        "null",                         # 打包桌面端 file://
+    ])
+    def test_allowed_origin_accepted(self, client, origin):
+        with client.websocket_connect("/ws", headers={"Origin": origin}):
+            pass
+
+    def test_missing_origin_accepted(self, client):
+        """无 Origin = 本机进程。浏览器发 WebSocket 必然带 Origin，省不掉。"""
+        with client.websocket_connect("/ws"):
+            pass
+
+
 class TestHostAllowlist:
     def test_loopback_host_ok(self, client):
         r = client.get("/api/state", headers={"Host": "127.0.0.1:8080"})

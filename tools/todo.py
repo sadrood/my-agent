@@ -32,9 +32,12 @@ def _safe_name(key: str) -> str:
 class TodoTool(BaseTool):
     """会话级待办清单（todo_write）。"""
 
-    risk_level: str = "low"
+    risk_level: str = "medium"
     approval: str = "auto"
-    min_sandbox_mode: str = "read-only"
+    # 这个工具会 makedirs + 写 memory/todos/*.json（见 _save），
+    # 旧元数据却按「只读」声明 —— read-only 沙箱下 0 >= 0 直接放行，
+    # 与「read-only 拒绝一切写入类操作」的约定不符（2026-09-22 审计）。
+    min_sandbox_mode: str = "workspace-write"
 
     def __init__(self):
         self._key = ""

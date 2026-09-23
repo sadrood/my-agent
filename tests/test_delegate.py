@@ -71,3 +71,21 @@ def test_unknown_runtime_rejected():
     res = tool.execute_json({"runtime": "myagent", "goal": "x"})
     assert res.success is False
     assert "delegate 目标必须是" in _out(res)
+
+
+def test_stream_output_not_doubled():
+    """子引擎输出不能被收两遍。
+
+    实测故障（2026-09-22 审计）：`runtime.run_external` 先逐行发 `stream_delta`、
+    结束再发一次**完整** `answer`，而 `on_event` 两者都 `lines.append` ——
+    `"".join(lines)` 正好是两倍内容（实测 `output == 'hello-XYZ\nhello-XYZ'`），
+    长输出直接双倍 token 回喂给模型。
+    """
+    tool = DelegateTool()
+    res = tool.execute_json({
+        "runtime": "custom",
+        "goal": "XYZ",
+        "command_template": "echo hello-{goal}",
+    })
+    assert res.success is True, _out(res)
+    assert res.output.count("hello-XYZ") == 1, f"输出重复了：{res.output!r}"

@@ -18,6 +18,37 @@ from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
+
+def _kill_process_tree(proc) -> None:
+    """连**子孙进程**一起杀。
+
+    `shell=True` 时 `proc` 是 shell 本身，直接 kill 只杀掉 shell，真正的测试进程
+    （孙进程）会活着并继续持有继承来的管道写端 —— 于是 `subprocess.run` 的
+    TimeoutExpired 分支里那句 `communicate()` 会一直等它，timeout 形同虚设
+    （2026-09-22 审计实测：`timeout=1` 的命令拖了 5.08s 才返回）。
+    """
+    import subprocess
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=15)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _new_process_group_kwargs() -> dict:
+    """让子进程自成一个进程组/会话，超时时才能整组杀掉。"""
+    import subprocess
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
 # metadata.old_text 截断上限：unified diff 渲染用的旧内容快照，
 # 超大文件截断（old_text_truncated=True），避免撑爆事件负载
 _OLD_TEXT_META_MAX = 100 * 1024
@@ -121,7 +152,34 @@ class EditTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
 
+        # 空 old_string 特例：Python 的 `str.count("")` 返回 len+1（每个字符间隙都算
+        # 一次匹配），于是 `replace_all=true` 会把文件打成 `XaXbXcX`，返回值却还是
+        # `success=True 已修改…替换 9 处`（2026-09-22 审计实测）。
+        # 唯一合理的空串用法是"往空文件里写内容"（count("")==1），保留。
+        if not old_string and (content or replace_all):
+            return ToolResult(
+                success=False, output="",
+                error=("old_string 不能为空：空串会在每个字符间隙匹配"
+                       "（str.count('') == len+1），replace_all 会把整个文件打散成乱码。"
+                       "要整文件重写请用 file write；要插入内容请给出插入点的原文。"),
+            )
+
         # 换行归一化：统一按 LF 匹配（兼容模型传来的 CRLF 旧文本）
+        # 原文件的换行风格：读的时候 universal newlines 已经把它统一成 LF，
+        # 写回与备份时都必须还原 —— 否则一次「只改一行」的编辑会把整个文件的行尾
+        # 从头翻掉（2026-09-22 审计：Windows 仓库里表现为整文件 diff，还会破坏
+        # agent/snapshot.py 的逐操作提交）。
+        # 必须看**原始字节**：上面那次读用的是 universal newlines，content 里的
+        # CRLF 已经变成 LF 了 —— 在 content 里找换行符永远是 False。
+        try:
+            with open(file_path, "rb") as _fb:
+                _had_crlf = b"\r\n" in _fb.read()
+        except OSError:
+            _had_crlf = False
+
+        def _restore_eol(_text: str) -> str:
+            return _text.replace("\n", "\r\n") if _had_crlf else _text
+
         content_normalized = content.replace("\r\n", "\n")
         old_normalized = old_string.replace("\r\n", "\n")
         new_normalized = new_string.replace("\r\n", "\n")
@@ -152,14 +210,15 @@ class EditTool(BaseTool):
         if backup:
             try:
                 backup_path = file_path + ".bak"
-                with open(backup_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                # newline=""：不做换行翻译，备份才是原件的字节副本
+                with open(backup_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(_restore_eol(content))
             except Exception:
                 backup_path = ""
 
         try:
             with open(file_path, "w", encoding="utf-8", newline="") as f:
-                f.write(new_content)
+                f.write(_restore_eol(new_content))
         except Exception as e:
             return ToolResult(success=False, output="", error=f"写入失败: {e}")
 
@@ -320,22 +379,40 @@ class EditTool(BaseTool):
                     os.path.basename(n) for n in names) + "）"
 
         import subprocess
+        import tempfile
+        timeout = int(TOOL_CONFIG.get("edit_preflight_timeout", 180))
+        # 输出**落临时文件**而不是走管道。这是超时能生效的关键：管道写端会被后代
+        # 进程继承，只要还有一个孙进程活着，`communicate()` / `run()` 就一直等它 ——
+        # `subprocess.run(timeout=)` 的 TimeoutExpired 分支里那句 communicate 正是
+        # 这么被拖住的（2026-09-22 审计实测：`timeout=1` 的命令拖了 5.09s 才返回，
+        # 而被改模块的测试只要留下一个常驻子进程，edit 就会挂到远超 180s）。
+        # 换成文件后 `proc.wait(timeout=)` 只看直接子进程，超时立刻返回。
+        out_fd, out_path = tempfile.mkstemp(prefix="myagent_preflight_", suffix=".log")
+        os.close(out_fd)
+        timed_out = False
+        proc = None
         try:
-            proc = subprocess.run(
-                scoped_cmd, shell=True, capture_output=True, text=True,
-                timeout=int(TOOL_CONFIG.get("edit_preflight_timeout", 180)),
-                encoding="utf-8", errors="replace",
-                stdin=subprocess.DEVNULL,   # 防止命令意外读取 stdin 而永久阻塞
-                cwd=self._find_repo_root(file_path),
-            )
-        except subprocess.TimeoutExpired:
-            rolled = self._rollback_edit(file_path, backup_path)
-            return ToolResult(
-                success=False, output="",
-                error=(f"preflight 测试超时（>{TOOL_CONFIG.get('edit_preflight_timeout')}s）。"
-                       f"已{'自动回滚' if rolled else '回滚失败（请手动 git 恢复）'}本次修改。"),
-                metadata={"preflight_failed": True, "rolled_back": rolled},
-            )
+            with open(out_path, "w", encoding="utf-8", errors="replace") as out_file:
+                proc = subprocess.Popen(
+                    scoped_cmd, shell=True,
+                    stdout=out_file, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,   # 防止命令意外读取 stdin 而永久阻塞
+                    cwd=self._find_repo_root(file_path),
+                    **_new_process_group_kwargs(),
+                )
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    # 光返回不够：挂死的测试进程要真被杀掉，否则它会一直占着
+                    # 文件句柄/端口，下一次 preflight 照样受影响。
+                    _kill_process_tree(proc)
+                    try:
+                        proc.wait(timeout=10)
+                    except Exception:
+                        pass
+            with open(out_path, encoding="utf-8", errors="replace") as f:
+                combined = f.read()
         except Exception as e:
             rolled = self._rollback_edit(file_path, backup_path)
             return ToolResult(
@@ -344,11 +421,25 @@ class EditTool(BaseTool):
                        f"已{'自动回滚' if rolled else '回滚失败'}本次修改。"),
                 metadata={"preflight_failed": True, "rolled_back": rolled},
             )
+        finally:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+
+        if timed_out:
+            rolled = self._rollback_edit(file_path, backup_path)
+            return ToolResult(
+                success=False, output="",
+                error=(f"preflight 测试超时（>{timeout}s，测试进程已终止）。"
+                       f"已{'自动回滚' if rolled else '回滚失败（请手动 git 恢复）'}本次修改。\n"
+                       f"常见原因：相关测试里有卡死或用例留下了常驻子进程。"),
+                metadata={"preflight_failed": True, "rolled_back": rolled},
+            )
 
         if proc.returncode == 0:
             return ToolResult(success=True, output=f"preflight 测试通过{scope_note}")
 
-        combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
         tail_lines = int(TOOL_CONFIG.get("edit_preflight_tail", 80))
         summary = self._summarize_test_failure(combined, file_path, tail_lines)
         rolled = self._rollback_edit(file_path, backup_path)
@@ -476,7 +567,7 @@ class EditTool(BaseTool):
     def _rollback_edit(self, file_path: str, backup_path: str) -> bool:
         """用 .bak 备份恢复文件内容；恢复成功后删除已用完的备份。"""
         try:
-            with open(backup_path, "r", encoding="utf-8") as f:
+            with open(backup_path, "r", encoding="utf-8", newline="") as f:
                 original = f.read()
             with open(file_path, "w", encoding="utf-8", newline="") as f:
                 f.write(original)

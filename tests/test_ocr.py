@@ -393,3 +393,39 @@ class TestRealOcr:
         assert out.success, out.error
         assert "OCR 识别结果" in out.output
         assert "connection" in out.output.lower()
+
+
+class TestPowerShellBridgeNoLeak:
+    """PowerShell 桥脚本必须**每个进程一份**，而不是每次 OCR 一份。
+
+    实测故障（2026-09-22 审计）：脚本缓存在**实例**属性 `self._ps_script` 上，而
+    `OcrEngine()` 每次调用都新建实例 —— 每调一次 OCR 就在 %TEMP% 留一个 .ps1 永不
+    删除（审计时本机已累积 51 个，这次修复前已涨到 97 个）。同函数的 out_file 与
+    recognize_base64 的 PNG 都有 finally 清理，只有它漏了。
+    """
+
+    def test_same_path_across_calls_and_instances(self):
+        import glob
+        import os
+        import tempfile
+
+        import models.ocr as m
+
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "myagent_ocr_*.ps1")))
+        paths = {m._ps_script_path() for _ in range(4)}
+        assert len(paths) == 1, f"每次调用都在新建脚本: {paths}"
+        for engine in (m.OcrEngine(), m.OcrEngine()):
+            engine._ps_script = m._ps_script_path()      # 复刻 _run_windows 的用法
+        new = set(glob.glob(os.path.join(tempfile.gettempdir(), "myagent_ocr_*.ps1"))) - before
+        assert len(new) <= 1, f"每个实例都留了一个文件: {len(new)}"
+
+    def test_cleanup_removes_the_file(self):
+        import os
+
+        import models.ocr as m
+
+        path = m._ps_script_path()
+        assert os.path.exists(path)
+        m._cleanup_ps_script()
+        assert not os.path.exists(path), "退出清理没删掉桥脚本"
+        m._PS_SCRIPT_PATH = ""          # 复位，避免影响其它用例

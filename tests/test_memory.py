@@ -638,9 +638,17 @@ def test_clear_all():
     assert len(m.experiences) == 0
     assert len(m.failure_patterns) == 0
     assert len(m.strategies) == 0
-    # 文件也应被删除
+    # 文件也应被删除 —— 断言必须落在 **chat 子目录**上：文件本来就写在
+    # `db_path/<chat_id>/`（见 Memory.__init__ 与 _save_json），旧断言查的是父目录
+    # `tmp/`，那里从来没有过这些文件，所以恒真（空断言，2026-09-22 审计）。
     for fname in ["memory.json", "experiences.json", "failure_patterns.json", "strategies.json"]:
-        assert not os.path.exists(os.path.join(tmp, fname))
+        assert not os.path.exists(os.path.join(m.chat_db_path, fname))
+    # 重新构造 Memory：数据不该"复活"
+    m2 = Memory(db_path=tmp)
+    assert len(m2.long_term_memory) == 0
+    assert len(m2.experiences) == 0
+    assert len(m2.failure_patterns) == 0
+    assert len(m2.strategies) == 0
     shutil.rmtree(tmp)
 
 

@@ -345,6 +345,28 @@ class TerminalTool(BaseTool):
                           error="用法: session status|start|stop|clear")
 
     def _session_run(self, command: str) -> ToolResult:
+        # 安全检查与 _run_command 对齐（黑名单先于翻译，防止翻译产物绕过审查）。
+        # 此前这条路径两道复查都没有：既不过 CommandSafety.classify，也不进沙箱，
+        # 而 `session` 是 schema 里公开给模型的参数 —— 等于模型可以单方面放弃
+        # sandbox.py 承诺的 fail-closed（2026-09-22 审计）。
+        from agent.approval import CommandSafety
+        from agent.sandbox import sandbox_enabled
+        if CommandSafety.classify(command) == "blocked":
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"安全限制：命令 '{command[:100]}' 命中硬性黑名单，已拒绝执行。",
+            )
+        if sandbox_enabled():
+            # 持久会话是一个长驻 shell 进程，单条命令没法事后套 AppContainer；
+            # 放行就等于在"仅工作区可写、默认无网络"的承诺上开一个明文后门。
+            # fail-closed：宁可拒绝，让模型改用会正常进沙箱的普通前台命令。
+            return ToolResult(
+                success=False, output="",
+                error=("沙箱模式（SANDBOX_EXECUTION）下不支持持久终端会话：会话是长驻进程，"
+                       "无法按单条命令套用 AppContainer。请改用不带 session 的普通命令"
+                       "（会正常进沙箱），或显式设置 SANDBOX_EXECUTION=off 并自行承担风险。"),
+            )
         if _IS_WINDOWS:
             command = _win_unix_shim(command)
         key = self._session_key
@@ -540,6 +562,8 @@ class TerminalTool(BaseTool):
 
     def _start_background(self, command: str) -> ToolResult:
         """后台启动命令：stdout/stderr 重定向到临时日志文件，立即返回任务 ID。"""
+        out_path = ""
+        f_out = None
         try:
             job_id = f"job-{int(time.time() * 1000)}-{len(self._jobs) + 1}"
             out_path = os.path.join(tempfile.gettempdir(), f"my_agent_bg_{job_id}.log")
@@ -556,6 +580,18 @@ class TerminalTool(BaseTool):
                     start_new_session=True,
                 )
         except Exception as e:
+            # Popen 抛错时句柄既不 close、也没进 `_jobs`（后续 _prune_jobs 永远碰不到它）
+            # —— 每失败一次就漏一个句柄 + 一个空日志文件（2026-09-22 审计）。
+            if f_out is not None:
+                try:
+                    f_out.close()
+                except Exception:
+                    pass
+            if out_path:
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
             return ToolResult(success=False, output="",
                               error=f"后台启动失败: {str(e)[:200]}")
         self._jobs[job_id] = {

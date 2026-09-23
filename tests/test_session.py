@@ -13,9 +13,29 @@ from agent.session import (
 
 
 def test_sanitize_name():
-    assert sanitize_name("my session 1") == "my_session_1"
-    assert sanitize_name("任务/调研: 2026") == "任务_调研_2026"
+    # 清理无改动的名字：原样返回，不带哈希
+    assert sanitize_name("demo") == "demo"
+    assert sanitize_name("conv-20260922-a1b2c3") == "conv-20260922-a1b2c3"
     assert sanitize_name("///") == "session"
+
+
+def test_sanitize_name_disambiguates_after_cleaning():
+    """清理会改变原名时补短哈希，否则不同的会话名会折叠成同一个文件。
+
+    实测故障（2026-09-22 审计）：`调研: 2026` 与 `调研 2026`（以及 `a/b` 与 `a_b`）
+    都映射到 `调研_2026.json`，而文件里存的 id 是**原始名** —— 后开的会话静默覆盖
+    前一个，`/open` 打开的是别的内容。
+    """
+    a = sanitize_name("调研: 2026")
+    b = sanitize_name("调研 2026")
+    c = sanitize_name("a/b")
+    d = sanitize_name("a_b")
+    assert a != b, "不同的会话名不能映射到同一个文件名"
+    assert c != d
+    # 仍然是以清理结果为前缀的可读名字
+    assert a.startswith("调研_2026") and b.startswith("调研_2026")
+    # 稳定：同一名字多次调用结果一致（否则每次保存都会新建文件）
+    assert sanitize_name("调研: 2026") == a
 
 
 def test_generate_conversation_id():
@@ -135,6 +155,54 @@ class TestConversations:
         assert store.delete_conversation("conv-a") is True
         assert store.load_conversation("conv-a") is None
         assert store.delete_conversation("conv-a") is False
+
+
+class TestConversationNameIsolation:
+    """只差一个标点的会话名不能互相覆盖（用户可见的症状）。"""
+
+    def test_similar_names_do_not_collide(self, tmp_path):
+        store = SessionStore(config={"dir": str(tmp_path), "max_sessions": 50})
+        store.save_conversation("调研: 2026", [{"role": "user", "content": "冒号版"}])
+        store.save_conversation("调研 2026", [{"role": "user", "content": "空格版"}])
+        assert store.load_conversation("调研: 2026")["messages"][0]["content"] == "冒号版"
+        assert store.load_conversation("调研 2026")["messages"][0]["content"] == "空格版"
+
+
+class TestConcurrentSave:
+    """并发保存同一会话不能互相踩（原子写的临时文件名必须每个写入者唯一）。
+
+    实测故障（2026-09-22 审计）：临时文件名固定为 `path + ".tmp"`，而主 Agent 每轮
+    整份重写会话、dashboard 侧任务同时做"读→追加→写回"，两者共用同一个临时文件 ——
+    互相截断会产生两段 JSON 混杂的损坏文件，`_read_raw` 解析失败返回 None，
+    `list_conversations` 跳过它，用户看到的是"整个对话凭空消失"。
+    """
+
+    def test_concurrent_save_keeps_file_readable(self, tmp_path):
+        import threading
+
+        store = SessionStore(config={"dir": str(tmp_path), "max_sessions": 50})
+        errors = []
+
+        def writer(tag):
+            try:
+                for i in range(15):
+                    store.save_conversation(
+                        "conv-shared",
+                        messages=[{"role": "user", "content": f"{tag}-{i}"}])
+            except Exception as e:          # noqa: BLE001
+                errors.append(f"{tag}: {e}")
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in ("a", "b", "c")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"并发保存抛异常: {errors}"
+        # 关键：文件必须仍是可解析的合法 JSON —— 旧实现最坏就坏在这里
+        data = store.load_conversation("conv-shared")
+        assert data is not None and data["messages"], "会话文件损坏或为空"
+        assert [f for f in os.listdir(tmp_path) if f.endswith(".tmp")] == [], "残留临时文件"
 
 
 def test_save_load(tmp_path):

@@ -132,6 +132,33 @@ class TestImageGenModel:
         r = make_model(tmp_path).generate("猫", save=False)
         assert r["images"] == ["https://cdn.example.com/a.png"]
 
+    def test_b64_still_returned_when_save_false(self, tmp_path, monkeypatch):
+        """b64 形式的提供方在 save=False 时也得把图**交出去**。
+
+        实测故障（2026-09-22 审计）：`elif save:` 之后没有 else，b64 分支在
+        save=False 时什么都不做，函数返回 `{"images": []}` 却报成功 —— 调用方
+        拿不到任何图片数据（URL 形式的提供方两种模式都返回 URL，行为不对称）。
+        """
+        import base64
+
+        import models.image_gen as ig
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 64).decode()
+        monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
+                            timeout=None: FakeResponse({"data": [{"b64_json": png}]}))
+        r = make_model(tmp_path).generate("猫", save=False)
+        assert r["images"], "save=False 时 b64 图被丢光了"
+        assert r["images"][0].startswith("data:image/"), "应给回可直接使用的 data URI"
+
+    def test_b64_saved_when_save_true(self, tmp_path, monkeypatch):
+        import base64
+
+        import models.image_gen as ig
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 64).decode()
+        monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
+                            timeout=None: FakeResponse({"data": [{"b64_json": png}]}))
+        r = make_model(tmp_path).generate("猫", save=True)
+        assert r["images"] and not r["images"][0].startswith("data:")
+
 
 class TestOptionalFieldDowngrade:
     """提供方专有字段不认时自动剔除重试（换提供方不用改代码）。

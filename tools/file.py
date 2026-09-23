@@ -207,12 +207,18 @@ class FileTool(BaseTool):
         # diff 追踪：写入前留旧内容快照（新建文件为 None）
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
+        existed = os.path.exists(path)
         old_content = tracker.snapshot(path)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            # newline=""：原样写入，不做换行符的隐式转换。文本模式在 Windows 上会把
+            # LF 自动翻成 CRLF，与 edit 工具（保留文件原有行尾）策略相反 —— 两个写工具
+            # 交替使用会把整个文件的行尾来回翻（2026-09-22 审计）。
+            # 与 edit 工具（保留文件原有风格）策略相反，两个写工具交替用会把整个文件的
+            # 行尾来回翻（2026-09-22 审计）。
+            with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
-            tracker.record_with_old(path, self.name, old_content)
+            tracker.record_with_old(path, self.name, old_content, existed=existed)
             return ToolResult(success=True, output=f"文件已写入: {path}")
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
@@ -230,12 +236,13 @@ class FileTool(BaseTool):
         # diff 追踪：追加前留旧内容快照，便于展示增量 diff
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
+        existed = os.path.exists(path)
         old_content = tracker.snapshot(path)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
+            with open(path, "a", encoding="utf-8", newline="") as f:
                 f.write(content)
-            tracker.record_with_old(path, self.name, old_content)
+            tracker.record_with_old(path, self.name, old_content, existed=existed)
             size = os.path.getsize(path)
             return ToolResult(
                 success=True,
@@ -261,21 +268,31 @@ class FileTool(BaseTool):
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def _delete_guard(self, path: str) -> str:
-        """返回拒绝原因（"" = 允许删除）。"""
+        """返回拒绝原因（"" = 允许删除）。
+
+        比较一律走 `os.path.normcase`：Windows 文件系统**大小写不敏感**，而这里
+        原先做的是大小写敏感比较，于是守卫形同虚设（2026-09-22 审计实测）：
+        - `...\\.GIT` → 放行，而 `os.path.isdir` 为真（就是真 .git）
+        - `...\\.ENV` → 放行（删掉含密钥的 .env）
+        - `D:\\AAA\\WORK\\WORK\\MY_AGENT` → 放行（`recursive: true` 会删掉整个仓库）
+        POSIX 上 `normcase` 是恒等变换，行为不变。
+        """
         if not path or not path.strip():
             return "删除操作需要路径"
         target = os.path.abspath(path.strip())
         root = os.path.abspath(self._project_root())
+        target_cmp = os.path.normcase(target)
+        root_cmp = os.path.normcase(root)
         drive, tail = os.path.splitdrive(target)
         if tail in ("\\", "/", ""):
             return f"拒绝删除盘根/根目录: {target}"
-        if target == root:
+        if target_cmp == root_cmp:
             return f"拒绝删除项目根目录: {target}"
-        if root.startswith(target + os.sep):
+        if root_cmp.startswith(target_cmp + os.sep):
             return f"拒绝删除项目根目录的上级: {target}"
-        parts = [x for x in target.replace("\\", "/").split("/") if x]
+        parts = [os.path.normcase(x) for x in target.replace("\\", "/").split("/") if x]
         for bad in self._PROTECTED_NAMES:
-            if bad in parts:
+            if os.path.normcase(bad) in parts:
                 return f"拒绝删除受保护路径（含 {bad}）: {target}"
         return ""
 

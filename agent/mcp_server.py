@@ -20,6 +20,34 @@ from typing import List
 from config import MCP_CONFIG
 
 
+#: `run_agent` 允许宿主请求的最高沙箱等级。
+#:
+#: 为什么必须在**服务端**夹取：`danger-full-access` 是唯一能解锁硬黑名单的取值 ——
+#: `agent/approval.py` 的 `decide()` 在 `risk == "blocked"` 时只在这一种组合下放行：
+#: `sandbox_mode == "danger-full-access" and mode == "never"`。
+#: 而 run_agent 的参数是**宿主 LLM 自己填的**，等于让被调方决定要不要守这条底线：
+#: 一句 `run_agent(goal, sandbox_mode="danger-full-access")` 就能让
+#: mkfs / diskpart / format c: / rm -rf / 这类"任何情况下均被拒绝"的命令全过
+#: （2026-09-22 审计）。
+#:
+#: 不给环境变量留后门：AGENTS.md 的安全底线写明「审批策略 never 只能用于无人值守
+#: 且沙箱受限的场景（如 MCP server 默认配置）」，要放开必须改代码、走评审。
+_MAX_SANDBOX_MODE = "workspace-write"
+
+#: 沙箱等级由低到高（与 tools.base.SANDBOX_LEVELS 同序，仅用于夹取比较）
+_SANDBOX_ORDER = ("read-only", "workspace-write", "danger-full-access")
+
+
+def _clamp_sandbox_mode(requested) -> str:
+    """把宿主请求的沙箱等级夹到服务端上限之内；非法值一律回落到上限。"""
+    name = str(requested or "").strip()
+    if name not in _SANDBOX_ORDER:
+        return _MAX_SANDBOX_MODE
+    if _SANDBOX_ORDER.index(name) > _SANDBOX_ORDER.index(_MAX_SANDBOX_MODE):
+        return _MAX_SANDBOX_MODE
+    return name
+
+
 def _create_server():
     """创建 MCP server 实例（兼容 mcp SDK 1.x / 2.x）。"""
     try:
@@ -71,6 +99,8 @@ def _run_agent(
         approval_policy: untrusted / on-failure / on-request / never
                          （MCP 无人值守环境默认 never）
         sandbox_mode: read-only / workspace-write / danger-full-access
+                       — 会被服务端夹取到 `_MAX_SANDBOX_MODE` 以内，
+                         调用方**无法**自行提权到 danger-full-access
         guardian: 是否启用 Guardian 安全审校
         max_step_ops: 单步骤内最大工具操作数
 
@@ -80,6 +110,9 @@ def _run_agent(
     from agent import Agent, AgentConfig
     from agent.team import Team
     from tools import ToolManager
+
+    # 安全参数由服务端定，不接受调用方指定（见 _MAX_SANDBOX_MODE 的说明）
+    sandbox_mode = _clamp_sandbox_mode(sandbox_mode)
 
     if mode == "team":
         team = Team(tool_manager=ToolManager())

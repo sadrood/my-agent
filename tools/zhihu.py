@@ -533,7 +533,9 @@ class ZhihuTool(BaseTool):
                               output=f"已创建 PDF 解析任务 task_id={task_id}"
                                      f"（file_id={file_id}）。用 task 命令查进度。",
                               metadata={"task_id": task_id})
-        final = client.wait_task("pdf", task_id)
+        final, early = _wait_task_or_pending(client, "pdf", task_id)
+        if early is not None:
+            return early
         if final.get("task_status") == _TASK_FAILED:
             return _task_failure("pdf", final)
         result = final.get("result") or {}
@@ -566,7 +568,9 @@ class ZhihuTool(BaseTool):
                               output=f"已创建 PPT 生成任务 task_id={task_id}。"
                                      "用 task 命令（kind=ppt）查进度。",
                               metadata={"task_id": task_id})
-        final = client.wait_task("ppt", task_id)
+        final, early = _wait_task_or_pending(client, "ppt", task_id)
+        if early is not None:
+            return early
         if final.get("task_status") == _TASK_FAILED:
             return _task_failure("ppt", final)
         result = final.get("result") or {}
@@ -627,6 +631,56 @@ def _need(args: Dict[str, Any], key: str):
 def _missing(cmd: str, field: str) -> ToolResult:
     return ToolResult(success=False, output="",
                       error=f"{cmd} 需要 {field}（必填）。")
+
+
+def _wait_budget() -> float:
+    """轮询上限必须落在**执行器工具硬超时之内**。
+
+    `ZHIHU_TASK_TIMEOUT` 默认 600s，而 `agent/executor.py` 对非 browser 工具一律
+    300s 硬超时 —— 工具侧还在轮询、上层已经判超时并把整个 ToolResult 丢掉（含
+    task_id），任务却在知乎侧继续跑、小工具额度已消耗，模型只能再建一个
+    （2026-09-22 审计）。留 20s 余量让轮询自己收尾并把 task_id 交回给模型。
+    """
+    try:
+        from config import TOOL_CONFIG
+        tool_timeout = float(TOOL_CONFIG.get("tool_timeout", 300))
+    except Exception:                   # noqa: BLE001
+        tool_timeout = 300.0
+    try:
+        from config import ZHIHU_CONFIG
+        configured = float(ZHIHU_CONFIG.get("task_timeout", 600))
+    except Exception:                   # noqa: BLE001
+        configured = 600.0
+    return max(30.0, min(configured, tool_timeout - 20.0))
+
+
+def _wait_task_or_pending(client, kind: str, task_id: str):
+    """轮询到终态；到点还没结果就把 task_id 交回给模型。
+
+    返回 `(final, early)`：`early` 非 None 时调用方直接把它当工具结果返回。
+    这里集中 `ZhihuError` 的导入与捕获 —— 调用点在别的方法里，拿不到
+    `execute_json` 那次局部 import。
+    """
+    from models.zhihu import ZhihuError
+    try:
+        return client.wait_task(kind, task_id, timeout=_wait_budget()), None
+    except ZhihuError as e:
+        return None, _still_running(kind, task_id, e)
+
+
+def _still_running(kind: str, task_id: str, err) -> ToolResult:
+    """轮询到点还没出终态：**按成功返回 task_id**，让模型用 task 命令继续查。
+
+    这里若报失败（或让异常往上抛成"工具异常"），task_id 就丢了 —— 而任务在知乎侧
+    还在跑、额度已经花掉（2026-09-22 审计）。与 video_gen 的 timed_out 分支同款处理。
+    """
+    return ToolResult(
+        success=True,
+        output=(f"⏳ {kind} 任务 {task_id} 仍在进行中，已到工具等待上限提前返回。\n"
+                f"{str(err)[:200]}\n"
+                f"稍后用 zhihu(command=\"task\", kind=\"{kind}\", task_id=\"{task_id}\") 继续查询。"),
+        metadata={"task_id": task_id, "pending": True},
+    )
 
 
 def _human_ms(value: Any) -> str:

@@ -155,11 +155,22 @@ class TestPreflightWiring:
         monkeypatch.setattr(tool, "_find_repo_root", lambda f: str(tmp_path))
 
         class _Proc:
-            returncode = 1
-            stdout = REAL_OUTPUT
-            stderr = ""
+            """假 Popen：把真实 pytest 输出写进工具给的输出文件。
 
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+            （preflight 现在用 `Popen` + 输出落临时文件，而不是 `subprocess.run`
+            + 管道 —— 管道会被后代进程继承写端，把超时拖住，见 tools/patch.py。）
+            """
+            returncode = 1
+
+            def __init__(self, cmd, shell=True, stdout=None, stderr=None, **kw):
+                self.cmd = cmd
+                if stdout is not None:
+                    stdout.write(REAL_OUTPUT)
+
+            def wait(self, timeout=None):
+                return 1
+
+        monkeypatch.setattr(subprocess, "Popen", _Proc)
 
         res = tool._run_preflight(str(target), str(backup))
         assert res is not None and res.success is False

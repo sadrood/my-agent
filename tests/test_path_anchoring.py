@@ -125,3 +125,49 @@ class TestDriftedLaunchInSubprocess:
                 "cwd 漂移后 %s[%s] 跑到了 %r" % (cfg_name, key, value)
             assert str(tmp_path) not in value, \
                 "cwd 漂移后 %s[%s] 跟着走了: %r" % (cfg_name, key, value)
+
+
+class TestSchedulerAndGoalAnchoring:
+    """定时任务与持久目标的存储路径必须锚定项目根。
+
+    实测故障（2026-09-22 审计）：`agent/scheduler.py` 的 `_SCHED_FILE` 与
+    `agent/goal.py` 的 `_GOAL_DIR` 用的是裸相对路径（按 **cwd** 解析），而同仓库
+    `tasks.py` / `session.py` / `todo.py` 都已用 `resolve_under_root` 收敛过这个坑
+    —— 它们正是漏网的第四、第五份。表现为从别的目录启动后，定时任务与 /goal 目标
+    "凭空消失"（其实被写到了启动目录）。
+    """
+
+    def test_scheduler_file_is_anchored(self):
+        import os
+
+        import agent.scheduler as s
+        from config import PROJECT_ROOT
+        assert os.path.isabs(s._SCHED_FILE), "仍是相对路径，会随 cwd 漂移"
+        assert s._SCHED_FILE.startswith(PROJECT_ROOT)
+
+    def test_goal_dir_is_anchored(self):
+        import os
+
+        import agent.goal as g
+        from config import PROJECT_ROOT
+        assert os.path.isabs(g._GOAL_DIR), "仍是相对路径，会随 cwd 漂移"
+        assert g._GOAL_DIR.startswith(PROJECT_ROOT)
+
+    def test_paths_stable_across_cwd(self):
+        """换个 cwd 重新导入，解析结果必须一致。"""
+        import os
+        import subprocess
+        import sys
+
+        from config import PROJECT_ROOT
+        code = ("import agent.scheduler as s, agent.goal as g;"
+                "print(s._SCHED_FILE); print(g._GOAL_DIR)")
+        outs = set()
+        env = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT)}
+        for cwd in (str(PROJECT_ROOT), os.path.dirname(str(PROJECT_ROOT))):
+            p = subprocess.run([sys.executable, "-c", code], cwd=cwd, env=env,
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            assert p.returncode == 0, p.stderr[-400:]
+            outs.add(p.stdout.strip())
+        assert len(outs) == 1, f"cwd 一变路径就变了：{outs}"

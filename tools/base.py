@@ -170,13 +170,21 @@ class BaseTool(ABC):
         }
 
     def build_approval_request(self, arguments: Dict[str, Any]) -> ApprovalRequest:
-        """根据结构化参数生成审批请求（子类可覆盖以细化风险/描述）。"""
+        """根据结构化参数生成审批请求（子类可覆盖以细化风险/描述）。
+
+        注意**必须带上 `approval` 元数据**：`ApprovalPolicy.decide` 第 3 步判的是
+        `request.approval == "on-request"`，漏传就等于这个分支永不触发 ——
+        `DesktopTool`（`approval="on-request"`，操控真实鼠标键盘）因此被静默降级成
+        零确认执行（2026-09-22 审计）。子类覆写本方法时同样要带上；工具层还有 8 份
+        覆写，统一由 `ToolManager.build_approval_request` 兜底补全。
+        """
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=self._describe_call(arguments),
             risk_level=self.risk_level,
             min_sandbox_mode=self.min_sandbox_mode,
+            approval=self.approval,
         )
 
     def cancel(self) -> None:

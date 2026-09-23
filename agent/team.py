@@ -57,6 +57,10 @@ class SubTask:
     worker_name: str = ""
     independent: bool = False   # True=不依赖其他子任务结果，可并行执行（旧格式标记，兼容保留）
     depends_on: List[str] = field(default_factory=list)  # 依赖的子任务 id 列表（DAG 细粒度调度）
+    #: 已被上层放弃（并发波次超时）：worker 线程是 daemon、超时不会取消它，晚到的
+    #: 结果会把 failed 覆写成 completed，同一个子任务上 status 与 error 自相矛盾。
+    #: 见到这个标记就不要再改状态了。
+    abandoned: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -87,11 +91,15 @@ class WorkerAgent:
     与主 Agent 共享工具管理器，但有独立的角色系统提示。
     """
 
-    def __init__(self, name: str, role: AgentRole, llm: LLM, tool_manager):
+    def __init__(self, name: str, role: AgentRole, llm: LLM, tool_manager,
+                 approval=None):
         self.name = name
         self.role = role
         self.llm = llm
         self.tool_manager = tool_manager
+        #: 审批策略（ApprovalPolicy | None）。团队模式此前**完全没有**审批门，
+        #: worker 的工具调用是裸调 tool_manager.execute()（2026-09-22 审计）。
+        self.approval = approval
 
     def execute(self, task: str, context: str = "", max_rounds: int = 10,
                 emit: Optional[callable] = None) -> str:
@@ -139,19 +147,32 @@ class WorkerAgent:
                         "input": str(tool_input)[:200] if not isinstance(tool_input, str) else tool_input[:200],
                         "worker": self.name,
                     })
-                if self.tool_manager.is_parallel_safe(tool_name, {}):
-                    tool_result = self.tool_manager.execute(tool_name, tool_input)
+                # 审批门：team worker 此前是裸调 tool_manager.execute()，黑名单 /
+                # 沙箱等级 / 审批策略在团队模式下**全部不生效** —— worker 一句
+                # `{"tool":"terminal","tool_input":"del /f /s /q D:\\data"}`
+                # 就直接执行了（2026-09-22 审计）。与主循环共用一个门。
+                from agent.approval import arguments_from_string, check_tool_execution
+                deny_reason = check_tool_execution(
+                    self.approval, self.tool_manager, tool_name,
+                    arguments_from_string(tool_input))
+                if deny_reason:
+                    output = f"错误: 被审批策略拒绝（{deny_reason}）"
+                    tool_success = False
                 else:
-                    # 非并行安全工具（共享 Playwright/子进程等有状态实例）：
-                    # 并行波次中按工具名互斥串行化，LLM 推理阶段仍然并发
-                    with _get_tool_lock(tool_name):
+                    if self.tool_manager.is_parallel_safe(tool_name, {}):
                         tool_result = self.tool_manager.execute(tool_name, tool_input)
-                output = tool_result.output if tool_result.success else f"错误: {tool_result.error}"
+                    else:
+                        # 非并行安全工具（共享 Playwright/子进程等有状态实例）：
+                        # 并行波次中按工具名互斥串行化，LLM 推理阶段仍然并发
+                        with _get_tool_lock(tool_name):
+                            tool_result = self.tool_manager.execute(tool_name, tool_input)
+                    output = tool_result.output if tool_result.success else f"错误: {tool_result.error}"
+                    tool_success = tool_result.success
                 if emit:
                     emit("tool_result", {
                         "name": tool_name,
                         "output": output[:300],
-                        "success": tool_result.success,
+                        "success": tool_success,
                         "worker": self.name,
                     })
                 result_parts.append(f"[{tool_name}] {output[:500]}")
@@ -204,9 +225,23 @@ class Team:
         print(result.final_answer)
     """
 
-    def __init__(self, llm: LLM = None, tool_manager=None):
+    def __init__(self, llm: LLM = None, tool_manager=None, approval=None):
         self.llm = llm or LLM()
         self.tool_manager = tool_manager
+        # 审批策略：显式传参优先，否则按 APPROVAL_CONFIG 构造（与 Agent 同源）。
+        # 团队模式是无人值守的，所以 interactive 固定 False。
+        if approval is None:
+            try:
+                from agent.approval import ApprovalPolicy
+                from config import APPROVAL_CONFIG
+                approval = ApprovalPolicy(
+                    mode=APPROVAL_CONFIG.get("approval_policy", "on-failure"),
+                    sandbox_mode=APPROVAL_CONFIG.get("sandbox_mode", "workspace-write"),
+                    interactive=False,
+                )
+            except Exception:
+                approval = None
+        self.approval = approval
         self.workers: Dict[str, WorkerAgent] = {}
         self._register_default_workers()
         # Dashboard 事件桥接（可选：dashboard 未安装时不影响团队模式运行）
@@ -233,6 +268,7 @@ class Team:
                 role=role,
                 llm=self.llm,
                 tool_manager=self.tool_manager,
+                approval=self.approval,
             )
 
     def run(
@@ -409,11 +445,18 @@ class Team:
 
         print_info(f"Team · {worker.name} 执行: {st.description[:60]}", style="accent")
         try:
-            st.result = worker.execute(
+            _out = worker.execute(
                 task=st.description,
                 context=context,
                 emit=lambda t, d, _s=st: self._emit(t, {**d, "mode": "team", "subtask": _s.id}),
             )
+            # 已经判过失败的（并发波次超时）不再改写：worker 线程是 daemon，超时不会
+            # 取消它，晚到的结果会把 failed 覆写成 completed，同一个 SubTask 上
+            # status="completed" 与 error="Worker 执行超时" 并存，而调用方其实拿到的是
+            # 空结果（2026-09-22 审计实测）。事件也已经推过 failed，别自相矛盾。
+            if st.abandoned:
+                return ""
+            st.result = _out
             st.status = "completed"
             self._emit("step_end", {
                 "mode": "team",
@@ -425,6 +468,8 @@ class Team:
             print_info(f"Team · {worker.name} 完成 ({len(st.result)} 字符)", style="success")
             return f"\n[{worker.name}] 完成: {st.result[:300]}\n"
         except Exception as e:
+            if st.abandoned:
+                return ""                      # 已判超时：别用迟到的异常覆盖既有结论
             st.status = "failed"
             st.error = str(e)
             self._emit("step_end", {
@@ -466,8 +511,15 @@ class Team:
             t.join(max(0.0, deadline - time.time()))
 
         for st, t in zip(subtasks, threads):
-            if t.is_alive() and st.status == "running":
+            # "pending" 也要算：worker 线程是先 start 再在函数体里置 "running" 的，
+            # 只判 "running" 会漏掉"线程已起但还没跑到置状态"那一小段窗口。
+            if t.is_alive() and st.status in ("pending", "running"):
+                # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃，并让
+                # _execute_subtask 见到 abandoned 后不再改写状态（否则晚到的结果会把
+                # failed 覆写回 completed，同一个子任务上 status 与 error 互相矛盾）。
+                st.abandoned = True
                 st.status = "failed"
+                st.result = ""
                 st.error = f"Worker 执行超时（>{timeout:.0f}s）"
                 self._emit("step_end", {
                     "mode": "team",
@@ -502,7 +554,13 @@ class Team:
                 return self._fallback_decompose(task)
 
             primary = data.get("primary", "generalist")
-            secondary = data.get("secondary", [])
+            # `secondary` 在提示词里标着"可选"，LLM 返回 null / 字符串都很自然。
+            # 旧实现在下面直接 len(secondary)，null 会抛 TypeError 并被外层
+            # except 兜成 _fallback_decompose —— 好好的多子任务 DAG 静默退化成
+            # "一个 generalist 干全部"（2026-09-22 审计）。
+            secondary = data.get("secondary") or []
+            if isinstance(secondary, str):
+                secondary = [secondary]
             breakdown = data.get("task_breakdown", [task])
 
             subtasks = []
@@ -520,6 +578,11 @@ class Team:
                     independent = bool(item.get("independent", False))
                     raw_depends = item.get("depends_on")
                     if raw_depends is not None:
+                        # 字符串是可迭代对象：LLM 把 depends_on 写成 "task_1"（常见笔误）
+                        # 时，旧实现会逐**字符**拆成 ['t','a','s','k','_','1']，子任务随即
+                        # 被判"依赖无法满足（存在依赖环）"、一次都没执行（2026-09-22 审计）。
+                        if isinstance(raw_depends, str):
+                            raw_depends = [raw_depends]
                         depends = [str(d).strip() for d in raw_depends if str(d).strip()]
                         independent = not depends
                         has_explicit = True

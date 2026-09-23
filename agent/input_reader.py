@@ -44,13 +44,23 @@ def _pending_posix(stdin, timeout: float = 0.05) -> bool:
 
 def _drain_posix(stdin) -> list:
     """POSIX：逐行排干（canonical 模式下 read 一次最多一行，不会过度读取）。"""
+    # 必须用 os.read 取「当前可读的字节」，不能用 readline()：管道输入
+    # （`echo x | my-agent`）的半行数据会让 select 报可读、而 readline() 一直等到
+    # 换行或 EOF —— CLI 看起来像卡死（2026-09-22 审计）。
+    # 注意：这条只在 POSIX 生效，本机（Windows）无法实测。
+    import os as _os
     lines, total = [], 0
+    fd = stdin.fileno()
     while _pending_posix(stdin, 0.02):
-        line = stdin.readline()
-        if line == "":
+        try:
+            chunk = _os.read(fd, 4096)
+        except OSError:
             break
-        lines.append(line.rstrip("\r\n"))
-        total += len(line)
+        if not chunk:
+            break
+        text = chunk.decode("utf-8", "replace")
+        lines.extend(text.splitlines() or [""])
+        total += len(text)
         if len(lines) >= MAX_DRAIN_LINES or total >= MAX_DRAIN_CHARS:
             break
     return lines
