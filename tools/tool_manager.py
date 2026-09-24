@@ -119,10 +119,14 @@ class ToolManager:
         except Exception:
             pass
 
-        # 桌面操控工具（Windows）：截图/无障碍树/鼠标键盘，高危走审批门
+        # 桌面操控工具（只有 Windows 有实现）：截图/无障碍树/鼠标键盘，高危走审批门。
+        # 非 Windows 平台**不注册** —— 注册了也只是让模型反复调用一个恒返回
+        # 「仅支持 Windows」的工具，而且 agent 会因为它存在而追加桌面操控提示，
+        # 白白烧轮数（2026-09-24 审计）。
         try:
-            from tools.computer_use import DesktopTool
-            self.register(DesktopTool())
+            from tools.computer_use import COMPUTER_SUPPORTED, DesktopTool
+            if COMPUTER_SUPPORTED:
+                self.register(DesktopTool())
         except Exception:
             pass
 

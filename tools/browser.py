@@ -674,34 +674,114 @@ class BrowserTool(BaseTool, ComputerUseMixin):
     def _force_cleanup_residual(self) -> int:
         """兜底：清理仍占用 profile_dir 的残留浏览器进程（关闭被中断后）。
 
-        仅匹配『进程名为 chrome.exe』且『命令行包含 --user-data-dir=<profile_dir>』
-        的进程——这是本工具自己拉起的持久实例（Chrome 单例目录锁的持有者），
-        绝不触碰用户日常浏览器或其他临时 profile 实例。返回清理掉的进程数。
+        仅匹配『命令行里带本工具的 --user-data-dir=<profile_dir>』的进程——这是本
+        工具自己拉起的持久实例（Chrome 单例目录锁的持有者），绝不触碰用户日常
+        浏览器或其他临时 profile 实例。返回清理掉的进程数。
+
+        两个平台各一条取进程表的实现：Windows 用 `Get-CimInstance` + `taskkill /T`
+        （连子进程一起），POSIX 用 `ps` + `kill`。此前只有 PowerShell 一条路，
+        Linux 上 `powershell: not found` → 静默返回 0：残留的 Chromium 与
+        Playwright 的 node 会一直累积（2026-09-24 审计）。
         """
+        killed = 0
+        for pid in self._residual_pids():
+            if self._kill_residual(pid):
+                killed += 1
+        return killed
+
+    def _residual_pids(self) -> list:
+        """列出命令行里带本工具 `--user-data-dir` 的浏览器进程号（按平台分派）。"""
+        return (self._residual_pids_win() if os.name == "nt"
+                else self._residual_pids_posix())
+
+    def _residual_pids_win(self) -> list:
         import subprocess
         profile = self._profile_dir.replace("'", "''")  # PowerShell 单引号转义
-        ps_cmd = (
+        cmd = (
             "powershell -NoProfile -Command "
             f"\"Get-CimInstance Win32_Process -Filter \\\"Name='chrome.exe'\\\" | "
             f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
             f"Select-Object -ExpandProperty ProcessId\""
         )
         try:
-            out = subprocess.run(
-                ps_cmd, capture_output=True, text=True, timeout=30, shell=True
-            ).stdout
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=30, shell=True).stdout
         except Exception:
-            return 0
-        pids = [p.strip() for p in out.split() if p.strip().isdigit()]
-        for pid in pids:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", pid, "/T", "/F"],
-                    capture_output=True, text=True, timeout=30,
-                )
-            except Exception:
+            return []
+        return [p.strip() for p in out.split() if p.strip().isdigit()]
+
+    def _residual_pids_posix(self) -> list:
+        """POSIX 侧：`ps -A -o pid=,args=` 拿完整命令行，逐行精确比对 profile 目录。
+
+        用 `ps` 而不是 `pgrep`：前者必然存在且给得出完整命令行。比对走 realpath
+        **全等**，避免 "profile" 前缀误伤 "profile2" 这类无关实例。
+        """
+        import subprocess
+        try:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,args="],
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=30).stdout
+        except Exception:
+            return []
+        want = os.path.realpath(self._profile_dir)
+        pids = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if "--user-data-dir=" not in line:
                 continue
-        return len(pids)
+            pid, _, args = line.partition(" ")
+            if not pid.isdigit():
+                continue
+            value = args.split("--user-data-dir=", 1)[1].strip().split(" ", 1)[0]
+            value = value.strip("\"'")                     # 有的启动方式会带引号
+            if value and os.path.realpath(value) == want:
+                pids.append(pid)
+        return pids
+
+    def _kill_residual(self, pid: str) -> bool:
+        """杀掉一个残留进程（按平台分派）。"""
+        return (self._kill_residual_win(pid) if os.name == "nt"
+                else self._kill_residual_posix(pid))
+
+    @staticmethod
+    def _kill_residual_win(pid: str) -> bool:
+        import subprocess
+        try:
+            subprocess.run(["taskkill", "/PID", pid, "/T", "/F"],
+                           capture_output=True, text=True, timeout=30)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _kill_residual_posix(pid: str) -> bool:
+        """先 SIGTERM，给 0.5s 自行收尾（Chromium 会带走子进程），仍活着再 SIGKILL。"""
+        import signal
+        # SIGKILL 在 Windows 上不存在（signal 模块没这个属性），POSIX 各平台都是 9。
+        # 用取默认值而不是直接引用信号常量：这样这段 POSIX 逻辑在任何宿主上都能被
+        # 单测覆盖，也不会因为误在 Windows 上走到这里而抛 AttributeError。
+        sigkill = getattr(signal, "SIGKILL", 9)
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return True                                    # 已经没了，也算清掉
+        except Exception:
+            return False
+        for _ in range(5):
+            time.sleep(0.1)
+            try:
+                os.kill(int(pid), 0)                       # 探活，不真发信号
+            except ProcessLookupError:
+                return True
+            except Exception:
+                return True
+        try:
+            os.kill(int(pid), sigkill)
+        except ProcessLookupError:
+            return True                                    # 刚好在这一刻退出了
+        except Exception:
+            return False                                   # 没杀掉就是没杀掉，别报成功
+        return True
 
     def _ensure_page(self) -> ToolResult:
         if not self._pages or self._page is None or not self._is_browser_alive() or not self._page_alive():
