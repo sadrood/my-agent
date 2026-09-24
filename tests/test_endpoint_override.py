@@ -165,3 +165,34 @@ def test_vision_model_auto_detect_with_ox_alpha():
         cfg.VISION_CONFIG.clear()
         cfg.VISION_CONFIG.update(saved_vision)
         cfg.LLM_CONFIG["default_model"] = saved_model
+
+
+@pytest.mark.parametrize("base_url, model, expected", [
+    # 1) 主模型已知自带视觉 → 直接用它，不看端点
+    ("https://token.sensenova.cn/v1", "stealth/ox-alpha", "stealth/ox-alpha"),
+    # 2) OpenAI 官方端点 + 主模型不在推荐表 → 退回推荐表第一个（那些名字在那里一定存在）
+    ("https://api.openai.com/v1", "o1-preview", "gpt-4o"),
+    # 3) 第三方/自建端点 + 主模型不在推荐表 → 用主模型。
+    #    这是 2026-09-24 修掉的坑：旧实现一律选 gpt-4o，而它在这些端点上**不存在**，
+    #    于是每次视觉调用都先白失败一轮（模板留空 VISION_MODEL 时人人踩）。
+    ("https://token.sensenova.cn/v1", "deepseek-flash", "deepseek-flash"),
+    ("http://172.16.10.242:3000", "deepseek-flash", "deepseek-flash"),
+    ("https://openrouter.ai/api/v1", "qwen/qwen3-vl-72b", "qwen/qwen3-vl-72b"),
+])
+def test_auto_detect_picks_a_model_that_exists_on_this_endpoint(base_url, model, expected):
+    import config as cfg
+    from models.vision import VisionModel
+
+    saved_vision = dict(cfg.VISION_CONFIG)
+    saved_model = cfg.LLM_CONFIG.get("default_model")
+    saved_base = cfg.LLM_CONFIG.get("base_url")
+    try:
+        cfg.VISION_CONFIG["vision_model"] = ""       # 模拟留空
+        cfg.LLM_CONFIG["default_model"] = model
+        cfg.LLM_CONFIG["base_url"] = base_url
+        assert VisionModel().vision_model == expected
+    finally:
+        cfg.VISION_CONFIG.clear()
+        cfg.VISION_CONFIG.update(saved_vision)
+        cfg.LLM_CONFIG["default_model"] = saved_model
+        cfg.LLM_CONFIG["base_url"] = saved_base
