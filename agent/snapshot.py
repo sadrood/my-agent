@@ -6,10 +6,7 @@ Git 快照模块：Agent 自我修改代码前的安全网。
   full=False 选择性模式，只提交暂存区——逐工具 checkpoint 已覆盖
   Agent 自身修改时用，避免把用户并行未提交工作卷进 Agent 提交）
 - checkpoint(): 逐操作检查点，提供 changed_file 时只快照该文件（归因提交）。
-  **快照挂到 refs/snapshots/<时间戳>，不进任何分支历史**——早先直接
-  `git commit` 的实现会让每次自我修改都在 main 上留一条 "checkpoint: …"，
-  一次 git push 就把几十条流水账推到远端（2026-09-17 实测踩到）。
-  快照仍然可回滚（rollback_to 接受快照 ref 上的提交）。
+  快照挂 refs/snapshots/<时间戳>，不进任何分支历史；rollback_to 接受快照提交。
 
 设计原则：
 - 静默失败：任何 git 问题都不影响 Agent 正常运行（只打警告）
@@ -101,11 +98,8 @@ def _commit(path: str, message: str, allow_empty: bool = False,
                 _git(["add", "-A", "--"] + existing, path)
             for miss in [p for p in pathspec if p not in existing]:
                 _git(["update-index", "--force-remove", "--", miss], path)
-    # commit 也必须带同样的 pathspec：不带的话 `git commit` 提交的是**整个索引**，
-    # 会把这之前用户自己 `git add` 过、还没提交的文件一起卷进 agent 的归因提交
-    # （2026-09-22 审计实测：用户 `git add user_wip.txt` 后回滚一次，那个文件就跟着
-    # agent 的 "rollback: 回滚到检查点 …（my-agent）" 一起被提交了）。
-    # 上面那句"只提交本次触碰的路径，不卷入用户并行未提交工作"的注释，靠的就是这里。
+    # commit 必须带同样的 pathspec：否则提交的是整个索引，会把用户自己 add 过、
+    # 还没提交的文件卷进 agent 的归因提交。
     suffix = (["--allow-empty"] if allow_empty else []) + ["-m", message]
     if pathspec:
         # 归因模式：只提交本次触碰的路径。两道过滤都关键：
@@ -137,26 +131,27 @@ def _commit(path: str, message: str, allow_empty: bool = False,
 
 def snapshot(path: str, goal: str = "", full: bool = True) -> bool:
     """
-    运行前快照：形成回滚点。
+    运行前快照：形成回滚点（挂 refs/snapshots/run-*，不进分支历史）。
 
     Args:
-        goal: 目标摘要（写入提交信息）
-        full: True = 全量快照（git add -A，旧行为）。适用于未开启逐工具
-              checkpoint 的场景——此时它是唯一的回滚安全网。
-              False = 选择性快照（不主动 add，只提交暂存区已有的改动）。
-              逐工具 checkpoint 已把 Agent 的每次修改独立提交，这里再全量
-              add -A 只会把用户的并行未提交工作卷进 Agent 提交。
+        goal: 目标摘要（写入快照信息）
+        full: True = 全量快照（等价 git add -A）；False = 只快照已暂存内容。
 
     Returns:
-        True = 快照成功（或无需提交）
+        True = 快照成功（或无需快照）
     """
     if not is_git_repo(path):
         return False
 
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
     goal_summary = (goal or "").strip().replace("\n", " ")[:60]
     message = f"snapshot: 运行前快照 {ts}" + (f" — {goal_summary}" if goal_summary else "")
-    return _commit_or_clean(path, message, add_paths=None if full else [])
+    ref = f"{SNAPSHOT_REF_PREFIX}/run-{now.strftime('%Y%m%d-%H%M%S-%f')}"
+    if _commit_to_ref(path, ref, message, add_paths=None if full else []):
+        return True
+    # 无改动（或快照失败）时与旧行为一致：视为成功，绝不阻塞主流程
+    return bool(_head(path))
 
 
 #: 逐操作快照的 ref 前缀（不属于任何分支，push 不会带上）
@@ -166,8 +161,7 @@ SNAPSHOT_REF_PREFIX = "refs/snapshots"
 def snapshot_ref(ts: str = None) -> str:
     """本次快照的 ref 名：refs/snapshots/<YYYYmmdd-HHMMSS-ffffff>。
 
-    带微秒是必需的：同一秒内连续两次 checkpoint（真实场景很常见）若同名，
-    后一次会把前一次的 ref 覆盖掉，前一个快照就再也回滚不了（实测踩到）。
+    必须带微秒：同一秒内两次 checkpoint 同名会互相覆盖，旧快照再也回滚不了。
     """
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return f"{SNAPSHOT_REF_PREFIX}/{stamp}"
@@ -180,9 +174,12 @@ def _commit_to_ref(path: str, ref: str, message: str, add_paths=None) -> str:
     但快照对象仍在（可 diff、可回滚）。无改动（树与 HEAD 相同）时返回 ""。
     """
     import tempfile
+    staged_only = add_paths is not None and len(add_paths) == 0
     fd, index_file = tempfile.mkstemp(prefix="my-agent-index-")
     os.close(fd)
-    env = {"GIT_INDEX_FILE": index_file}
+    # 只快照"已暂存内容"时必须读**真实索引**：临时索引是从 HEAD 建的，
+    # 看不到用户新 add 的未跟踪文件。
+    env = None if staged_only else {"GIT_INDEX_FILE": index_file}
     try:
         head = _git(["rev-parse", "--verify", "HEAD"], path, env=env)
         parent_sha = head.stdout.strip() if head.returncode == 0 else ""
@@ -190,18 +187,21 @@ def _commit_to_ref(path: str, ref: str, message: str, add_paths=None) -> str:
         if parent_sha:
             pt = _git(["rev-parse", "HEAD^{tree}"], path, env=env)
             parent_tree = pt.stdout.strip() if pt.returncode == 0 else ""
-            base = _git(["read-tree", "HEAD"], path, env=env)
+        if staged_only:
+            base_ok = True                      # 真实索引已就绪，不能再 read-tree（会冲掉暂存）
+        elif parent_sha:
+            base_ok = _git(["read-tree", "HEAD"], path, env=env).returncode == 0
         else:
-            base = _git(["read-tree", "--empty"], path, env=env)
-        if base.returncode != 0:
+            base_ok = _git(["read-tree", "--empty"], path, env=env).returncode == 0
+        if not base_ok:
             return ""
-        if add_paths is None:
+        if staged_only:
+            staged = None                       # 直接沿用真实索引
+        elif add_paths is None:
             staged = _git(["add", "-A"], path, env=env)
-        elif add_paths:
-            staged = _git(["add", "-A", "--"] + [str(x) for x in add_paths], path, env=env)
         else:
-            staged = _git(["add", "-u"], path, env=env)
-        if staged.returncode != 0:
+            staged = _git(["add", "-A", "--"] + [str(x) for x in add_paths], path, env=env)
+        if staged is not None and staged.returncode != 0:
             return ""
         tree = _git(["write-tree"], path, env=env)
         if tree.returncode != 0:
@@ -323,22 +323,14 @@ def rollback_to(path: str, commit: str) -> str:
     if not is_ancestor and not _is_snapshot_commit(path, commit):
         return ""
     # 与**当前工作区**比较（`git diff <commit>` 不带第二个 ref 就是这个语义）：
-    # 不再拿"最新快照"或 HEAD 的**树**去比。原因是树对树比较会漏掉 agent 运行期的
-    # 改动 —— checkpoint 只挂 refs/snapshots/*、从不推进 HEAD（这是本模块自己的
-    # 设计），所以被改坏的文件全在工作区、不在任何一棵树里，diff 为空 → 一个文件都
-    # 不恢复，函数却返回非空 HEAD，`dashboard/server.py` 据此报"回滚成功"
-    # （2026-09-22 审计实测：改坏 a.py 后 rollback_to 返回非空，a.py 纹丝不动）。
-    # 同理，目标快照之后**新增**的文件（在 commit 树里不存在）现在也会被正确判成
-    # "A" 并删除，而不是像以前那样残留。
+    # 比"当前状态"而不是比树：改动都在工作区（checkpoint 不推进 HEAD），
+    # 比树会 diff 为空却返回成功；目标快照之后新增的文件据此判成 "A" 并删除。
     diff = _git(["diff", "--name-status", "--no-renames", commit], path)
     if diff.returncode != 0:
         return ""
     entries: list = []
-    # "A" 要区别对待：`git diff <commit>` 把"已暂存但未提交"的新文件也报成新增，
-    # 而那多半是用户自己 `git add` 的东西 —— 回滚不该替他删掉（2026-09-22 验证时
-    # 踩到：用户 add 了 user_wip.txt，回滚一次文件就没了）。
-    # 判据用"该文件是否已进 HEAD 历史"：进了 = 是某次提交带进来的，该删；
-    # 只在索引/工作区里 = 用户还在写的在制品，别动。
+    # "A" 要区别对待：diff 会把"已暂存未提交"的新文件也报成新增，那些是用户的
+    # 在制品，回滚不该替他删。判据：已进 HEAD 历史的才删，只在索引里的别动。
     head_files = set((_git(["ls-tree", "-r", "--name-only", "HEAD"], path).stdout or "").splitlines())
     for line in diff.stdout.splitlines():
         parts = line.split("\t", 1)

@@ -122,26 +122,33 @@ def _git_available():
 class TestSnapshot:
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_ensure_repo_and_snapshot(self, tmp_path):
-        from agent.snapshot import ensure_repo, snapshot, is_git_repo, has_pending_changes
+        from agent.snapshot import (ensure_repo, snapshot, is_git_repo,
+                                    has_pending_changes, list_snapshots, _head)
 
         assert ensure_repo(str(tmp_path)) is True
         assert is_git_repo(str(tmp_path)) is True
 
         # 基线提交后干净
         assert has_pending_changes(str(tmp_path)) is False
+        head_before = _head(str(tmp_path))
 
-        # 制造改动 → 快照 → 干净
+        # 制造改动 → 快照：内容进 refs/snapshots/run-*，HEAD 不动、工作区不改
         (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
         assert snapshot(str(tmp_path), "测试任务") is True
-        assert has_pending_changes(str(tmp_path)) is False
+        snaps = list_snapshots(str(tmp_path))
+        assert snaps and snaps[0][0].startswith("refs/snapshots/run-")
+        assert "运行前快照" in snaps[0][2]
+        assert "a.txt" in _snapshot_files(str(tmp_path), snaps[0][1])
+        assert _head(str(tmp_path)) == head_before          # 分支历史不变
+        assert has_pending_changes(str(tmp_path)) is True   # 改动仍在工作区
 
-        # 快照记录在 git log 里
+        # 分支历史里只有基线，没有快照流水账
         import subprocess
         log = subprocess.run(
             ["git", "log", "--oneline"], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
-        assert "运行前快照" in log.stdout
+        assert "运行前快照" not in log.stdout
         assert "初始化仓库基线" in log.stdout
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
@@ -534,43 +541,51 @@ class TestSelectiveSnapshot:
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_selective_snapshot_skips_parallel_work(self, tmp_path):
-        """full=False：并行未提交改动不被卷进 Agent 提交，保持原样。"""
-        from agent.snapshot import snapshot, has_pending_changes
+        """full=False：并行未提交改动不进快照，也不进分支历史。"""
+        from agent.snapshot import snapshot, has_pending_changes, list_snapshots
 
         self._ensure_repo_with_identity(tmp_path)
         (tmp_path / "user_wip.txt").write_text("并行工作", encoding="utf-8")
         commits_before = _commit_count(str(tmp_path))
+        snaps_before = len(list_snapshots(str(tmp_path)))
 
         assert snapshot(str(tmp_path), "测试任务", full=False) is True
-        assert _commit_count(str(tmp_path)) == commits_before   # 没有新提交
-        assert has_pending_changes(str(tmp_path)) is True       # 并行改动原样保留
+        assert _commit_count(str(tmp_path)) == commits_before            # 分支不动
+        assert len(list_snapshots(str(tmp_path))) == snaps_before        # 无可暂存 → 无快照
+        assert has_pending_changes(str(tmp_path)) is True                # 改动原样保留
         assert _dirty(str(tmp_path)) == ["user_wip.txt"]
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
-    def test_selective_snapshot_commits_staged_only(self, tmp_path):
-        """full=False：暂存区已有内容时正常提交。"""
-        from agent.snapshot import snapshot, has_pending_changes
-        import subprocess
+    def test_selective_snapshot_captures_staged_only(self, tmp_path):
+        """full=False：只把已暂存内容快照进 ref，不动分支与暂存区。"""
+        from agent.snapshot import snapshot, list_snapshots
 
         self._ensure_repo_with_identity(tmp_path)
         (tmp_path / "staged.txt").write_text("已暂存", encoding="utf-8")
+        (tmp_path / "unstaged.txt").write_text("未暂存", encoding="utf-8")
+        import subprocess
         subprocess.run(["git", "add", "staged.txt"], cwd=str(tmp_path),
                        capture_output=True)
         commits_before = _commit_count(str(tmp_path))
 
         assert snapshot(str(tmp_path), "测试任务", full=False) is True
-        assert _commit_count(str(tmp_path)) == commits_before + 1
-        assert "staged.txt" not in _dirty(str(tmp_path))
+        snaps = list_snapshots(str(tmp_path))
+        assert _commit_count(str(tmp_path)) == commits_before        # 分支不动
+        tree = _snapshot_files(str(tmp_path), snaps[0][1])
+        assert "staged.txt" in tree and "unstaged.txt" not in tree
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
-    def test_full_snapshot_keeps_legacy_behavior(self, tmp_path):
-        """full=True（默认）：全量 add -A，旧行为不变。"""
-        from agent.snapshot import snapshot, has_pending_changes
+    def test_full_snapshot_captures_everything(self, tmp_path):
+        """full=True（默认）：全量内容都进快照，但分支与工作区都不动。"""
+        from agent.snapshot import snapshot, has_pending_changes, list_snapshots
 
         self._ensure_repo_with_identity(tmp_path)
         (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("world", encoding="utf-8")
         assert snapshot(str(tmp_path), "测试任务", full=True) is True
-        assert has_pending_changes(str(tmp_path)) is False
+        tree = _snapshot_files(str(tmp_path), list_snapshots(str(tmp_path))[0][1])
+        assert "a.txt" in tree and "b.txt" in tree
+        assert has_pending_changes(str(tmp_path)) is True
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_checkpoint_with_changed_file_commits_only_that_file(self, tmp_path):
