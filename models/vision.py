@@ -187,14 +187,31 @@ class VisionModel:
         return content
 
     def _auto_detect_model(self) -> str:
-        """自动选择可用的视觉模型。"""
+        """`VISION_MODEL` 留空时自动选一个视觉模型。
+
+        三条规则，按顺序：
+          1. 主模型**已知自带视觉**（命中 `RECOMMENDED_MODELS`）→ 就用主模型；
+          2. 端点是 OpenAI 官方 → 退回推荐表第一个（那里一定存在，保持旧行为）；
+          3. 其余（商汤/OpenRouter/内网网关等自建或第三方端点）→ **用主模型**。
+
+        规则 3 是 2026-09-24 审计修的坑：旧实现无论端点是哪家，都会挑推荐表第一个
+        （通常是 `gpt-4o`）—— 而第三方端点上那个模型**根本不存在**，于是每次视觉
+        调用都先失败一轮再靠备用链兜。而 `.env.example` 模板正是把 VISION_MODEL
+        留空的，等于所有新装用户都带着这个白费的一轮。主模型是用户为这个端点选定
+        的模型（实测商汤的 deepseek-flash 自带视觉），能用就直接用；读不了图也只是
+        回到备用链，不更差，且错误信息更准（"不支持图片"而不是"model not found"）。
+        """
         current = LLM_CONFIG.get("default_model", "gpt-4o-mini")
-        # 如果当前默认模型本身支持视觉，直接使用
+        # 规则 1：主模型已知支持视觉
         for rec in self.RECOMMENDED_MODELS:
             if rec in current.lower():
                 return current
-        # 否则使用第一个推荐的（通常是 gpt-4o）
-        return self.RECOMMENDED_MODELS[0]
+        # 规则 2：OpenAI 官方端点 —— 推荐表里的名字在那里一定存在
+        base = str(LLM_CONFIG.get("base_url") or "").lower()
+        if "openai.com" in base:
+            return self.RECOMMENDED_MODELS[0]
+        # 规则 3：其它端点一律用主模型
+        return current
 
     def analyze(
         self,
