@@ -225,11 +225,7 @@ def _short_host(base_url: str) -> str:
 
 
 def _subsystem_endpoints() -> List[dict]:
-    """收集「子系统 → (端点, 密钥, 模型名)」清单，供 /models 对账。
-
-    只收录**配了模型名**的条目；端点/密钥留空时跟随主 LLM（与各子系统的实际
-    取值逻辑保持一致——否则这里会对账一个线上根本不用的组合）。
-    """
+    """收集「子系统 → (端点, 密钥, 模型名)」清单，供 /models 对账（只收录配了模型名的）。"""
     from config import (
         IMAGE_GEN_CONFIG, SMALL_MODEL_CONFIG, SUPERVISOR_CONFIG,
         VIDEO_GEN_CONFIG, VISION_CONFIG,
@@ -247,7 +243,7 @@ def _subsystem_endpoints() -> List[dict]:
     if VISION_CONFIG.get("enabled", True):
         add("视觉", VISION_CONFIG.get("base_url"), VISION_CONFIG.get("api_key"),
             VISION_CONFIG.get("vision_model"))
-        # 备用链的每个条目可能**各自带端点**（`模型@预设`），要按解析结果逐条对账
+        # 备用链条目可能各自带端点（`模型@预设`），按解析结果逐条对账
         try:
             from models.vision import parse_fallback_entries
             for idx, entry in enumerate(parse_fallback_entries(), 1):
@@ -289,24 +285,15 @@ def _fetch_model_ids(base_url: str, api_key: str, timeout: float = 8.0) -> List[
 
 
 def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
-    """对账：各子系统的「模型名 × 端点」是否真的对得上（逐个端点问 /models）。
+    """对账：各子系统的「模型名 × 端点」是否对得上（逐端点问 /models）。
 
-    为什么需要（2026-09-23 实测踩到）：不少子系统的端点默认**跟随主 LLM**
-    （`SMALL_MODEL_BASE_URL`、`IMAGE_GEN_FALLBACK_API_KEY`、`VISION_*`……），
-    但模型名常是**厂商专有**的。主模型一换网关，那些名字在新端点上就不存在：
-      · 小快模型 → 503 model_not_found，杂活（会话标题）**无声**退回规则实现；
-      · 备用链 → key 与端点不匹配，401。
-    这类故障运行时不报错，只表现为"功能悄悄变差"，所以做成自检项。
-
-    端点不提供 /models（部分厂商没有该接口）时**不算失败**，只标注"未能核对"，
-    避免误报；能核对的条目里模型缺失才算失败。但 **401/403 算失败**——那说明
-    "key 与端点不匹配"，是实打实的配置错误（实测：主模型换端点后，留空即继承
-    主 LLM key 的备用链就会拿 A 家的 key 去打 B 家的端点）。
+    子系统的端点常默认跟随主 LLM，而模型名是厂商专有的：主模型一换网关，那些名字
+    在新端点上就不存在（503，杂活无声退回规则实现），或 key 与端点不匹配（401）。
+    端点没有 /models 时只标"未能核对"，401/403 与模型缺失都算失败。
     """
     fetch = fetch or _fetch_model_ids
 
-    # 预设名写错（`模型@不存在的预设`）会**静默回落到共享端点** —— 那可能变成拿
-    # A 家 key 打 B 家端点，所以必须在联网对账之前就报出来
+    # 预设名写错会静默回落共享端点（可能拿 A 家 key 打 B 家端点），联网前就报出来
     try:
         from models.vision import parse_fallback_entries
         bad_presets = sorted({e["preset"] for e in parse_fallback_entries()
@@ -319,7 +306,7 @@ def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
             "ok": False,
             "message": "视觉备用链里引用了**不存在**的端点预设：" + ", ".join(bad_presets),
             "hint": ("预设由 VISION_FALLBACK_ENDPOINT_<名字>_BASE_URL / _API_KEY 定义；"
-                     "名字写错时不会报错，而是回落到共享端点（可能拿 A 家 key 打 B 家端点）"),
+                     "名字写错不报错，而是回落到共享端点（可能拿 A 家 key 打 B 家端点）"),
         }
 
     items = _subsystem_endpoints()
@@ -350,17 +337,16 @@ def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
     if missing or auth_failed:
         parts = []
         if missing:
-            parts.append("这些模型在它配置的端点上**不存在**（会 503/404，且多在运行时"
-                         "无声降级）：" + "；".join(missing))
+            parts.append("这些模型在它配置的端点上不存在（会 503/404，且多无声降级）："
+                         + "；".join(missing))
         if auth_failed:
-            parts.append("这些端点的**密钥不匹配**：" + "；".join(auth_failed))
+            parts.append("这些端点的密钥不匹配：" + "；".join(auth_failed))
         return {
             "name": "子系统模型对账",
             "ok": False,
             "message": "  ".join(parts),
             "hint": ("给该子系统显式配 *_BASE_URL/*_API_KEY，或换成该端点服务的模型。"
-                     "典型场景：主模型换网关后，『留空即跟随主 LLM』的备用链会拿 A 家 key"
-                     "打 B 家端点（401），厂商专有的模型名也会在新端点上消失（503）。"),
+                     "典型：端点跟随主 LLM、模型名却是别家的，或 key 与端点不匹配。"),
         }
     message = f"{len(items)} 个条目、{len(cache)} 个端点全部对得上"
     if unchecked:

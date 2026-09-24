@@ -1,6 +1,6 @@
 """
 闲鱼智能回复系统 - 大模型客户端
-支持 OpenAI / DeepSeek / 自定义兼容 API
+支持任意兼容 /chat/completions 的服务
 """
 import json
 import logging

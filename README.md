@@ -11,7 +11,7 @@ Python 实现的通用 AI Agent，融合主流开源 Agent 框架
 :: 1. 环境
 python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 playwright install chromium
-copy .env.example .env        :: 填入 LLM_API_KEY（OpenAI 兼容端点均可）
+copy .env.example .env        :: 填入 LLM_API_KEY（兼容协议端点均可）
 
 :: 2. 环境自检（13 项）
 python main.py --doctor

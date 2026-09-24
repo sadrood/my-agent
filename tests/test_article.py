@@ -3,7 +3,7 @@
 
 钉住的语义：
 - 职责分离：审阅/校对只提问题，改写只由作者模型做（意见必须进 revise 的提示）；
-- 跨厂商：默认 main 写、agnes 审；两者相同时必须给出明确警告（同源互审价值有限）；
+- 跨厂商：默认 main 写、备用供应商审；两者相同时必须给出明确警告（同源互审价值有限）；
 - 有界回炉：无严重/中等意见即停、正文没变化即停、到上限即停；
 - 事实核查只查被点名的可疑说法；取不到资料时**不让模型凭记忆下结论**（记"未查到"）；
 - 格式容错：模型不按 JSON/分隔符输出时降级继续，绝不让流水线断在半路。
@@ -392,7 +392,7 @@ class TestPipeline:
 
 
 class TestRateLimitResilience:
-    """上游限流是真实硬约束（实测商汤在 revise 阶段 429）：退避重试 → 换端点 → 留成果。"""
+    """上游限流是真实硬约束（实测 revise 阶段 429）：退避重试 → 换端点 → 留成果。"""
 
     _RL = "阶段「revise」调用失败（main:m）：Error code: 429 - insufficient_quota"
 
@@ -466,7 +466,7 @@ class TestRateLimitResilience:
         assert not _looks_rate_limited("阶段「draft」返回空内容")
 
     def test_empty_response_also_falls_back(self, tmp_path):
-        """配额耗尽的端点除了 429 还会回**空正文**（实测商汤就是这样）：
+        """配额耗尽的端点除了 429 还会回**空正文**：
         这种"看着像成功、其实什么都没有"的失败也必须走换端点，否则白等一场。"""
         scripts = _happy_scripts(revise=["", ""])
         scripts["revise@agnes"] = ["## 修改说明\n- agnes 接手\n\n<<<ARTICLE\n" + REVISED + "\nARTICLE"]

@@ -96,7 +96,7 @@ class TestAgentLoopMode:
         assert "from agent.ui_theme import print_info" not in src, (
             "_run_loop 内禁止局部导入 print_info（会遮蔽模块级导入导致 UnboundLocalError）"
         )
-        # 功能路径：goal 命中意图检测（deepseek → chat.deepseek.com，不在浏览器关键词表内，
+        # 功能路径：goal 命中意图检测（示例域名不在浏览器关键词表内，
         # 不会触发浏览器预启动），verbose=False 使记忆召回分支不执行
         agent = make_agent(tmp_path, [
             LLMToolResponse(content="好的，这就去 deepseek 查。"),

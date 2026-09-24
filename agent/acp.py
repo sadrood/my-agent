@@ -280,7 +280,7 @@ def run_acp_session(goal: str, cwd: str, on_event, stop_event=None, argv=None,
 
     model: 覆盖 ACP wrapper 使用的模型（ANTHROPIC_MODEL）。默认继承环境；若你的
     ~/.claude/settings.json 指向的网关缺少默认模型会 503——此时传网关
-    实际服务的模型（如 deepseek-v4-pro / glm-5.2）。
+    实际服务的模型（如主力模型 / 其它模型）。
     """
     if model:
         os.environ.setdefault("ANTHROPIC_MODEL", model)

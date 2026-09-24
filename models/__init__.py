@@ -6,7 +6,7 @@
 背景（启动性能）：原先此处 `from .video_analyzer import VideoFrameAnalyzer`
 会在任何 `import models.*` 时触发
     models/__init__ → video_analyzer → vision → openai
-而 openai SDK 的 __init__ 级联导入大量类型（types.beta / graders / eval 等），
+而 SDK 的 __init__ 级联导入大量类型（types.beta / graders / eval 等），
 实测 ~1.7s，占 CLI 启动耗时的 84%。改为按需导入后启动从 2.2s 降到 ~0.5s。
 """
 from .llm import LLM   # 轻量：llm.py 内部已对 openai 做惰性导入

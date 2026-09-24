@@ -1,12 +1,12 @@
 """
-视频生成模块（OpenAI Videos 兼容 / 异步任务）。
+视频生成模块（异步任务：创建 → 轮询 → 下载）。
 
-实测契约（Agnes agnes-video-2.5-flash）：
+实测契约（备用供应商的视频模型）：
     创建: POST {base_url}/videos
           {"model": "...", "prompt": "...", "seconds": "5",
            "mode": "text", "size": "720P", "aspect_ratio": "16:9"}
           → {"id": "task_xxx", "video_id": "task_xxx", "status": "queued", ...}
-    查询: GET  {query_base}/agnesapi?video_id=<ID>&model_name=<模型>
+    查询: GET  {query_base}/<查询路径>?video_id=<ID>&model_name=<模型>
           → {"status": "queued|in_progress|completed|failed",
              "progress": 0-100, "url": "<mp4 url | null>", "error": null}
           ⚠️ 查询端点在 **HOST 根路径**（不在 /v1 下），故单独配 query_base。
@@ -47,7 +47,7 @@ def _query_base_from(base_url: str) -> str:
     """由 base_url 推导查询端点主机（去掉结尾的 /v1）。
 
     查询端点在 HOST 根路径：https://api.agnes-ai.cn/agnesapi?...
-    而生成端点在 https://api.agnes-ai.cn/v1/videos
+    而生成端点在 .env 里配置的端点/videos
     """
     base = (base_url or "").rstrip("/")
     if base.endswith("/v1"):
@@ -55,7 +55,7 @@ def _query_base_from(base_url: str) -> str:
     return base
 
 
-# 供应商合法时长区间（agnes-video 实测：3s → invalid_request；上限 12s）
+# 供应商合法时长区间（上游实测：3s 会被拒；上限 12s）
 _SECONDS_MIN = 4.0
 _SECONDS_MAX = 12.0
 

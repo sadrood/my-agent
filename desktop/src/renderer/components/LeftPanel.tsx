@@ -49,7 +49,7 @@ export function LeftPanel() {
     return parts[parts.length - 1] || undefined;
   };
 
-  /** 行内相对时间（deepseek 式：刚刚/N 分钟前/N 小时前/昨天/MM-DD） */
+  /** 行内相对时间（刚刚 / N 分钟前 / N 小时前 / 昨天 / MM-DD） */
   const relTime = (s: import('../lib/types').Session): string => {
     const t = Date.parse(s.updatedAt || s.createdAt || '');
     if (Number.isNaN(t)) return '';

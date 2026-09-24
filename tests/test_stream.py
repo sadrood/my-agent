@@ -10,7 +10,7 @@ from tools.tool_manager import ToolManager
 
 
 # ============================================================
-# Fake 流式对象（模拟 openai 流式 chunk 结构）
+# Fake 流式对象（模拟流式 chunk 结构）
 # ============================================================
 
 class FakeFn:
@@ -229,7 +229,7 @@ class TestExecutorStreamLoop:
     def test_llm_seconds_covers_blocked_create_call(self):
         """回归：计时必须从**发起请求前**开始。
 
-        实测 Agnes 网关即使 stream=True 也会先把整段回复缓冲好再返回流对象：
+        实测备用供应商网关即使 stream=True 也会先把整段回复缓冲好再返回流对象：
         此前 t0 取在 create() 返回之后，于是「LLM 耗时」只量到本地排空缓冲的
         0.1s（真实 wall 8.18s），「首 token」记成 0.02s —— 状态行双双失真。
         """

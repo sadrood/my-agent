@@ -30,10 +30,10 @@ class MonitorConfig:
 @dataclass
 class LLMConfig:
     """大模型配置"""
-    provider: str = "openai"                  # openai / deepseek / custom
+    provider: str = "openai"                  # 取值见 llm_client 的分支实现
     api_base: str = ""                        # 自定义 API 地址
     api_key: str = ""                         # API Key
-    model: str = "gpt-4o-mini"                # 推荐：gpt-4o-mini（便宜快）或 deepseek-v3
+    model: str = "gpt-4o-mini"                # 便宜的通用小模型即可
     max_tokens: int = 500
     temperature: float = 0.7
     timeout: int = 30

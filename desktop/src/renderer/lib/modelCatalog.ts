@@ -5,12 +5,12 @@
  * 不再按模型家族粗估。
  */
 export const MODEL_WINDOWS: Record<string, number> = {
-  // DeepSeek（1M 上下文）
-  // deepseek-flash = DeepSeek V4.1 Flash：端点 /models 实测 context_length=1048576
+  // 1M 上下文档
+  // 默认模型：端点 /models 报 context_length=1048576
   'deepseek-flash': 1_048_576,
   'deepseek-v4-flash': 1_000_000,
   'deepseek-v4-pro': 1_000_000,
-  // Moonshot / Kimi
+  // 1M / 262K / 131K 混排
   'kimi-k3': 1_048_576,
   k3: 1_048_576,
   'k3-256k': 262_144,
@@ -19,19 +19,19 @@ export const MODEL_WINDOWS: Record<string, number> = {
   'moonshot-v1-8k': 8192,
   'moonshot-v1-32k': 32_768,
   'moonshot-v1-128k': 131_072,
-  // MiniMax
+  // 200K ~ 1M 混排
   'MiniMax-M3': 1_000_000,
   'MiniMax-M2.7': 204_800,
   'MiniMax-M2.5': 204_800,
   'MiniMax-M2': 204_800,
-  // Qwen
+  // 1M / 262K / 131K 混排
   'qwen3.5-plus': 1_000_000,
   'qwen3.5-flash': 1_000_000,
   'qwen3-max': 262_144,
   'qwen-plus': 1_000_000,
   'qwen-flash': 1_000_000,
   'qwen3-vl-plus': 262_144,
-  // 智谱 GLM
+  // 128K ~ 1M 混排
   'glm-5.3': 1_000_000,
   'glm-5.1': 200_000,
   'glm-5': 200_000,

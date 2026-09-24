@@ -1,9 +1,7 @@
 """`computer` 工具只在有实现的平台上注册。
 
-背景（2026-09-24 审计）：原先无条件注册。非 Windows 平台上模型会拿到一个每个
-action 都返回「仅支持 Windows」的工具，而 `agent/agent.py` 还会因为
-`get_tool("computer") is not None` 追加整套桌面操控提示 —— 等于先教模型怎么用，
-再告诉它用不了，白烧轮数。修法是让注册跟着 `COMPUTER_SUPPORTED` 走。
+原先无条件注册：非 Windows 上模型会反复调用一个恒返回「仅支持 Windows」的工具，
+agent 还会因它存在而追加整套桌面操控提示。
 """
 import platform
 

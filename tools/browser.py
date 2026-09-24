@@ -591,6 +591,10 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
                     ),
+                    # 实测：crashpad 管道初始化失败（TransactNamedPipe: 管道已结束）
+                    # 会让 chromium 启动即退出（exitCode 21），加此参数禁用崩溃上报
+                    # 模块后恢复。crashpad 仅用于崩溃收集，禁掉不影响功能。
+                    args=["--disable-crashpad"],
                 )
             else:
                 self._browser = self._playwright.chromium.launch(headless=self._headless)
@@ -672,16 +676,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return ToolResult(success=True, output=f"浏览器已关闭。{note}")
 
     def _force_cleanup_residual(self) -> int:
-        """兜底：清理仍占用 profile_dir 的残留浏览器进程（关闭被中断后）。
+        """兜底：清理仍占用 profile_dir 的残留浏览器进程，返回清掉的个数。
 
-        仅匹配『命令行里带本工具的 --user-data-dir=<profile_dir>』的进程——这是本
-        工具自己拉起的持久实例（Chrome 单例目录锁的持有者），绝不触碰用户日常
-        浏览器或其他临时 profile 实例。返回清理掉的进程数。
-
-        两个平台各一条取进程表的实现：Windows 用 `Get-CimInstance` + `taskkill /T`
-        （连子进程一起），POSIX 用 `ps` + `kill`。此前只有 PowerShell 一条路，
-        Linux 上 `powershell: not found` → 静默返回 0：残留的 Chromium 与
-        Playwright 的 node 会一直累积（2026-09-24 审计）。
+        只认命令行里带本工具 `--user-data-dir` 的进程 —— 不碰用户自己的浏览器。
         """
         killed = 0
         for pid in self._residual_pids():
@@ -711,10 +708,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return [p.strip() for p in out.split() if p.strip().isdigit()]
 
     def _residual_pids_posix(self) -> list:
-        """POSIX 侧：`ps -A -o pid=,args=` 拿完整命令行，逐行精确比对 profile 目录。
+        """POSIX 侧：`ps` 取完整命令行，realpath **全等**比对 profile 目录。
 
-        用 `ps` 而不是 `pgrep`：前者必然存在且给得出完整命令行。比对走 realpath
-        **全等**，避免 "profile" 前缀误伤 "profile2" 这类无关实例。
+        全等而不是子串：避免 "profile" 前缀误伤 "profile2" 这类无关实例。
         """
         import subprocess
         try:
@@ -757,9 +753,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
     def _kill_residual_posix(pid: str) -> bool:
         """先 SIGTERM，给 0.5s 自行收尾（Chromium 会带走子进程），仍活着再 SIGKILL。"""
         import signal
-        # SIGKILL 在 Windows 上不存在（signal 模块没这个属性），POSIX 各平台都是 9。
-        # 用取默认值而不是直接引用信号常量：这样这段 POSIX 逻辑在任何宿主上都能被
-        # 单测覆盖，也不会因为误在 Windows 上走到这里而抛 AttributeError。
+        # SIGKILL 在 Windows 上不存在；POSIX 各平台都是 9（取默认值以便被单测覆盖）
         sigkill = getattr(signal, "SIGKILL", 9)
         try:
             os.kill(int(pid), signal.SIGTERM)

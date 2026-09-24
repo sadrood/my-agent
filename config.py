@@ -95,16 +95,11 @@ def resolve_llm_config(env: dict) -> dict:
 
 
 def llm_config_provenance(env: dict) -> dict:
-    """LLM 连接配置的**来源**（纯函数）：实际生效的是哪一组变量、有没有被顶掉。
+    """LLM 连接配置的来源（纯函数）：生效值取自哪个变量、哪些显式配置被别名顶掉了。
 
-    为什么需要（2026-09-24 实测踩到）：取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_*。
-    在带着 Claude Code 自身 ANTHROPIC_* 变量的环境里跑（CLI 内、或它派生的任何
-    子进程、或 agent 自改自测），`.env` 里的 LLM_BASE_URL / LLM_DEFAULT_MODEL 会被
-    **静默忽略** —— 配置文件写着商汤、实际打的是 CLI 的网关，排查"到底连的哪家"
-    时极具误导性（我当时据此做的模型探针问错了对象，结论作废）。
-
-    返回 `shadowed`：被更高优先级的别名实际顶掉的显式配置项（key 只报名字，
-    不带值）。为空 = 没有遮挡，`.env` 怎么写就怎么生效。
+    取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_* —— 在带着 ANTHROPIC_* 的环境里跑
+    （例如在其它 CLI 里），`.env` 的 LLM_* 会被静默忽略：看配置与实际连的不是一家。
+    `shadowed` 只含变量名与端点，不含密钥值。
     """
     def source(*names):
         for name in names:
@@ -159,7 +154,7 @@ LLM_CONFIG = {
                           default="gpt-4o-mini"),
     "default_temperature": float(os.getenv("LLM_DEFAULT_TEMPERATURE", "0.7")),
     "default_max_output_tokens": int(os.getenv("LLM_DEFAULT_MAX_OUTPUT_TOKENS", "4096")),
-    # 固定温度：某些 thinking 模型只接受特定 temperature（如 kimi-k3 只允许 1）。
+    # 固定温度：某些 thinking 模型只接受特定 temperature（如必须为 1）。
     # 设置后忽略传入的 temperature，强制用该值（None=不启用）。
     "fixed_temperature": (lambda v: float(v) if v else None)(os.getenv("LLM_FIXED_TEMPERATURE", "")),
 
@@ -191,8 +186,8 @@ BROWSER_CONFIG = {
     "viewport_width": int(os.getenv("BROWSER_VIEWPORT_WIDTH", "1280")),
     "viewport_height": int(os.getenv("BROWSER_VIEWPORT_HEIGHT", "720")),
     # 持久浏览器（内置浏览器）：launch_persistent_context + 用户数据目录，
-    # 登录态（cookie/localStorage）跨次启动保留——网页型分身（DeepSeek/豆包
-    # 等）先手动登录一次，agent 之后复用会话。false = 每次全新上下文（旧行为）
+    # 登录态（cookie/localStorage）跨次启动保留——需要登录的站点先手动登录一次，
+    # agent 之后复用会话。false = 每次全新上下文
     "persistent": os.getenv("BROWSER_PERSISTENT", "true").lower() == "true",
     # 持久 profile 目录（登录态落盘点）；memory/ 已被 gitignore，不入库
     "profile_dir": resolve_under_root(
@@ -216,19 +211,10 @@ VISION_FALLBACK_PRESET_PREFIX = "VISION_FALLBACK_ENDPOINT_"
 
 
 def vision_fallback_presets() -> dict:
-    """收集视觉备用链的**命名端点预设**：{预设名: {"base_url":..., "api_key":...}}。
+    """收集备用视觉链的命名端点预设：{预设名: {"base_url":..., "api_key":...}}。
 
-    背景（2026-09-23 实测踩到）：跨厂商备用（商汤主 + Agnes 备）需要**各自一套
-    key**，可 `VISION_FALLBACK_API_KEY` 只有一份。把 key 直接写进
-    `VISION_FALLBACK_MODELS` 列表虽然能跑，但那份列表会被 `/config`、doctor 之类
-    的地方打印出来 —— 等于把密钥写进了日志。所以 key 放独立变量、列表里只留
-    `模型@预设名`：
-
-        VISION_FALLBACK_MODELS=sensenova-6.8-flash-lite,agnes-3.0-flash@agnes
-        VISION_FALLBACK_ENDPOINT_AGNES_BASE_URL=https://api.agnes-ai.cn/v1
-        VISION_FALLBACK_ENDPOINT_AGNES_API_KEY=sk-...
-
-    预设名大小写不敏感；空值视为未设置。
+    预设给 `模型@预设名` 用：跨厂商备用需要各自一套 key，而 fallback_api_key 只有一份，
+    把 key 写进模型列表又会被 `/config`、doctor 打印出来。预设名大小写不敏感。
     """
     out: dict = {}
     for name, value in list(os.environ.items()):
@@ -246,17 +232,8 @@ def vision_fallback_presets() -> dict:
 
 # 视觉模型可使用独立端点（VISION_API_KEY / VISION_BASE_URL），
 # 留空时回退到主 LLM 的 key / base_url。
-# 例如主模型用 OpenRouter，视觉模型用商汤 SenseNova：
-#   VISION_API_KEY=<商汤key>
-#   VISION_BASE_URL=https://token.sensenova.cn/v1
-#   VISION_MODEL=<商汤视觉模型名>
-#
-# 2026-09-23 实测（同一张答案已知的图；单图 2 次 + 多图/时序 2 次）：
-#   agnes-3.0-flash 能读图（复测 2.0s/18.7s，3/3）但延迟波动大、认字精度略逊；
-#   deepseek-flash（= DeepSeek V4.1 Flash）与
-#   sensenova-6.8-flash-lite 都 3/3 命中、多图 4/4，1-4s。**关键：商汤
-#   `GET /models` 把 deepseek-flash 的 input_modalities 标成 ["text"]，实测却
-#   完全能读图** —— 判断某模型能不能读图不能只看元数据，要拿答案已知的图打一次。
+# `/models` 的 input_modalities 不可信：有模型标 ["text"] 实际能读图。
+# 判断能否读图要用答案已知的图实打一次，别只看元数据。
 VISION_CONFIG = {
     "screenshot_path": os.getenv("VISION_SCREENSHOT_PATH", "./screenshots"),
     "vision_model": os.getenv("VISION_MODEL", ""),  # 留空则自动选择
@@ -266,12 +243,8 @@ VISION_CONFIG = {
     # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
     # browser visionclick 仅 60s），必须显式收紧
     "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
-    # 备用视觉模型：主模型超时/报错/不支持图片时按顺序接着试。
-    # 条目写法（逗号分隔）：
-    #   模型名            → 用下面这组共享端点（fallback_base_url / fallback_api_key）
-    #   模型名@预设名      → 用该预设自己的端点与 key（见 vision_fallback_presets）
-    # 顺序敏感：**先同厂商模型、再跨厂商**——同端点的那级能兜"单个模型坏了"，
-    # 跨厂商那级才兜得住"整个端点限流/变慢"（实测主备同端点时两条一起 timed out）。
+    # 备用视觉链：条目为 `模型名`（用共享端点）或 `模型名@预设名`（用预设端点）。
+    # 顺序敏感：同厂商那级只兜"单个模型坏了"，跨厂商那级才兜得住端点级故障。
     "fallback_models": [m.strip() for m in
                         os.getenv("VISION_FALLBACK_MODELS",
                                   "sensenova-6.8-flash-lite").split(",") if m.strip()],
@@ -282,12 +255,12 @@ VISION_CONFIG = {
 }
 
 # ============================================================
-# 图像生成配置（SenseNova Token Plan 文生图）
+# 图像生成配置（文生图）
 # ============================================================
-# OpenAI 兼容端点：POST {base_url}/images/generations
-# 模型（实测 token.sensenova.cn 可用）:
-#   sensenova-u1.5-lite  文生图/信息图（构图/光影/文字渲染增强）
-#   sensenova-u1-fast    信息图生成加速版
+# 兼容端点：POST {base_url}/images/generations
+# 模型 ID 由供应商定义，按 .env.example 填写：
+#   <主模型>    文生图/信息图（构图、光影、文字渲染增强）
+#   <加速模型>  信息图快速版
 # 返回 b64_json，工具自动解码保存为本地 PNG。
 IMAGE_GEN_CONFIG = {
     "enabled": os.getenv("IMAGE_GEN_ENABLED", "true").lower() == "true",
@@ -300,9 +273,8 @@ IMAGE_GEN_CONFIG = {
     "timeout": float(os.getenv("IMAGE_GEN_TIMEOUT", "120")),
     # 官方公测期间免费开放去水印（watermark=false）；默认关闭水印
     "watermark": os.getenv("IMAGE_GEN_WATERMARK", "false").lower() == "true",
-    # 备用生图端点：主端点超时/报错时按顺序接着试（实测商汤 u1.5-lite/u1-fast/u1.5-fast
-    # 都能出图，返回 b64_json）。默认指向商汤——若主端点本来就是商汤，
-    # 把这里改成 Agnes（或留空关闭）才有意义；与主端点完全相同的条目会被自动跳过。
+    # 备用生图端点：主端点超时/报错时按顺序接着试（返回 b64_json 的端点为佳）。
+    # 与主端点相同的条目会被自动跳过；留空即关闭。
     "fallback_models": [m.strip() for m in
                         os.getenv("IMAGE_GEN_FALLBACK_MODELS",
                                   "sensenova-u1.5-lite").split(",") if m.strip()],
@@ -313,14 +285,14 @@ IMAGE_GEN_CONFIG = {
 }
 
 # ============================================================
-# 视频生成配置（OpenAI Videos 兼容：异步任务，实测 Agnes）
+# 视频生成配置（异步任务：创建 → 轮询 → 下载）
 # ============================================================
-# 契约（agnes-video-2.5-flash / 2.5 实测）：
+# 契约（按当前上游端点核实）：
 #   创建: POST {base_url}/videos  → {"video_id": "task_xxx", "status": "queued"}
-#   查询: GET  {query_base}/agnesapi?video_id=<ID>&model_name=<模型>
+#   查询: GET  {query_base}/<查询路径>?video_id=<ID>&model_name=<模型>
 #         ⚠️ 查询端点在 HOST 根路径（不在 /v1 下），因此单独配 query_base
 #   完成: status=completed 且 url 非空（mp4）
-# 生成耗时：5 秒 / 720P 实测约 41 秒；更长/更高分辨率更久 →
+# 生成耗时：5 秒 / 720P 约 40 秒级；更长/更高分辨率更久 →
 #   工具默认等待 max_wait 秒，超时返回 task_id 供稍后查询（不丢任务）。
 VIDEO_GEN_CONFIG = {
     "enabled": os.getenv("VIDEO_GEN_ENABLED", "true").lower() == "true",
@@ -349,10 +321,10 @@ VIDEO_GEN_CONFIG = {
 # 语音合成配置（配音：多供应商）
 # ============================================================
 # 用于漫剧/短视频配音：文字 → mp3，再由 video_edit 的 add_audio 合到画面。
-# 供应商：
-#   edge       —— 微软 Edge 在线语音（免费、免 key、中文多音色，默认）
-#   openrouter —— OpenRouter 的 /api/v1/audio/speech（OpenAI 兼容），
-#                 可挂 fish-audio 等 TTS 模型；按字符计费，":free" 变体 0 元
+# 供应商（名称见 .env.example 的 TTS_PROVIDER）：
+#   edge       —— 在线免费语音（免 key、中文多音色，默认）
+#   openrouter —— 第三方网关的 /audio/speech 兼容端点，
+#                 可挂各类 TTS 模型；按字符计费，部分变体免费
 TTS_CONFIG = {
     "enabled": os.getenv("TTS_ENABLED", "true").lower() == "true",
     "provider": os.getenv("TTS_PROVIDER", "edge").strip().lower(),
@@ -380,7 +352,7 @@ TTS_CONFIG = {
     # 仅用于 openrouter.ai 的排行榜统计，不影响请求结果）
     "referer": os.getenv("TTS_OPENROUTER_REFERER", ""),
     "title": os.getenv("TTS_OPENROUTER_TITLE", "my_agent"),
-    # 声音克隆（fish-audio S2.1 Pro 等支持）：参考音频 + 其文字稿（可选）
+    # 声音克隆（部分 TTS 模型支持）：参考音频 + 其文字稿（可选）
     "reference_audio": os.getenv("TTS_REFERENCE_AUDIO", ""),
     "reference_text": os.getenv("TTS_REFERENCE_TEXT", ""),
     # 角色声线库（多角色配音用）：一个目录，每个文件是一个角色的克隆参考样本，
@@ -388,14 +360,14 @@ TTS_CONFIG = {
     # 合成时传 voice=角色名，会自动带上对应参考样本 → 同角色音色恒定不偏移。
     # 优先级高于上面的全局 reference_audio；目录为空则退回全局参考。
     "reference_dir": os.getenv("TTS_REFERENCE_DIR", ""),
-    # OpenRouter 失败时是否回退 edge-tts（免费档"不保证可用性"，兜底更稳）
+    # 在线合成失败时是否回退本地兜底 TTS（在线免费档不保证可用性）
     "fallback_edge": os.getenv("TTS_FALLBACK_EDGE", "true").lower() == "true",
 }
 
 # ============================================================
-# Toonflow 对接配置（外部 AI 短剧工厂，由 agent 通过其 REST API 驱动）
+# 短剧工厂服务对接配置（外部 REST 服务，由 agent 驱动）
 # ============================================================
-# Toonflow（https://github.com/HBAI-Ltd/Toonflow-app）是独立的短剧生产工具：
+# 独立的短剧生产工具，后端是本地 Express 服务：
 # 自带 Express 后端（默认 127.0.0.1:10588）与 169 个 /api 路由，覆盖
 # 原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片 全流程。agent 通过 HTTP 驱动它。
 # ⚠️ 仅限本机使用：默认账号 admin/admin123、密码明文比对、token 有效期 180 天。
@@ -521,8 +493,15 @@ MCP_CONFIG = {
 # Computer Use 配置
 # ============================================================
 COMPUTER_USE_CONFIG = {
+    # 关掉则不注册 computer 工具（模型看不到它）
     "enabled": os.getenv("COMPUTER_USE_ENABLED", "true").lower() == "true",
     "default_steps": int(os.getenv("COMPUTER_USE_DEFAULT_STEPS", "10")),
+    # 光标可视化浮层：操作键鼠时显示跟随真实光标的橙色光环 + 点击涟漪。默认关 ——
+    # 浮层点击穿透一旦失效会吞掉整屏鼠标事件并抢焦点，风险高于收益。
+    # 取值宽容（1/true/on/yes）：文档与该键的 docstring 一直写的是 =1
+    "cursor_overlay": os.getenv("COMPUTER_CURSOR_OVERLAY", "").strip().lower()
+                      in ("1", "true", "on", "yes"),
+    "cursor_idle_seconds": float(os.getenv("COMPUTER_CURSOR_IDLE", "6")),
 }
 
 # ============================================================
@@ -571,15 +550,14 @@ LEARN_CONFIG = {
     "min_goal_chars": int(os.getenv("LEARN_MIN_GOAL_CHARS", "15")),
     "min_tool_calls": int(os.getenv("LEARN_MIN_TOOL_CALLS", "2")),
     # 经验压缩（memory distill）用的模型：留空 = 主模型。
-    # 压缩是**离线维护任务**，而主模型（商汤）配额紧张时会回 429 / 空正文；
-    # 换一家跑完更划算（例如 LEARN_DISTILL_BASE_URL=https://api.agnes-ai.cn/v1 +
-    # LEARN_DISTILL_MODEL=agnes-3.0-flash + LEARN_DISTILL_API_KEY=<agnes key>）。
+    # 压缩是**离线维护任务**，主模型配额紧张时会回 429 / 空正文；
+    # 换一个端点/模型跑更划算（LEARN_DISTILL_BASE_URL / _MODEL / _API_KEY 三项）。
     # 只影响压缩，不动主循环的模型。
     "distill_model": os.getenv("LEARN_DISTILL_MODEL", ""),
     "distill_base_url": os.getenv("LEARN_DISTILL_BASE_URL", ""),
     "distill_api_key": os.getenv("LEARN_DISTILL_API_KEY", ""),
     # 压缩时**每组之间**等待秒数：账号 RPM 很低时连续几发大请求必被限流
-    # （实测商汤 429 + 空正文），拉开间隔比换模型有效。
+    # （上游会回 429 + 空正文），拉开间隔比换模型有效。
     "distill_pause": float(os.getenv("LEARN_DISTILL_PAUSE", "0")),
     # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
@@ -640,7 +618,7 @@ INSTRUCTIONS_CONFIG = {
 # Guardian 安全审校配置（借鉴同类实现的 guardian）
 # ============================================================
 # Guardian 可使用独立端点（GUARDIAN_API_KEY / GUARDIAN_BASE_URL），
-# 留空时回退到主 LLM 端点。建议用快模型（如商汤 SenseNova），
+# 留空时回退到主 LLM 端点。建议用快模型，
 # 慢速推理模型会触发审校超时。
 GUARDIAN_CONFIG = {
     "enabled": (not MINIMAL_MODE) and os.getenv("GUARDIAN_ENABLED", "true").lower() == "true",
@@ -674,20 +652,16 @@ GUARDIAN_CONSENT_CONFIG = {
 }
 
 # ============================================================
-# 小快模型（杂活专用）配置 —— 学 Claude Code：后台杂活不占用主模型
+# 小快模型（杂活专用）配置：后台杂活不占用主模型
 # ============================================================
 # 主模型负责"想与做"，但有些活纯属跑腿：生成会话标题、写交接摘要、压对话历史……
 # 这些活交给主模型既慢又贵，还会挤占它的上下文预算。用一个小的快模型单独干，
 # 失败就退回原来的规则实现（fail-open），绝不影响主流程。
-# 默认用商汤自家的轻量模型（与主模型同一把 key，实测响应快）。
-# ⚠️ 坑（2026-09-23 实测踩到）：**模型名是商汤专有的，端点却默认跟随主 LLM**
-# （下面 base_url/api_key 留空 = 用 LLM_CONFIG 的）。主模型一换网关（例如换到内网
-# 172.16.10.242），`sensenova-6.8-flash-lite` 在那边根本不存在 → 503，而杂活是
-# fail-open 的，只会**无声**退回规则实现（会话标题变成截断文本），不报错。
-# 所以换主模型端点时，请显式给 SMALL_MODEL / SMALL_MODEL_BASE_URL / SMALL_MODEL_API_KEY；
-# `my-agent --doctor` 的「子系统模型对账」会逐端点核对这类组合。
-# 另注意：若换成思考模型（如 deepseek-flash），SMALL_MODEL_MAX_TOKENS 要给够
-# （推理也占额度，默认 200 可能只剩空正文）。
+# 默认用轻量模型（与主模型同一把 key）。
+# ⚠️ 模型名由供应商定义，而端点/key 默认跟随主 LLM：换网关后该名字可能不存在（503），
+# 杂活又 fail-open，只会无声退回规则实现。换端点时显式给
+# SMALL_MODEL / SMALL_MODEL_BASE_URL / SMALL_MODEL_API_KEY。
+# 若换成思考模型，SMALL_MODEL_MAX_TOKENS 要给够（推理也占额度，默认 200 可能只剩空正文）。
 SMALL_MODEL_CONFIG = {
     "enabled": os.getenv("SMALL_MODEL_ENABLED", "true").lower() == "true",
     "model": os.getenv("SMALL_MODEL", "") or "sensenova-6.8-flash-lite",
@@ -710,7 +684,7 @@ SMALL_MODEL_CONFIG = {
 # 全是 0，闸门从未触发；也没有任何角色对照**目标**审"到底做完没有"。
 #
 # 监管者 = 一个独立模型，在 agent 想收尾时审完成度；没做完就发回**下一步指令**。
-# 默认用另一家（Agnes）而不是执行任务的模型（商汤）：同源自评容易自我确认。
+# 默认用与主模型不同的厂商：同源自评容易自我确认。
 SUPERVISOR_CONFIG = {
     "enabled": os.getenv("SUPERVISOR_ENABLED", "true").lower() == "true",
     # 最多把任务推回去几次（有界，避免与模型无限拉锯）
@@ -889,6 +863,10 @@ TOOL_CONFIG = {
     "loop_base_turns": int(os.getenv("LOOP_BASE_TURNS", "30")),          # 起步轮数
     "loop_extend_per_progress": int(os.getenv("LOOP_EXTEND_PER_PROGRESS", "10")),
     "loop_stall_limit": int(os.getenv("LOOP_STALL_LIMIT", "5")),         # 连续无进展即停
+    # "连续无进展"预警阈值（LOOP_HARD_CAP=0 的无限模式下，只有原样重复/空回复会停；
+    #  "换了新做法但失败"的轮次永远到不了上限——达到该阈值时向前端发一次提示。
+    #  0 = 关闭。只预警不自动停：无限模式的语义是"让 agent 做完任务再结束"。）
+    "loop_stagnation_warn": int(os.getenv("LOOP_STAGNATION_WARN", "10")),
     # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。
     # 留空则回退到 max_loop_ops（即升级前的行为）。
     "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))
@@ -956,11 +934,10 @@ TEAM_CONFIG = {
 # 测试命令配置（跨平台可配：循环提示词中引用的测试命令）
 # ============================================================
 def resolve_test_command(env: dict, is_windows: bool = None) -> str:
-    """测试命令解析（纯函数，便于测试）：显式配置优先，否则按平台选 venv 路径。
+    r"""测试命令解析（纯函数）：显式配置优先，否则按平台选 venv 路径。
 
-    为什么默认值必须分平台：虚拟环境在 Windows 是 `.venv\\Scripts`、POSIX 是
-    `.venv/bin`。给错平台不是"小瑕疵"——agent 会照着它跑测试、跑不通就一路失败；
-    若开了 EDIT_PREFLIGHT，每次 edit 都会被自动回滚（2026-09-24 审计）。
+    默认值必须分平台 —— 写死 Windows 的 `.venv\Scripts` 会让 Linux 上跑测试
+    一路失败，EDIT_PREFLIGHT 打开时还会把每次 edit 都回滚掉。
     """
     explicit = str(env.get("TEST_COMMAND") or "").strip()
     if explicit:
@@ -1010,7 +987,7 @@ SKILLS_CONFIG = {
 # 重合，"互审"会退化成自我复述；同厂不同名的模型也基本重合。所以默认让另一家的
 # 模型当审阅/校对，写稿与修订留在主模型。
 ARTICLE_ENDPOINTS = {
-    # 端点名 → OpenAI 兼容配置。可写 "main" / "agnes"，也可 "agnes:某个模型名"。
+    # 端点名 → 兼容配置。可写 "main" / "<端点名>"，也可 "<端点名>:<模型名>"。
     "main": {
         "api_key": LLM_CONFIG.get("api_key") or "",
         "base_url": LLM_CONFIG.get("base_url") or "",
@@ -1043,8 +1020,8 @@ ARTICLE_CONFIG = {
     # （结构化、稳，需 ZHIHU_ACCESS_SECRET）；browser=抓搜索引擎结果页（无密钥依赖，
     # 但经常抓不到东西）。两条都拿不到才记"未查到"。
     "lookup_sources": os.getenv("ARTICLE_LOOKUP_SOURCES", "zhihu,browser"),
-    # 限流兜底：长文一次跑 8+ 个大请求，很容易撞上游 TPM/RPM（实测商汤在 revise
-    # 阶段 429 过）。同端点退避重试 stage_retries 次 → 仍失败就换另一家端点续跑
+    # 限流兜底：长文一次跑 8+ 个大请求，很容易撞上游 TPM/RPM。
+    # 同端点退避重试 stage_retries 次 → 仍失败就换另一个端点续跑
     # （fallback_endpoint=auto 表示自动选"另一家"；留空/off 关闭换端点）。
     "stage_retries": int(os.getenv("ARTICLE_STAGE_RETRIES", "1")),
     "retry_wait": float(os.getenv("ARTICLE_RETRY_WAIT", "20")),

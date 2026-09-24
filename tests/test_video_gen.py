@@ -3,7 +3,7 @@ models/video_gen.py 与 tools/video_gen.py 的离线单元测试。
 
 httpx.post / httpx.get 被 monkeypatch 拦截，不发起真实网络请求。
 重点覆盖：
-- 查询端点在 **HOST 根路径**（/agnesapi，不在 /v1 下）——实测踩过的坑
+- 查询端点在 **HOST 根路径**（/查询端点，不在 /v1 下）——实测踩过的坑
 - 异步任务状态流转与**超时不丢任务**（返回 task_id 供稍后查询）
 - 工具层 generate / status 两个命令
 """
@@ -46,7 +46,7 @@ def make_model(tmp_path, **kw):
 
 class TestVideoGenModel:
     def test_query_base_strips_v1(self, tmp_path):
-        """查询端点在 HOST 根路径：/v1/agnesapi 会 404（实测）。"""
+        """查询端点在 HOST 根路径：/v1/<路径> 会 404。"""
         m = make_model(tmp_path)
         assert m.query_base == "https://api.example.com"
         assert not m.query_base.endswith("/v1")

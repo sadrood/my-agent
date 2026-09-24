@@ -17,7 +17,7 @@
 ```
 ┌─────────────┐     ┌──────────────┐     ┌──────────────┐
 │ 浏览器监听器 │────▶│ 智能回复引擎 │────▶│   大模型 API  │
-│ (Playwright) │     │              │     │  (OpenAI/DS) │
+│ (Playwright) │     │              │     │  (兼容协议)  │
 └─────────────┘     └──────┬───────┘     └──────────────┘
        │                   │
        ▼                   ▼
@@ -43,7 +43,7 @@ export XIANYU_LLM_API_KEY="your-api-key"
 python -m xianyu_smart_reply --demo
 
 # 或使用命令行参数
-python -m xianyu_smart_reply --demo --model gpt-4o-mini --api-key sk-xxx
+python -m xianyu_smart_reply --demo --model <通用小模型 id> --api-key sk-xxx
 ```
 
 ### 3. 监听模式（自动回复）
@@ -65,7 +65,7 @@ python -m xianyu_smart_reply --monitor
 |--------|------|--------|
 | `XIANYU_LLM_API_KEY` | 大模型 API Key | - |
 | `XIANYU_LLM_API_BASE` | 自定义 API 地址 | `https://api.openai.com/v1` |
-| `XIANYU_LLM_MODEL` | 模型名称 | `gpt-4o-mini` |
+| `XIANYU_LLM_MODEL` | 模型名称 | `<通用小模型 id>` |
 | `XIANYU_LLM_PROVIDER` | 模型提供商 | `openai` |
 | `XIANYU_BROWSER_USER_DIR` | Chrome 用户数据目录 | - |
 | `XIANYU_HEADLESS` | 无头模式 | `false` |
@@ -84,9 +84,9 @@ config.seller.business_hours = "9:00-22:00"
 
 ## 支持的模型
 
-- OpenAI: `gpt-4o-mini`, `gpt-4o`, `gpt-3.5-turbo`
-- DeepSeek: `deepseek-v3`, `deepseek-chat`
-- 任何兼容 OpenAI API 的模型
+- 任选一家兼容协议的供应商，填它文档里的模型 id
+- 任选一家兼容协议的供应商，填它文档里的模型 id
+- 任何兼容 chat/completions 协议的服务
 
 ## 注意事项
 

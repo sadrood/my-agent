@@ -229,7 +229,7 @@ class TestDistill:
 
 
 class TestEmptyResponseHandling:
-    """上游配额耗尽时除了 429 还会回**空正文**（实测商汤）：要重试一次，不是当"没经验"。"""
+    """上游配额耗尽时除了 429 还会回**空正文**：要重试一次，不是当"没经验"。"""
 
     class EmptyThenOk:
         def __init__(self, ok=_OK):

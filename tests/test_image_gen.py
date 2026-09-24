@@ -87,7 +87,7 @@ class TestImageGenModel:
         assert fake_post["payload"]["watermark"] is True
 
     def test_url_response_auto_downloaded(self, tmp_path, monkeypatch):
-        """URL 形式（如 Agnes）应**自动下载落盘**，而不是只回一个链接。
+        """URL 形式应**自动下载落盘**，而不是只回一个链接。
 
         旧行为是原样返回 URL，导致换到 url 型提供方后图片不在本地
         （与 b64 型提供方体验不一致）。
@@ -163,7 +163,7 @@ class TestImageGenModel:
 class TestOptionalFieldDowngrade:
     """提供方专有字段不认时自动剔除重试（换提供方不用改代码）。
 
-    实例：商汤认 `watermark`，Agnes 报 400
+    实例：默认供应商认 `watermark`，备用供应商报 400
     "watermark 不是文生图队列支持的字段"。
     """
 
