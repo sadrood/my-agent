@@ -887,3 +887,65 @@ class TestDynamicBudget:
                   for _ in range(10)]
         result = self._exec(script, monkeypatch, base=2, extend=0, stall=99, hard_cap=2)
         assert any(m in result["output"] for m in INCOMPLETE_MARKERS), result["output"][:200]
+    def test_infinite_mode_warns_on_stagnation(self, monkeypatch):
+        """无限模式下"每轮换新做法但失败"不会自动停，但会发可见的预警。"""
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "terminal",
+                                                 {"command": f"exit {i + 1}"})])
+            for i in range(6)
+        ] + [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall("ok", "python", {"code": "print('ok')"})]),
+            LLMToolResponse(content="虽然失败很多次，但坚持试完了。"),
+        ]
+        llm = FakeLLM(script)
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "loop_base_turns", 3)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_extend_per_progress", 10)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stall_limit", 99)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_hard_cap", 0)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stagnation_warn", 4)
+        events = []
+        result = ex.execute_goal_loop(**_loop_args(),
+                                      event_sink=lambda t, d: events.append((t, d)))
+        warnings = [d for t, d in events if t == "stagnation_warning"]
+        assert len(warnings) == 1, "达到阈值该发一次、且只发一次"
+        assert warnings[0]["stagnation_turns"] == 4
+        assert result["success"] is True, "无限模式不因预警停——模型继续到给出答案"
+        assert result["ops"] == 8, "6 败 + 1 成功收尾 + 1 final，一路跑完没被预警打断"
+
+    def test_stagnation_warning_ignored_when_disabled(self, monkeypatch):
+        """阈值 0 = 关闭预警：行为回到纯动态预算，不多副作用。"""
+        script = [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall(str(i), "terminal",
+                                                 {"command": f"exit {i + 1}"})])
+            for i in range(5)
+        ] + [
+            LLMToolResponse(content="",
+                            tool_calls=[ToolCall("ok", "python", {"code": "print('ok')"})]),
+            LLMToolResponse(content="收工。"),
+        ]
+        llm = FakeLLM(script)
+        ex = _make_executor(
+            llm,
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                    interactive=False),
+        )
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "loop_base_turns", 3)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_extend_per_progress", 10)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stall_limit", 99)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_hard_cap", 0)
+        monkeypatch.setitem(TOOL_CONFIG, "loop_stagnation_warn", 0)
+        events = []
+        result = ex.execute_goal_loop(**_loop_args(),
+                                      event_sink=lambda t, d: events.append((t, d)))
+        assert not [t for t, _ in events if t == "stagnation_warning"]
+        assert result["success"] is True
