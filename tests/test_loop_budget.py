@@ -181,3 +181,72 @@ class TestFromConfig:
     def test_explicit_unlimited_hard_cap(self):
         b = LoopBudget.from_config(120, config={"loop_hard_cap": 0})
         assert b.hard_cap == 0
+class TestStagnationWarning:
+    """连续无进展（包括"换了新做法但失败"）的可见性预警。
+
+    背景：无限模式（hard_cap=0）下，只有"原样重复 / 空回复"能触发 stalled 停止；
+    "换了新做法但失败"的轮次（productive=False 且 spinning=False）永远到不了上限，
+    会无限跑下去。stagnation 计数器让这件事可见——达到阈值响一次，不自动停。
+    """
+
+    def test_new_approaches_that_fail_accumulate_stagnation(self):
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
+                       stagnation_limit=3)
+        # 每轮换新做法但失败：不打转（spinning=False）、不续期（productive=False）
+        for _ in range(2):
+            b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+        assert b.stagnation_turns == 2
+        assert b.spinning_turns == 0, "新做法失败不是打转"
+        assert b.stagnation_alarm() is False, "还没到阈值"
+
+    def test_alarm_fires_exactly_once_at_threshold(self):
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
+                       stagnation_limit=3)
+        alarms = []
+        for _ in range(6):
+            b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+            alarms.append(b.stagnation_alarm())
+        assert alarms == [False, False, True, False, False, False], \
+            "只在达到阈值的那个轮次响一次，不刷屏"
+
+    def test_progress_resets_stagnation_counter(self):
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
+                       stagnation_limit=3)
+        b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+        b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+        b.observe(TurnOutcome(succeeded=1))          # 谷歌一次成功 → 清零
+        assert b.stagnation_turns == 0
+        assert b.stagnation_alarm() is False
+
+    def test_spinning_also_counts_as_stagnation(self):
+        """打转当然也是"无进展"，两者同时累计。"""
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
+                       stagnation_limit=2)
+        b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=True))
+        assert b.stagnation_turns == 1 and b.spinning_turns == 1
+        b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=True))
+        assert b.stagnation_alarm() is True
+
+    def test_disabled_by_default_threshold_zero(self):
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0)
+        for _ in range(20):
+            b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+        assert b.stagnation_alarm() is False, "阈值 0 = 关闭"
+
+    def test_from_config_reads_stagnation_knob(self):
+        b = LoopBudget.from_config(80, config={
+            "loop_hard_cap": 0, "loop_stagnation_warn": 7})
+        assert b.stagnation_limit == 7
+        assert b.hard_cap == 0, "显式 0=无限仍生效"
+
+    def test_infinite_mode_painful_case_now_visible_via_summary(self):
+        """病态场景复现：5000 轮换新做法失败在无限模式下永不停止，但摘要可见。"""
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
+                       stagnation_limit=10)
+        for _ in range(5000):
+            if not b.allow_next():
+                break
+            b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
+        assert b.stop_reason == ""          # 仍不自动停（尊重"做完再结束"）
+        assert b.stagnation_turns == 5000   # 但"卡了多久"是可见的
+        assert b.spinning_turns == 0
