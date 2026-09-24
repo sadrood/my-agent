@@ -1,28 +1,12 @@
 """静态守卫：async 路由里不许直接调用同步阻塞函数。
 
-背景（2026-09-23 审计）：`dashboard/server.py` 里多个 `async def` 路由直接做同步
-阻塞调用 —— `subprocess.run(git …)`（最长 15s）、`fut.result(timeout=60)`、
-真实 LLM / 视觉模型调用（**原本没有任何超时**）、递归遍历整个工作区。
+uvicorn 是单事件循环，一处同步阻塞会把 `/ws` 推送与 `/api/stop`、`/api/approve`
+一起排住 —— 前端表现为"任务卡住、点停止没反应"。修法是挪进 `asyncio.to_thread`；
+本测试按 AST 找 async 函数里的已知阻塞调用，豁免两种写法：`to_thread(fn, ...)` 里
+直接包的，以及 `to_thread(_nested_def)`（调用在嵌套函数体里）。
 
-后果不是"慢一点"：uvicorn 是单事件循环，一次阻塞会把 **`/ws` 的事件推送**和
-**`/api/stop`、`/api/approve`** 一起排住 —— 前端表现为"任务卡住、点停止没反应"。
-
-修法是把它们挪进 `asyncio.to_thread(...)`。这条测试把"以后新加的路由别再犯"
-钉住：它按 AST 找 async 函数里的已知阻塞调用，豁免两种写法 ——
-  · `await asyncio.to_thread(fn, ...)` 里直接包的；
-  · `await asyncio.to_thread(_nested_def)`，阻塞调用在那个嵌套函数体里的。
-
-匹配分两类，**都按"限定名"判定而不是只看尾名**（否则误报会把守卫变成噪声，
-最后没人看）：
-  · 尾名类（`BLOCKING`）：`run` / `chat` / `analyze` 这些尾名本身就说明问题；
-  · 限定类：裸 `open()`、`os.makedirs` 等（`BLOCKING_OS`，接收者必须是 `os`）、
-    `p.read_text()` 等 pathlib 读写（`BLOCKING_PATHLIB`）、
-    `json.load` / `_json.dump`（`BLOCKING_JSON`，接收者以 `json` 结尾，认别名）。
-
-**故意豁免**（写在这里，免得以后有人问"为什么它没报"）：
-  · `os.path.exists/isfile/isdir` 之类的单次 stat —— 一次元数据系统调用，
-    量级是微秒，挪线程的调度开销比它本身还大；
-  · `img.save(BytesIO)`（api_config_test_vision）—— 写到内存缓冲，不碰磁盘。
+匹配按**限定名**而非只看尾名 —— 尾名匹配会把 `str.replace`、`img.save` 一起误报，
+守卫就没人看了。另外故意豁免单次 stat（`os.path.exists` 等，微秒级）与纯内存操作。
 """
 import ast
 import os
@@ -36,7 +20,7 @@ SERVER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 BLOCKING = {
     "run", "check_output", "call", "Popen",   # subprocess
     "result",                                  # concurrent Future
-    "chat", "create",                          # LLM / OpenAI 客户端
+    "chat", "create",                          # LLM / 上游客户端
     "analyze",                                 # 视觉模型
     "search_files", "search_sessions",         # 文件系统
     "_build_tree",                             # 递归遍历工作区
@@ -173,11 +157,7 @@ class TestNoSyncBlockingInAsyncRoutes:
 
 
 class TestFileIoBoundary:
-    """文件**内容** IO 也算阻塞；但只认限定形状，不误伤同名的纯内存方法。
-
-    这一组钉住的是"匹配精度"：放宽了守卫会变成噪声（`str.replace` 满屏误报），
-    收得太紧又会漏掉真的读写（`open` / `os.replace` / `json.load`）。
-    """
+    """文件内容 IO 也算阻塞，但只认限定形状 —— 匹配精度的边界测试。"""
 
     def _scan_src(self, body: str):
         return _scan(ast.parse("import asyncio, os, json as _json\n"

@@ -1,7 +1,7 @@
 """
 文生图工具（ImageGenTool）。
 
-调用商汤 SenseNova U1.5 Lite（sensenova-u1.5-lite）的 OpenAI 兼容
+调用默认供应商的生图模型（生图模型）的兼容协议
 /images/generations 端点生成图片，解码保存到本地目录，返回文件路径。
 
 依赖：models.image_gen.ImageGenModel。

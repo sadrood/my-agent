@@ -20,19 +20,19 @@ my-agent --mcp-server             # 以 MCP server 运行（供上游宿主平�
 
 ```cmd
 # 1. 命令行参数
-my-agent --model deepseek-v4-pro "任务"
+my-agent --model <主力模型 id> "任务"
 my-agent --model <名> --base-url <API地址> --api-key <key> "任务"
 my-agent --dangerously-skip-permissions "任务"   # = --approval never（主流 CLI 同名别名）
 my-agent -r                                     # 恢复最近一次对话（-r 风格）
 
 # 2. 会话内命令
 > /model                          # 查看当前模型
-> /model deepseek-v4-pro          # 切换模型（临时，并绑定到当前对话）
+> /model <主力模型 id>          # 切换模型（临时，并绑定到当前对话）
 > /model <名>@<API地址>            # 连地址一起换
 > /config                         # 查看当前生效配置（key 打码）
 
 # 3. 环境变量（支持 ANTHROPIC_* 同名变量）
-$env:ANTHROPIC_MODEL="deepseek-v4-pro"; my-agent     # 别名：MY_AGENT_MODEL / LLM_DEFAULT_MODEL
+$env:ANTHROPIC_MODEL="<主力模型 id>"; my-agent     # 别名：MY_AGENT_MODEL / LLM_DEFAULT_MODEL
 $env:ANTHROPIC_BASE_URL="https://..."; my-agent      # 别名：MY_AGENT_BASE_URL / LLM_BASE_URL
 $env:ANTHROPIC_API_KEY="sk-..."; my-agent            # 别名：MY_AGENT_API_KEY / LLM_API_KEY
 $env:MY_AGENT_MINIMAL="1"; my-agent                  # 极简模式（关掉 Guardian/追踪/快照/RepoMap 等非必要功能）
@@ -69,7 +69,7 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 | `/team <任务>` | 团队协作（可连写：`/team任务`） |
 | `/research <主题>` | 深度研究（可连写：`/research主题`） |
 | `/article <主题> [\| 要求]` | **文章工坊**：多模型互审写作（一家写、另一家审 + 事实核查 + 逐条修订 + 校对定稿） |
-| `/image <描述>` | 文生图（SenseNova U1.5 Lite，生成并保存到 `generated_images/`） |
+| `/image <描述>` | 文生图（默认供应商的生图模型，生成并保存到 `generated_images/`） |
 | `/memory` | 记忆总览（各层条数 + 完成/失败步骤）；`/memory prune 100` 清理长期记忆 |
 | `/consent` | **Guardian 放行台账**：被拦下待放行的调用 + 已生效的人工授权 |
 | `/help` | 查看全部可用命令 |
@@ -94,7 +94,7 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 
 ## 三·六、文生图 / 文生视频
 
-### 文生图（OpenAI 兼容 `/images/generations`）
+### 文生图（兼容协议 `/images/generations`）
 
 - 交互命令：`/image <图片描述>`，例如：
   ```
@@ -102,31 +102,31 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
   ```
 - Agent 任务中：直接让它"生成一张 XX 的图片"即可，会自动调用 `image_gen` 工具。
 - 生成结果保存到 `./generated_images/`（已在 .gitignore），返回本地文件路径。
-- **两种返回形式都会落盘**：提供方给 `b64_json`（商汤）→ 解码保存；
-  给 `url`（Agnes）→ **自动下载**后保存（下载失败则回退给出 URL）。
+- **两种返回形式都会落盘**：提供方给 `b64_json`（默认供应商）→ 解码保存；
+  给 `url`（备用供应商）→ **自动下载**后保存（下载失败则回退给出 URL）。
 - 配置（.env）：
   ```
   IMAGE_GEN_API_KEY=sk-...                 # 留空回退主 LLM key
-  IMAGE_GEN_BASE_URL=https://api.agnes-ai.cn/v1
-  IMAGE_GEN_MODEL=agnes-image-2.5-flash    # 或 agnes-image-2.1-flash
+  IMAGE_GEN_BASE_URL=https://<备用端点>/v1
+  IMAGE_GEN_MODEL=<备用生图模型 id>    # 或 <备用生图模型 id>
   IMAGE_GEN_SIZE=1024x1024                 # 1024x1024 / 768x1024 / 1280x720 ...
   IMAGE_GEN_SAVE_DIR=./generated_images
-  IMAGE_GEN_WATERMARK=false                # 商汤专有字段；不支持的提供方会自动跳过
+  IMAGE_GEN_WATERMARK=false                # 默认供应商专有字段；不支持的提供方会自动跳过
   ```
-- 实测可用的模型：`agnes-image-2.5-flash`、`agnes-image-2.1-flash`（Agnes，返回 url）、
-  `sensenova-u1.5-lite`、`sensenova-u1-fast`（商汤，返回 b64）。
-  注意 `agnes-image-2.0-flash` 已下线（503 无可用渠道）。
+- 实测可用的模型：`<备用生图模型 id>`、`<备用生图模型 id>`（备用供应商，返回 url）、
+  `<生图模型 id>`、`<生图加速模型 id>`（默认供应商，返回 b64）。
+  注意 `<旧备用生图模型 id>` 已下线（503 无可用渠道）。
 
-### 文生视频（OpenAI Videos 兼容，**异步任务**）
+### 文生视频（异步视频协议，**异步任务**）
 
 - Agent 任务中：让它"生成一段 XX 的视频"即会调用 `video_gen` 工具。
-- 两步式契约（实测 Agnes）：
+- 两步式契约（实测备用供应商）：
   ```
   创建: POST {BASE_URL}/videos
-        {"model": "agnes-video-2.5-flash", "prompt": "...", "seconds": "5",
+        {"model": "<视频模型 id>", "prompt": "...", "seconds": "5",
          "mode": "text", "size": "720P", "aspect_ratio": "16:9"}
         → {"video_id": "task_xxx", "status": "queued"}
-  查询: GET {HOST}/agnesapi?video_id=<ID>&model_name=<模型>
+  查询: GET {HOST}/备用供应商api?video_id=<ID>&model_name=<模型>
         ⚠️ 查询端点在 **HOST 根路径**（不在 /v1 下）
         → {"status": "queued|in_progress|completed|failed", "progress": 0-100,
            "url": "<mp4>" | null, "error": null}
@@ -143,9 +143,9 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 - 配置（.env）：
   ```
   VIDEO_GEN_API_KEY=sk-...                 # 留空回退主 LLM key
-  VIDEO_GEN_BASE_URL=https://api.agnes-ai.cn/v1
+  VIDEO_GEN_BASE_URL=https://<备用端点>/v1
   VIDEO_GEN_QUERY_BASE=                    # 留空由 BASE_URL 去掉 /v1 推导
-  VIDEO_GEN_MODEL=agnes-video-2.5-flash    # 或 agnes-video-2.5 / agnes-video-v2.0
+  VIDEO_GEN_MODEL=<视频模型 id>    # 或 <视频模型 id> / <旧视频模型 id>
   VIDEO_GEN_SECONDS=5
   VIDEO_GEN_SIZE=720P                      # Flash 仅支持 720P
   VIDEO_GEN_ASPECT_RATIO=16:9
@@ -167,29 +167,29 @@ tts(command="voices")            # 列出可用中文音色
   `yunjian`(男·沉稳解说) `yunyang`(男·新闻) `yunxia`(男·少年)
   `liaoning`(东北话) `shaanxi`(陕西话)；也可传完整名 `zh-CN-YunxiNeural`
 
-### 供应商 B：`openrouter`（可挂 fish-audio 等 TTS 模型）
+### 供应商 B：`openrouter`（可挂语音模型等 TTS 模型）
 
 ```
 tts(command="speak", text="有些告别，要重复七次。")
 tts(command="voices")            # 显示当前模型与克隆参考样本状态
 ```
-- 走 OpenRouter 的 `/api/v1/audio/speech`（OpenAI 兼容），按字符计费；
-  `:free` 变体 0 元（如 `fish-audio/s2.1-pro-free:free`，多语言、有表现力）。
-- **音色**：由模型决定；fish-audio 没有预设音色目录，不传 `voice` 即用内置默认音色。
-  ⚠️ 别把 edge 的音色别名填进 openrouter——上游会报 `Invalid voice`（代码会自动
+- 走第三方语音网关的 `/api/v1/audio/speech`（兼容协议），按字符计费；
+  `:free` 变体 0 元（如 `<语音模型 id>:free`，多语言、有表现力）。
+- **音色**：由模型决定；语音模型没有预设音色目录，不传 `voice` 即用内置默认音色。
+  ⚠️ 别把 edge 的音色别名填进第三方语音网关——上游会报 `Invalid voice`（代码会自动
   忽略并留痕，但显式配置更清楚，用 `TTS_OPENROUTER_VOICE`）。
-- **声音克隆**（模型支持时，如付费版 `fish-audio/s2.1-pro`）：在 `.env` 填
+- **声音克隆**（模型支持时，如付费版 `<语音模型 id>`）：在 `.env` 填
   `TTS_REFERENCE_AUDIO=<参考音频路径>` 与 `TTS_REFERENCE_TEXT=<该音频的文字稿>`，
   即可用参考音色合成。免费版实测也能受理克隆请求。
-- **兜底**：`TTS_FALLBACK_EDGE=true`（默认）时，OpenRouter 失败会自动回退
-  edge-tts，并在工具输出里标注「已降级」——免费档不保证可用性。
+- **兜底**：`TTS_FALLBACK_EDGE=true`（默认）时，第三方语音网关失败会自动回退
+  本地兜底 TTS，并在工具输出里标注「已降级」——免费档不保证可用性。
 
 ### 配置
 
 ```
 # 通用
 TTS_ENABLED=true
-TTS_PROVIDER=edge               # edge | openrouter
+TTS_PROVIDER=edge               # edge | 第三方语音网关
 TTS_SAVE_DIR=./generated_audio
 
 # TTS_PROVIDER=edge 时
@@ -198,19 +198,19 @@ TTS_RATE=+0%
 
 # TTS_PROVIDER=openrouter 时
 TTS_OPENROUTER_API_KEY=         # 留空则读 OPENROUTER_API_KEY
-TTS_MODEL=fish-audio/s2.1-pro-free:free
+TTS_MODEL=<语音模型 id>:free
 TTS_RESPONSE_FORMAT=mp3         # mp3（默认）/ pcm
 TTS_OPENROUTER_VOICE=           # 留空＝模型默认音色
-TTS_OPENROUTER_REFERER=         # 可选，OpenRouter 榜单归属
+TTS_OPENROUTER_REFERER=         # 可选，第三方语音网关榜单归属
 TTS_OPENROUTER_TITLE=my_agent
 TTS_REFERENCE_AUDIO=            # 声音克隆参考样本（可选）
 TTS_FALLBACK_EDGE=true
 ```
 - 产物落在 `./generated_audio/`（mp3/wav），返回路径与时长，供 `video_edit` 合成。
 
-## 三·八、外部短剧工厂 Toonflow（可选）
+## 三·八、外部短剧工厂短剧工厂服务（可选）
 
-[Toonflow](https://github.com/HBAI-Ltd/Toonflow-app) 是独立的开源 AI 短剧工具。
+短剧工厂服务是独立的开源 AI 短剧生产工具（见其项目主页）。
 它的 Electron 只是外壳，**后端是独立的 Express 服务**（默认 `127.0.0.1:10588`），
 169 个 `/api` 路由覆盖 `原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片` 全流程 ——
 所以 agent 可以完全不碰它的界面，直接用 `toonflow` 工具编排它。
@@ -240,10 +240,10 @@ toonflow(command="call", method="POST", path="/api/xxx", body={...})  # 直连�
   TOONFLOW_PASSWORD=admin123
   TOONFLOW_MAX_CHARS=6000        # 单次回给模型的 JSON 上限
   ```
-- ⚠️ **仅限本机**：Toonflow 默认账号 `admin/admin123`、密码明文比对、token 180 天有效。
+- ⚠️ **仅限本机**：短剧工厂服务默认账号 `admin/admin123`、密码明文比对、token 180 天有效。
   要暴露到局域网请先在它里面改密码。
 - ⚠️ **它要自己的模型供应商**（设置中心 → 模型服务），生成走它配置的厂商；
-  官方 Demo 做 2 分钟短剧约 ¥130（大头是视频）。可以把本项目的 Agnes/OpenRouter
+  官方 Demo 做 2 分钟短剧约 ¥130（大头是视频）。可以把本项目的备用供应商/第三方语音网关
   key 填进它的供应商配置。
 - 它的 API 无公开文档、路由是代码生成的，版本间字段可能变；**升级后先跑 `health`**。
 
@@ -289,7 +289,7 @@ toonflow(command="call", method="POST", path="/api/xxx", body={...})  # 直连�
 ## 三·十、文章工坊（写作 / 审阅 / 校对）
 
 **为什么要两个模型**：同一个模型审自己写的稿子，知识边界、行文偏好、盲点完全重合，
-"互审"会退化成自我复述（同厂不同名的模型也基本重合）。所以默认**商汤写、Agnes 审**。
+"互审"会退化成自我复述（同厂不同名的模型也基本重合）。所以默认**默认供应商写、备用供应商审**。
 
 ### 在对话里直接用（agent 会自己判断）
 
@@ -321,9 +321,9 @@ article models                                   # 看各阶段用了哪个模�
 - `proofread`：`proofread.md`+`json` / `final.md`（修正稿）
 
 ```cmd
-ARTICLE_MODEL_DRAFT=main            # main=主模型（LLM_*）；agnes=Agnes；也可写 agnes:模型名
-ARTICLE_MODEL_REVIEW=agnes          # 审阅：默认另一家
-ARTICLE_MODEL_PROOFREAD=agnes       # 校对：默认另一家
+ARTICLE_MODEL_DRAFT=main            # main=主模型（LLM_*）；备用供应商=备用供应商；也可写备用供应商:模型名
+ARTICLE_MODEL_REVIEW=备用供应商          # 审阅：默认另一家
+ARTICLE_MODEL_PROOFREAD=备用供应商       # 校对：默认另一家
 ARTICLE_MAX_REVISE_ROUNDS=2         # 审阅→修订最多几轮（到顶带着剩余意见定稿）
 ARTICLE_FACTCHECK=true              # 只核查审阅方点名的可疑说法
 ARTICLE_LOOKUP_SOURCES=zhihu,browser # 核查检索通道（zhihu 需配 ZHIHU_ACCESS_SECRET）
@@ -408,13 +408,13 @@ OCR_PREFER_FOR_TEXT=true         # 要文字时直接用 OCR，不先问视觉�
 都接了**跨提供方备用链**——主模型失败就按顺序换备用的，全失败才报错（错误里列出每次
 尝试的原因）。
 
-**本机实测（商汤 token.sensenova.cn，用现有 key）**：
+**本机实测（默认供应商 <默认端点>，用现有 key）**：
 
 | 用途 | 可用的模型 | 备注 |
 |---|---|---|
-| 视觉（能读图） | `deepseek-flash`（= DeepSeek V4.1 Flash）、`sensenova-6.8-flash-lite`、`agnes-3.0-flash` | 用答案已知的图实测：单图 3/3、多图（视频抽帧时序）4/4。**注意 `deepseek-flash` 的 `input_modalities` 只写 `["text"]`，实测却完全能读图**——元数据不可尽信，判断能不能读图要拿图打一次（见 三·十四）；`agnes-3.0-flash` 也能读图（2.0s/18.7s），但延迟波动大、认字精度略逊（把 7391 读成 7301），适合当**跨厂商备用**；`gpt-5.6-terra` 也能读图但中文 OCR 会幻觉（"橙子七号"→"魔法导览"）；`sensenova-6.7-flash-lite` 对多模态返回 404 |
-| 生图 | `sensenova-u1.5-lite`、`sensenova-u1.5-fast`、`sensenova-u1-fast` | `/images/generations` 均可用，返回 b64_json |
-| 纯文本 | `deepseek-v4-pro`、`glm-5.2`、`kimi-k3` 等 | 见下方"列出可用模型" |
+| 视觉（能读图） | `<默认模型 id>`（= 默认模型）、`<视觉模型 id>`、`<备用文本模型 id>` | 用答案已知的图实测：单图 3/3、多图（视频抽帧时序）4/4。**注意 `<默认模型 id>` 的 `input_modalities` 只写 `["text"]`，实测却完全能读图**——元数据不可尽信，判断能不能读图要拿图打一次（见三·十四）；`<备用文本模型 id>` 也能读图（2.0s/18.7s），但延迟波动大、认字精度略逊（把 7391 读成 7301），适合当**跨厂商备用**；`gpt-5.6-terra` 也能读图但中文 OCR 会幻觉（"橙子七号"→"魔法导览"）；`<旧视觉模型 id>` 对多模态返回 404 |
+| 生图 | `<生图模型 id>`、`<生图加速模型 id>`、`<生图加速模型 id>` | `/images/generations` 均可用，返回 b64_json |
+| 纯文本 | `<主力模型 id>`、`<模型 id>`、`<模型 id>` 等 | 见下方"列出可用模型" |
 
 ```cmd
 # 列出这把 key 能用的全部模型（权威，直接问端点）
@@ -422,15 +422,15 @@ python -c "import json,urllib.request;from config import LLM_CONFIG as c;req=url
 ```
 
 ```cmd
-# ---- 视觉备用（主 = VISION_MODEL/主视觉端点，备用默认指向商汤）
-VISION_FALLBACK_MODELS=sensenova-6.8-flash-lite
-VISION_FALLBACK_BASE_URL=https://token.sensenova.cn/v1
-VISION_FALLBACK_API_KEY=            # 留空 = 用主 LLM(商汤) 的 key；别填别家的 key
+# ---- 视觉备用（主 = VISION_MODEL/主视觉端点，备用默认指向默认供应商）
+VISION_FALLBACK_MODELS=<视觉模型 id>
+VISION_FALLBACK_BASE_URL=https://<默认端点>/v1
+VISION_FALLBACK_API_KEY=            # 留空 = 用主 LLM(默认供应商) 的 key；别填别家的 key
 VISION_FALLBACK_TIMEOUT=60
 
-# ---- 生图备用（默认：Agnes 主 → 商汤备）
-IMAGE_GEN_FALLBACK_MODELS=sensenova-u1.5-lite
-IMAGE_GEN_FALLBACK_BASE_URL=https://token.sensenova.cn/v1
+# ---- 生图备用（默认：备用供应商主 → 默认供应商备）
+IMAGE_GEN_FALLBACK_MODELS=<生图模型 id>
+IMAGE_GEN_FALLBACK_BASE_URL=https://<默认端点>/v1
 IMAGE_GEN_FALLBACK_TIMEOUT=180
 ```
 
@@ -452,21 +452,21 @@ agent 每天真正依赖这几件事，缺一个就残废——用 `tools/local/
 4. JSON 输出、指令遵循（用答案可验证的小题）；
 5. 延迟与限流：**限流不算能力问题**，但它决定这东西能不能当主模型。
 
-2026-09-23 实测（同一个 `deepseek-flash` = DeepSeek V4.1 Flash，两个端点）：
+2026-09-23 实测（同一个 `<默认模型 id>` = 默认模型，两个端点）：
 
 | 端点 | 能力 | 延迟 | 限流 |
 |---|---|---|---|
-| 商汤 token.sensenova.cn（官方 token plan，定价 0） | 7/7（工具 + 流式 + reasoning 回传 + JSON + 逻辑题） | 能答时 2-7s | **免费档限流硬**：6 项检查里 3 项撞 429，退避 32-110s |
+| 默认供应商 <默认端点>（官方 token plan，定价 0） | 7/7（工具 + 流式 + reasoning 回传 + JSON + 逻辑题） | 能答时 2-7s | **免费档限流硬**：6 项检查里 3 项撞 429，退避 32-110s |
 | 内网网关 | 7/7（同一套检查） | 中位 0.7s、最慢 1.6s | 无（12/12 成功），不计费 |
 
 结论：**同一个模型换个端点，可用性天差地别**——但选哪个是"官方托管/任何网络可达"
-与"快而不限流/依赖那条内网"之间的取舍。本机 `.env` 用**官方端点**（`deepseek-flash`），
+与"快而不限流/依赖那条内网"之间的取舍。本机 `.env` 用**官方端点**（`<默认模型 id>`），
 内网网关整段注释在它下面，撞限流时切过去即可；两个端点的实测数字都写在注释里。
 
 ```cmd
 # 换模型/换端点后先压一遍（思考模型的推理也占 --max-tokens，别调太小）
-python tools/local/llm_bench.py deepseek-flash                                      # 当前端点
-python tools/local/llm_bench.py deepseek-flash --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
+python tools/local/llm_bench.py 默认模型                                      # 当前端点
+python tools/local/llm_bench.py 默认模型 --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
 ```
 
 ## 三·十四、看图 / 看视频（`see` 工具）
@@ -485,10 +485,10 @@ see path="D:/clips/demo.mp4"         # 本地视频
      （实测：主模型超时 0.05s → 备用顶上并在输出里注明"本次由备用模型 X 应答"）；
   2. 备用链**每个条目可以自带端点**（`模型@预设名`，预设见
      `VISION_FALLBACK_ENDPOINT_<名字>_BASE_URL / _API_KEY`）——所以能配成
-     "商汤主 → 商汤备用 → 跨厂商 Agnes"：同端点那级兜"某个模型坏了"，跨端点那级才兜得住
+     "默认供应商主 → 默认供应商备用 → 跨厂商备用供应商"：同端点那级兜"某个模型坏了"，跨端点那级才兜得住
      "整个端点限流/变慢"（实测主备同端点时两条一起 `Request timed out`，等于没有备用）；
-     真机验证过两级都会顶上：主模型写错 → 商汤 `sensenova-6.8-flash-lite` 3.5s 答对；
-     商汤两级都写错 → Agnes 5.5s 答对；
+     真机验证过两级都会顶上：主模型写错 → 默认供应商 `<视觉模型 id>` 3.5s 答对；
+     默认供应商两级都写错 → 备用供应商 5.5s 答对；
   3. 模型链全挂 → **本地 OCR** 兜底（`see` 的截图/图片路径、`computer screenshot`、
      `ocr` 工具），至少把文字读出来，但给不了版面/元素坐标/画面理解。
   - ⚠️ **超时预算要压在调用方预算内**：`browser visionclick` 只有 60s，所以
@@ -496,7 +496,7 @@ see path="D:/clips/demo.mp4"         # 本地视频
     429 会立刻失败、不吃满预算，所以这个和不建议再放大。
   - 预设名写错**不会报错**（视觉必须 fail-open），而是静默回落到共享端点；
     `my-agent --doctor` 的「子系统模型对账」会把这种条目当配置错误报出来。
-- **视频**：上游**没有任何模型声明 video 输入模态**（商汤 `GET /models` 只有 `text`
+- **视频**：上游**没有任何模型声明 video 输入模态**（默认供应商 `GET /models` 只有 `text`
   与 `text,image`），所以视频是**等间隔抽帧 → 多图一次请求**：帧必须放在同一个请求里，
   模型才能比较帧间变化（分多次问只能拿到各帧的孤立描述）。抽出的临时帧用完即删。
   - 帧数默认 6、上限 16：越长/变化越快的片子要越多帧，也越费 token；
@@ -506,7 +506,7 @@ see path="D:/clips/demo.mp4"         # 本地视频
 ```cmd
 # 换视觉模型/换端点后，先确认它到底能不能读图（`input_modalities` 会骗人，实测才算）
 python tools/local/vision_probe.py                    # 测 .env 里的主/备视觉模型
-python tools/local/vision_probe.py deepseek-flash --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
+python tools/local/vision_probe.py 默认模型 --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
 ```
 
 ## 三·十五、任务监管者（做完再交付，别每章来问一次）
@@ -536,7 +536,7 @@ python tools/local/vision_probe.py deepseek-flash --base-url http://<内网网�
 ```cmd
 SUPERVISOR_ENABLED=true          # 总开关
 SUPERVISOR_MAX_ROUNDS=3          # 最多推回去几次（有界，不会无限拉锯）
-SUPERVISOR_MODEL=agnes-3.0-flash # 监管者模型（默认另一家，避免同源自评）
+SUPERVISOR_MODEL=<备用文本模型 id> # 监管者模型（默认另一家，避免同源自评）
 SUPERVISOR_FAIL_OPEN=true        # 监管者挂了就放行——坏掉的裁判不能把任务卡死
 SUPERVISOR_MIN_TURNS=1           # 轮次门槛
 SUPERVISOR_MIN_GOAL_CHARS=12     # 目标短于这个字数视为闲聊，不审
@@ -597,7 +597,7 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| LLM_DEFAULT_MODEL | — | 主模型（当前 `deepseek-flash` = DeepSeek V4.1 Flash，走商汤官方端点；免费档有限流，见 三·十三） |
+| LLM_DEFAULT_MODEL | — | 主模型（当前 `<默认模型 id>` = 默认模型，走默认供应商官方端点；免费档有限流，见三·十三） |
 | LLM_BASE_URL / LLM_API_KEY | — | 主模型端点 |
 | LLM_TIMEOUT | 300 | 请求超时秒数（防挂死） |
 | LLM_MAX_RETRIES | 2 | 限流自动重试次数 |
@@ -605,7 +605,7 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 | SANDBOX_MODE | workspace-write | 沙箱等级 |
 | VISION_MODEL / VISION_API_KEY / VISION_BASE_URL | 回退主 LLM | 视觉模型（可走独立端点） |
 | GUARDIAN_ENABLED | true | Guardian 审校开关 |
-| GUARDIAN_MODEL | 主模型 | 审校模型（当前 `agnes-3.0-flash`，跨厂商） |
+| GUARDIAN_MODEL | 主模型 | 审校模型（当前 `<备用文本模型 id>`，跨厂商） |
 | ROLLOUT_ENABLED / ROLLOUT_DIR | true / ./rollouts | 事件追踪（JSONL 日志） |
 | SESSION_DIR / SESSION_MAX | ./memory/sessions / 50 | 对话存储 |
 | SNAPSHOT_ENABLED | true | 运行前 git 快照安全网 |

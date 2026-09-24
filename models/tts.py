@@ -4,12 +4,12 @@
 用途：漫剧/短视频配音——把每镜台词合成音频，再与画面合成完整视频。
 
 供应商（config.TTS_CONFIG["provider"]）：
-- ``edge``       微软 Edge 在线语音（edge-tts）：免费、免 key、中文多音色。
-- ``openrouter`` OpenRouter 的 ``/api/v1/audio/speech``（OpenAI 兼容端点），
-  可挂 fish-audio 等 TTS 模型。按字符计费，``:free`` 变体 0 元。
+- ``edge``       在线免费语音：免 key、中文多音色，作为兜底。
+- ``openrouter`` OpenRouter 的 ``/api/v1/audio/speech``（兼容协议端点），
+  可挂克隆音色模型等 TTS 模型。按字符计费，``:free`` 变体 0 元。
   支持**声音克隆**（input_references）的模型可传参考音频。
 
-工具层是同步调用，这里的异步（edge-tts）包成同步。
+工具层是同步调用，这里的异步（本地兜底 TTS）包成同步。
 """
 import base64
 import mimetypes
@@ -18,7 +18,7 @@ from datetime import datetime
 
 from config import TTS_CONFIG, resolve_under_root
 
-# 中文常用音色（edge-tts 命名：zh-CN-<名字>Neural）
+# 中文常用音色（命名：zh-CN-<名字>Neural）
 ZH_VOICES = {
     "xiaoxiao": "zh-CN-XiaoxiaoNeural",   # 女声·温柔（默认）
     "xiaoyi": "zh-CN-XiaoyiNeural",       # 女声·活泼
@@ -57,7 +57,7 @@ def _run_async(coro):
 
 
 def resolve_voice(name: str) -> str:
-    """把简短别名（yunxi）或完整名（zh-CN-YunxiNeural）解析成 edge-tts 音色名。"""
+    """把简短别名（yunxi）或完整名（zh-CN-YunxiNeural）解析成标准音色名。"""
     if not name:
         return ZH_VOICES["xiaoxiao"]
     key = str(name).strip().lower()
@@ -106,7 +106,7 @@ class TTSModel:
                 + " / ".join(SUPPORTED_PROVIDERS))
         # edge 需要把别名解析成完整音色名；openrouter 的音色由模型决定。
         # 关键：openrouter 不能用 TTS_VOICE——那是 edge 的音色别名，
-        # 直接透传会被上游拒绝（实测 fish-audio 报 "Invalid voice 'xiaoxiao'"）。
+        # 直接透传会被上游拒绝（上游报 "Invalid voice 'xiaoxiao'"）。
         if self.provider == "edge":
             raw_voice = voice or cfg.get("voice")
             self.voice = resolve_voice(raw_voice)
@@ -179,7 +179,7 @@ class TTSModel:
             except Exception as e:
                 if not self.fallback_edge:
                     raise
-                # 免费档"不保证生产可用性"，失败时兜底到 edge-tts，
+                # 在线免费档"不保证生产可用性"，失败时兜底到本地 TTS，
                 # 但按角色走对应兜底音色，避免整片降级成同一个默认女声；
                 # 降级事实如实回传，不静默掩盖。
                 fv, fr = self._role_fallback_voice(voice)
@@ -192,7 +192,7 @@ class TTSModel:
                                 output=output)
 
     # ------------------------------------------------------------
-    # edge-tts
+    # 本地兜底 TTS
     # ------------------------------------------------------------
 
     def _synth_edge(self, text: str, voice=None, rate=None, volume=None,
@@ -260,10 +260,10 @@ class TTSModel:
                 refs.append({"type": "text", "text": ref_text})
             payload["input_references"] = refs
             # 有克隆参考时音色由样本决定：角色名只是库里的索引，不当作
-            # voice 透传（fish-audio 对未知 voice 名可能报 Invalid voice）
+            # voice 透传（部分上游对未知 voice 名会报 Invalid voice）
             payload["_role_ref"] = ref_audio
             return payload
-        # 音色：只有显式指定才带。fish-audio 这类模型没有预设音色目录，
+        # 音色：只有显式指定才带。克隆类模型没有预设音色目录，
         # 文档要求"仅在提供方有默认音色时才可省略 voice"——它的默认音色即内置。
         v = voice if voice is not None else self.voice
         if v:

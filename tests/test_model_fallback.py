@@ -2,10 +2,10 @@
 """备用模型链测试：主模型/主端点挂了就换备用的（用户要求"超时就换这些"）。
 
 实测背景（本机真机验证）：
-- 视觉：商汤 `sensenova-6.8-flash-lite` 能读图（答对图里的暗号）；
+- 视觉：默认视觉模型能读图（答对图里的暗号）；
   同端点上 `sensenova-6.7-flash-lite` 对多模态路由 404、`u1.x` 是生图模型（chat 404）。
-- 生图：商汤 `sensenova-u1.5-lite` / `u1-fast` / `u1.5-fast` 都能出图（b64_json）。
-所以默认备用就是"另一家"：Agnes 主 → 商汤备。
+- 生图：默认供应商的几个生图模型都能出图（b64_json）。
+所以默认备用就是"另一家"：备用供应商主 → 默认供应商备。
 """
 import pytest
 
@@ -30,7 +30,7 @@ class _FakeCompletions:
 
 
 class _FakeClient:
-    """假 OpenAI 客户端（按 base_url 区分主/备）。"""
+    """假 LLM 客户端（按 base_url 区分主/备）。"""
 
     def __init__(self, base_url, fail=False):
         self.base_url = base_url
@@ -121,11 +121,9 @@ class TestVisionFallback:
 
 
 class TestVisionFallbackChain:
-    """备用链支持"每个条目自带端点"（`模型@预设名`）——跨厂商兜底必需。
+    """备用链支持"每个条目自带端点"（`模型@预设名`），跨厂商兜底必需。
 
-    背景：`VISION_FALLBACK_API_KEY` 只有一份，而"商汤主 + Agnes 备"需要两套 key；
-    把 key 写进模型列表又会被 `/config`、doctor 打印出来（等于写进日志）。所以 key
-    放 `VISION_FALLBACK_ENDPOINT_<预设>_API_KEY`，列表里只写 `模型@预设名`。
+    预设的 key 放在独立变量里，不进模型列表——那份列表会被 `/config`、doctor 打印。
     """
 
     def _cfg(self, monkeypatch, models, presets=None, **over):

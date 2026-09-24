@@ -97,13 +97,13 @@ AGENTS_USER_FILE=~/.my_agent/AGENTS.md
 function calling 主循环（FakeLLM）、旧协议回退、Rollout 压缩、AGENTS.md 加载、
 会话、MCP server、LLM 自动重试、单循环模式（executor 层 + Agent 层）。
 
-## 八、接入 OpenRouter stealth/ox-alpha（2026-08）
+## 八、接入第三方语音网关 stealth/<推理模型>（2026-08）
 
-默认模型已切换为 OpenRouter 的 OpenAI stealth 推理模型：
+默认模型已切换为第三方网关的推理模型：
 
 ```bash
 LLM_API_KEY=sk-or-v1-xxxx
-LLM_BASE_URL=https://openrouter.ai/api/v1      # 注意不是模型页面地址
+LLM_BASE_URL=https://<第三方网关>/v1      # 注意不是模型页面地址
 LLM_DEFAULT_MODEL=stealth/ox-alpha
 LLM_DEFAULT_MAX_OUTPUT_TOKENS=8192
 LLM_MAX_RETRIES=2                              # 限流自动重试
@@ -114,20 +114,20 @@ LLM_MAX_RETRIES=2                              # 限流自动重试
 - temperature 参数可用；JSON 输出模式可用；**图片输入可用**（1×1 PNG 识别为"红"）
 - 上游限流（429）频繁 → `models/llm.py` 新增指数退避自动重试（429/5xx/网络错误）
 
-模型端点分离（新增）：视觉与 Guardian 支持独立端点，主模型用 OpenRouter、
-辅助模型用商汤 SenseNova 等快模型：
+模型端点分离（新增）：视觉与 Guardian 支持独立端点，主模型用第三方语音网关、
+辅助模型用默认供应商等快模型：
 
 ```bash
 # 视觉模型（独立端点，留空回退主 LLM）
-VISION_API_KEY=          VISION_BASE_URL=          VISION_MODEL=stealth/ox-alpha
-# Guardian 审校（建议快模型；当前 ox-alpha 慢推理默认关闭 GUARDIAN_ENABLED=false）
+VISION_API_KEY=          VISION_BASE_URL=          VISION_MODEL=stealth/<推理模型>
+# Guardian 审校（建议快模型；当前 <推理模型> 慢推理默认关闭 GUARDIAN_ENABLED=false）
 GUARDIAN_API_KEY=        GUARDIAN_BASE_URL=        GUARDIAN_MODEL=
 ```
 
 注意：
-- 该 OpenRouter key 无付费额度（402 Insufficient credits），付费模型（如
-  openai/gpt-4o-mini）不可用；stealth/ox-alpha 免费可用。
-- ox-alpha 是推理模型，单个步骤可能耗时较长（数十秒），
+- 该第三方语音网关 key 无付费额度（402 Insufficient credits），付费模型（如
+  openai/<通用小模型 id>）不可用；stealth/<推理模型> 免费可用。
+- <推理模型> 是推理模型，单个步骤可能耗时较长（数十秒），
   `ROLLOUT_COMPACT_TOKENS` 与 `GUARDIAN_TIMEOUT` 可按需调整。
 
 ## 九、v3.1：单循环执行模式（2026-08）
@@ -208,20 +208,20 @@ python main.py --max-ops 40      # 单循环整次任务最大操作轮数
 注意：`agent/agent.py` 在 2026-08-24 曾因 PowerShell 双编码损坏，已按会话记录
 完整重建（等价内容）；后续编辑文件请使用 UTF-8 安全的工具。
 
-## 十二、切换主模型到内网 deepseek-v4-pro（2026-08-24 晚）
+## 十二、切换主模型到内网 <主力模型 id>（2026-08-24 晚）
 
 用户提供的内网模型服务（`http://172.16.10.242:3000/v1`，需在该内网可达）实测：
 
 - `BAAI/bge-m3` 是**嵌入模型**，chat 端点直接 400——文档模板的占位模型，不能当对话用
-- 服务器上有 17 个模型，其中 **deepseek-v4-pro** 实测最可用：
+- 服务器上有 17 个模型，其中 **<主力模型 id>** 实测最可用：
   纯文本 1.6s、function calling 正常、流式 + include_usage 完整、max_tokens 8192 OK；
-  **deepseek-v4-flash** 更快（约 1s），适合 Guardian 审校；
-  glm-5.2 / qwen3.7-max 欠费（429/Arrearage）、kimi-k2.7-code 502
-- 不支持图片输入 → 视觉模型保留 OpenRouter 的 ox-alpha（独立端点）
-- 配置：主模型 **deepseek-v4-flash**（约 1s 响应；此前为 pro，按用户要求
-  统一用 flash）、GUARDIAN 同用 flash；OpenRouter 配置保留在 `.env` 注释中可切回
+  **默认供应商-v4-flash** 更快（约 1s），适合 Guardian 审校；
+  <模型 id> / qwen3.7-max 欠费（429/Arrearage）、kimi-k2.7-code 502
+- 不支持图片输入 → 视觉模型保留第三方语音网关的 <推理模型>（独立端点）
+- 配置：主模型 **默认供应商-v4-flash**（约 1s 响应；此前为 pro，按用户要求
+  统一用 flash）、GUARDIAN 同用 flash；第三方语音网关配置保留在 `.env` 注释中可切回
 
-**踩坑修复（思考模式 reasoning 回传）**：deepseek 思考模式要求每轮响应里的
+**踩坑修复（思考模式 reasoning 回传）**：默认供应商思考模式要求每轮响应里的
 `reasoning_content` 在下一轮请求中原样回传，否则 400
 "The reasoning_content in the thinking mode must be passed back to the API"。
 修复：`LLMToolResponse` 新增 `reasoning`/`reasoning_field` 字段，流式与非流式
@@ -230,5 +230,5 @@ python main.py --max-ops 40      # 单循环整次任务最大操作轮数
 "不支持 function calling"而触发计划模式回退——顺带说明 `_looks_like_unsupported`
 对 `invalid_request_error` 的匹配过于宽松，仍待收紧。
 
-效果对比（同一个 7×8 任务）：ox-alpha 27-120s → deepseek-v4-pro **LLM 4.8s ·
+效果对比（同一个 7×8 任务）：<推理模型> 27-120s → <主力模型 id> **LLM 4.8s ·
 首 token 0.08s · 29 tok/s**，且不再有 429/空回复/流中断。

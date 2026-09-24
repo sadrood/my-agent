@@ -1,9 +1,7 @@
-"""运行环境提示按平台分叉。
+"""运行环境提示按平台分叉：Linux 上不能出现 Windows 专有命令。
 
-背景（2026-09-24 审计）：这份提示词原先只有 Windows cmd 一份，而
-`agent/agent.py` 在 Linux 上会把 `shell=sh` 填进去 —— 结果提示词整段在教模型用
-`findstr`/`dir`/`type`/`Get-Content`，**主动把模型引向 Linux 上不存在的命令**。
-修法：平台无关的部分抽成共享段，两平台各写差异，再由 `platform_notice()` 分派。
+原先只有 Windows cmd 一份，Linux 上填 `shell=sh` 后模型仍被告知用 findstr/dir，
+等于主动把模型引向不存在的命令。
 """
 from models.prompts import (PLATFORM_NOTICE_TEMPLATE, PLATFORM_NOTICE_WINDOWS,
                             platform_notice)

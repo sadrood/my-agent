@@ -1,6 +1,6 @@
 """
 视觉分析模块。
-调用多模态 LLM（GPT-4V / Qwen-VL 等）分析截图：
+调用多模态 LLM（通用视觉模型 / 其它视觉模型等）分析截图：
 - 页面内容描述
 - 元素定位（返回坐标）
 - OCR 文字提取
@@ -16,20 +16,10 @@ from config import LLM_CONFIG, VISION_CONFIG
 
 
 def parse_fallback_entries(config: dict = None) -> list:
-    """把 `VISION_FALLBACK_MODELS` 解析成备用链条目（纯函数，便于单测与自检）。
+    """解析 VISION_FALLBACK_MODELS：`模型名` 用共享端点，`模型名@预设名` 用预设端点。
 
-    条目写法（逗号分隔，顺序即尝试顺序）：
-      `模型名`        → 用共享端点（VISION_FALLBACK_BASE_URL / _API_KEY）
-      `模型名@预设名`  → 用该预设自己的端点与 key
-                        （VISION_FALLBACK_ENDPOINT_<预设名>_BASE_URL / _API_KEY）
-
-    为什么要有预设写法：跨厂商备用（商汤主 + Agnes 备）需要**各自一套 key**，而
-    `VISION_FALLBACK_API_KEY` 只有一份；把 key 写进模型列表又会被 `/config` 之类
-    的地方打印出来（等于把密钥写进日志）。预设名大小写不敏感。
-
-    返回 [{model, base_url, api_key, timeout, preset, preset_known}, ...]。
-    预设名写错时**不抛错**（视觉必须 fail-open），而是回落到共享端点并把
-    preset_known 置 False —— `my-agent --doctor` 会把这种条目当配置错误报出来。
+    预设名未知时不抛错（视觉要 fail-open）：回落共享端点并置 preset_known=False，
+    由 `--doctor` 报出来。返回 [{model, base_url, api_key, timeout, preset, preset_known}]。
     """
     cfg = VISION_CONFIG if config is None else config
     presets = cfg.get("fallback_presets") or {}
@@ -66,8 +56,8 @@ class VisionModel:
     视觉分析模型。
     接收截图 + 问题，调用多模态 LLM 返回分析结果。
 
-    支持的模型：GPT-4o、GPT-4V、Qwen-VL-Max 等多模态视觉模型。
-    普通的 text-only 模型（如 gpt-4o-mini 无视觉能力）不可用于此模块。
+    支持的模型：通用模型、通用视觉模型、其它视觉模型等多模态视觉模型。
+    普通的 text-only 模型（如通用小模型无视觉能力）不可用于此模块。
     """
 
     # 可选择的视觉模型优先级列表
@@ -95,9 +85,9 @@ class VisionModel:
                 留空回退 VISION_* 环境变量，再回退主 LLM 配置。
         """
         # 视觉模型可走独立端点（VISION_API_KEY / VISION_BASE_URL），
-        # 留空时回退到主 LLM 端点（如主模型用 OpenRouter、视觉用商汤）
+        # 留空时回退到主 LLM 端点（主模型与视觉模型可用不同端点）
         #
-        # timeout/max_retries 必须显式给：OpenAI SDK 默认读超时 600s、自动重试
+        # timeout/max_retries 必须显式给：SDK 默认读超时 600s、自动重试
         # 2 次，一次挂死的视觉调用能拖到 ~1800s；而调用方预算只有 300s，
         # browser 的 visionclick 更是 60s。超时后执行器早已放弃，孤儿线程还在
         # 重试，白烧 3 次付费调用。重试交给上层（执行器/工具）统一管理。
@@ -165,7 +155,7 @@ class VisionModel:
         """单次调用 + 响应加固（空 choices / 空内容都转成可读错误）。"""
         kwargs = dict(model=model, messages=messages, max_tokens=max_tokens)
         if reasoning_effort:
-            # 网关把 reasoning_effort 作为顶层参数（OpenAI SDK 需 extra_body 透传）
+            # 网关把 reasoning_effort 作为顶层参数（SDK 需 extra_body 透传）
             kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
         try:
             response = client.chat.completions.create(**kwargs)
@@ -187,26 +177,18 @@ class VisionModel:
         return content
 
     def _auto_detect_model(self) -> str:
-        """`VISION_MODEL` 留空时自动选一个视觉模型。
+        """`VISION_MODEL` 留空时自动选一个**在本端点上确实存在**的视觉模型。
 
-        三条规则，按顺序：
-          1. 主模型**已知自带视觉**（命中 `RECOMMENDED_MODELS`）→ 就用主模型；
-          2. 端点是 OpenAI 官方 → 退回推荐表第一个（那里一定存在，保持旧行为）；
-          3. 其余（商汤/OpenRouter/内网网关等自建或第三方端点）→ **用主模型**。
-
-        规则 3 是 2026-09-24 审计修的坑：旧实现无论端点是哪家，都会挑推荐表第一个
-        （通常是 `gpt-4o`）—— 而第三方端点上那个模型**根本不存在**，于是每次视觉
-        调用都先失败一轮再靠备用链兜。而 `.env.example` 模板正是把 VISION_MODEL
-        留空的，等于所有新装用户都带着这个白费的一轮。主模型是用户为这个端点选定
-        的模型（实测商汤的 deepseek-flash 自带视觉），能用就直接用；读不了图也只是
-        回到备用链，不更差，且错误信息更准（"不支持图片"而不是"model not found"）。
+        主模型已知自带视觉就用它；官方端点退回推荐表（那些名字在那一定存在）；
+        其余第三方/自建端点也用主模型 —— 盲选通用模型在那些端点上根本不存在，
+        每次调用都白失败一轮。
         """
         current = LLM_CONFIG.get("default_model", "gpt-4o-mini")
         # 规则 1：主模型已知支持视觉
         for rec in self.RECOMMENDED_MODELS:
             if rec in current.lower():
                 return current
-        # 规则 2：OpenAI 官方端点 —— 推荐表里的名字在那里一定存在
+        # 规则 2：官方端点 —— 推荐表里的名字在那里一定存在
         base = str(LLM_CONFIG.get("base_url") or "").lower()
         if "openai.com" in base:
             return self.RECOMMENDED_MODELS[0]
@@ -291,24 +273,10 @@ class VisionModel:
     def analyze_video(self, video_path: str, question: str = "",
                       frames: int = 6, max_tokens: int = 1500,
                       detail: str = "auto") -> str:
-        """分析本地**视频文件**：等间隔抽帧 → 一次请求发出全部帧，按时间顺序理解。
+        """分析本地视频：等间隔抽帧后**一次请求发全部帧**（按时间顺序理解）。
 
-        为什么是抽帧：`GET /models` 显示商汤端点所有模型的 `input_modalities`
-        只有 `text` 与 `text,image`，**没有任何模型声明 video**（2026-09-23 实测），
-        所以视频没法直接喂给模型。帧必须**放在同一个请求**里 —— 分多次问
-        "第 N 帧是什么"只能拿到各帧的孤立描述，答不了"视频里发生了什么变化"。
-
-        Args:
-            video_path: 视频文件路径。
-            question: 要问的问题；留空走 VISION_VIDEO_ANALYSIS_QUESTION。
-            frames: 抽几帧（1-16）：越长/变化越快的片子要越多，也越费 token。
-            max_tokens / detail: 同 analyze()。
-
-        Returns:
-            模型的分析文本。
-
-        Raises:
-            RuntimeError: 视频不存在、缺 ffmpeg、或视觉调用全部失败。
+        上游没有模型支持 video 输入，只能抽帧。帧必须放在同一个请求里，分多次问
+        只能得到各帧的孤立描述。返回分析文本，抽出的临时帧成败都会清理。
         """
         from models.prompts import (VISION_VIDEO_ANALYSIS_QUESTION,
                                     VISION_VIDEO_FRAME_PREAMBLE)

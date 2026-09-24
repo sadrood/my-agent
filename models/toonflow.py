@@ -1,7 +1,7 @@
 """
-Toonflow 客户端（外部 AI 短剧工厂的 REST API 封装）。
+短剧工厂服务的 REST API 客户端。
 
-Toonflow（https://github.com/HBAI-Ltd/Toonflow-app）本身是 Electron 桌面工具，
+短剧工厂服务本身是 Electron 桌面工具，
 但它的后端是一个**独立的 Express 服务**（默认 127.0.0.1:10588），把整条流水线
 暴露成 169 个 /api 路由 —— 所以 agent 可以完全不碰它的界面，直接编排它。
 
@@ -25,7 +25,7 @@ from config import TOONFLOW_CONFIG
 
 
 class ToonflowError(RuntimeError):
-    """Toonflow 调用失败（附可行动的说明）。"""
+    """短剧工厂调用失败（附可行动的说明）。"""
 
 
 def _is_loopback(base_url: str) -> bool:
@@ -39,7 +39,7 @@ def _is_loopback(base_url: str) -> bool:
 
 
 class ToonflowClient:
-    """Toonflow REST 客户端（登录态缓存 + 401 自动重登）。"""
+    """短剧工厂 REST 客户端（登录态缓存 + 401 自动重登）。"""
 
     def __init__(
         self,
@@ -53,7 +53,7 @@ class ToonflowClient:
         self.username = username or cfg.get("username", "admin")
         self.password = password or cfg.get("password", "admin123")
         self.timeout = float(timeout or cfg.get("timeout", 60))
-        # 生成类调用要等分钟级：Toonflow 内部会同步轮询到出图/出片才返回
+        # 生成类调用要等分钟级：服务端会同步轮询到出图/出片才返回
         # （实测 5 秒视频片段 60s 超时不够，会误报"连不上"）。
         self.gen_timeout = float(cfg.get("gen_timeout", 900))
         self.max_chars = int(cfg.get("max_chars", 6000))
@@ -123,7 +123,7 @@ class ToonflowClient:
                                  json=json_body, headers=headers,
                                  timeout=timeout if timeout is not None else self.timeout,
                                  # 回环地址**不走环境里的代理**：实测本机没启动
-                                 # Toonflow 时，若让 httpx 读环境代理配置，会得到
+                                 # 该服务时，若让 httpx 读环境代理配置，会得到
                                  # 一个莫名其妙的 HTTP 502（本该是"连接被拒绝"），
                                  # 排查方向直接被带偏。远端部署仍允许走代理。
                                  trust_env=not _is_loopback(self.base_url))

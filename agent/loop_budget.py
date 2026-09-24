@@ -7,7 +7,7 @@
 
 为什么改成动态而不是把常数调大：
   · 调大只是把问题推后，遇到更大的任务照样断；调小则更容易断，两头不讨好；
-  · 主流 agent（Claude Code / Codex CLI 等）不拿"工具调用次数"当主要闸门，而是靠
+  · 主流 agent 实现不拿"工具调用次数"当主要闸门，而是靠
     **停止条件**（任务完成 / 用户中断 / 没有进展）+ 成本预算；
   · 真正该被拦的是**空转**（原地重复、反复失败却换汤不换药），而不是"轮数多"。
 
@@ -101,10 +101,12 @@ class LoopBudget:
     extend: int = 10                # 每有一轮"有进展"续多少轮
     stall_limit: int = 5            # 自上次进展以来打转多少轮就判定空转
     hard_cap: int = 120             # 绝对安全网；0 = 不设上限
+    stagnation_limit: int = 0       # 触发"连续无进展"预警的轮数；0 = 关闭
     limit: int = field(init=False)
     used: int = 0
     productive_turns: int = 0
     spinning_turns: int = 0         # 自上次进展以来"原地打转"的轮数（有进展即清零）
+    stagnation_turns: int = 0       # 连续**无任何进展**轮数（不管是否换新做法；有进展即清零）
     extensions: int = 0
     stop_reason: str = ""           # "exhausted" / "stalled" / ""（未停）
 
@@ -113,6 +115,7 @@ class LoopBudget:
         self.extend = max(0, int(self.extend))
         self.stall_limit = max(1, int(self.stall_limit))
         self.hard_cap = max(0, int(self.hard_cap))
+        self.stagnation_limit = max(0, int(self.stagnation_limit))
         self.limit = self._capped(self.base)
 
     def _capped(self, value: int) -> int:
@@ -154,6 +157,7 @@ class LoopBudget:
             extend=int(config.get("loop_extend_per_progress", 10)),
             stall_limit=int(config.get("loop_stall_limit", 5)),
             hard_cap=int(hard_cap),
+            stagnation_limit=int(config.get("loop_stagnation_warn", 0)),
         )
 
     # ------------------------------------------------------------
@@ -181,19 +185,42 @@ class LoopBudget:
         return True
 
     def observe(self, outcome: TurnOutcome) -> None:
-        """结算一轮：有进展就续期并清零打转计数；在原地打转才累计。"""
+        """结算一轮：有进展就续期并清零打转/停滞计数；否则累计。"""
         self.used += 1
         if outcome.productive:
             self.productive_turns += 1
             self.spinning_turns = 0
+            self.stagnation_turns = 0
             grew = self._capped(self.limit + self.extend)
             if grew > self.limit:
                 self.limit = grew
                 self.extensions += 1
-        elif outcome.spinning:
-            self.spinning_turns += 1
+        else:
+            # 无进展（打转也算"无进展"的一种）→ 两个计数器都累计。
+            # stagnation 与 spinning 的区别：spinning 只统计"原样重复/空回复"（真实空转），
+            # stagnation 统计**任何**无进展——包括"换了新做法但失败"。后者在调试里是
+            # 正常推进，所以不能拿来停；但无限模式（hard_cap=0）下这类轮次永远到不了
+            # 上限，会无限跑下去。stagnation 就是给这个场景的**可见性**：达到阈值提醒
+            # 一次，让用户/前端知道"它已经很久没有产出了"，而不是默默烧钱。
+            self.stagnation_turns += 1
+            if outcome.spinning:
+                self.spinning_turns += 1
         # 其它情况（换了新做法但失败 / 被审批拦截）：既不续期也不计打转——
         # 给新尝试留机会，但预算不会因此变宽。
+
+    # ------------------------------------------------------------
+
+    def stagnation_alarm(self) -> bool:
+        """连续无进展轮数是否**刚好达到**预警阈值（每阈值只响一次）。
+
+        阈值（stagnation_limit）为 0 时关闭。注意它**只预警、不自动停**：
+        无限模式的语义是"让 agent 做完任务再结束"，停不停由用户（或 stall 打转）
+        决定；这个报警只是让"卡了很久"这件事变得可见。
+        """
+        return (
+            self.stagnation_limit > 0
+            and self.stagnation_turns == self.stagnation_limit
+        )
 
     # ------------------------------------------------------------
 
@@ -210,7 +237,8 @@ class LoopBudget:
         return {
             "used": self.used, "limit": self.limit, "base": self.base,
             "extensions": self.extensions, "productive_turns": self.productive_turns,
-            "spinning_turns": self.spinning_turns, "hard_cap": self.hard_cap,
+            "spinning_turns": self.spinning_turns, "stagnation_turns": self.stagnation_turns,
+            "hard_cap": self.hard_cap,
             "stop_reason": self.stop_reason,
         }
 

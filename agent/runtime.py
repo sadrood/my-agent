@@ -74,7 +74,7 @@ def run_external(runtime: str, goal: str, cwd: str | None, on_event,
     """启动外部 CLI 执行任务，把输出桥接为事件。返回最终文本。"""
     if runtime == "claude-acp":
         # 完整 ACP 协议：与外部 agent 双向结构化通信（文本/思考/工具/审批）。
-        # 模型默认用网关实际服务的 deepseek-flash（= DeepSeek V4.1 Flash，避免网关
+        # 模型默认用网关实际服务的默认模型（避免网关
         # 未知模型 503）；可用 MY_AGENT_ACP_MODEL 或 runtime_config.model 覆盖。
         from agent.acp import run_acp_session
         model = (cfg or {}).get("model") or os.getenv("MY_AGENT_ACP_MODEL") or "deepseek-flash"

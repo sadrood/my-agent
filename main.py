@@ -273,9 +273,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
         "api_key": f"{_api_key}…" if _api_key else "（未设置）",
         "restored": bool(conv),
     })
-    # 环境变量遮挡告警：带着 CLI 注入的 ANTHROPIC_* 跑时（Claude Code 内、或其派生
-    # 子进程），.env 的 LLM_* 会被静默忽略 —— 面板上显示的是生效值，用户却以为
-    # 是自己配的那个。这里把"被谁顶掉"说清楚，别让人对着 .env 排查半天。
+    # 环境变量遮挡告警：.env 的 LLM_* 被 ANTHROPIC_* 顶掉时要说清楚，
+    # 否则用户会对着 .env 排查半天（面板显示的其实是生效值）。
     try:
         from config import llm_config_provenance
         _prov = llm_config_provenance(os.environ)
@@ -513,7 +512,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                     "或拦截当场答 y / always[/dim]")
             continue
         if cmd == "image":
-            # 文生图（SenseNova U1.5 Lite）：生成图片并保存到本地
+            # 文生图：生成图片并保存到本地
             c.print()
             if not cmd_args:
                 print_warning("用法: /image <图片描述>（构图/风格/光影写清楚）", use_rich=True)

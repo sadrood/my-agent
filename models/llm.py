@@ -1,6 +1,6 @@
 """
 LLM 模块（v2：原生 function calling + JSON 模式 + 自动重试 + 流式输出）。
-封装 OpenAI Compatible API 调用。
+封装兼容协议调用。
 换模型只需改 .env 文件，这个文件不用动。
 
 新增能力（借鉴开源 agent 框架的工具协议）：
@@ -17,8 +17,8 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
-# 延迟导入 openai（关键性能优化）：
-# openai SDK 的 __init__ 会级联导入大量类型定义（types.beta / graders / eval
+# 延迟导入 SDK（关键性能优化）：
+# SDK 的 __init__ 会级联导入大量类型定义（types.beta / graders / eval
 # 等），实测耗时 ~1.7s，占 CLI 启动总耗时的 84%。改为首次真正需要时再导入
 # （创建客户端 / 捕获重试异常），CLI 启动从 2.2s 降到 ~0.5s。
 if TYPE_CHECKING:   # 仅类型检查期提供名字，运行时不导入
@@ -28,7 +28,7 @@ from config import LLM_CONFIG
 
 
 def _openai_errors() -> tuple:
-    """可重试的 openai 异常类型（惰性解析，避免启动时导入整个 SDK）。"""
+    """可重试的 SDK 异常类型（惰性解析，避免启动时导入整个 SDK）。"""
     from openai import (
         RateLimitError,
         APIConnectionError,
@@ -39,7 +39,7 @@ def _openai_errors() -> tuple:
 
 
 def _openai_client_class():
-    """OpenAI 客户端类（惰性导入）。"""
+    """LLM 客户端类（惰性导入）。"""
     from openai import OpenAI as _OpenAI
     return _OpenAI
 
@@ -82,7 +82,7 @@ def unwrap_raw_arguments(arguments: dict, max_depth: int = 5) -> dict:
     return arguments
 
 # 可重试的异常类型（指数退避）——改为惰性解析（见 _openai_errors()），
-# 避免模块导入期加载整个 openai SDK（约 1.7s）。保留名字供旧代码/文档引用。
+# 避免模块导入期加载整个 SDK（约 1.7s）。保留名字供旧代码/文档引用。
 RETRYABLE_ERRORS = ()
 
 
@@ -184,7 +184,7 @@ class LLMToolResponse:
 
 
 class LLM:
-    """LLM 客户端（OpenAI Compatible API）。"""
+    """LLM 客户端（兼容 chat/completions 协议）。"""
 
     def __init__(self, api_key: str = None, base_url: str = None, model: str = None):
         """
@@ -209,7 +209,7 @@ class LLM:
 
         # 网关模型元数据缓存：{(base_url, model) -> context_window | None}
         self._window_cache: dict = {}
-        # 固定温度：某些 thinking 模型只接受特定值（如 kimi-k3 只允许 1），
+        # 固定温度：某些 thinking 模型只接受特定值（如必须为 1），
         # 设置后忽略所有传入 temperature（否则 400 invalid_request_error）
         self.fixed_temperature = LLM_CONFIG.get("fixed_temperature")
         # 该模型已知不支持的请求参数（400 后自动记录，后续请求自动移除/转换）
@@ -229,7 +229,7 @@ class LLM:
         """按模型名自动适配固定温度（内置规则；.env 显式设置优先）。
 
         已知只接受 temperature=1 的模型：
-        - kimi-k3（商汤托管，thinking 模型硬性要求）
+        - 部分 thinking 模型硬性要求 temperature=1
         """
         name = (self.default_model or "").lower()
         if name.startswith("kimi-k3"):
@@ -266,7 +266,7 @@ class LLM:
     def _resolve_temperature(self, temperature: float = None) -> float:
         """解析请求温度：固定温度优先（thinking 模型只接受特定值）。
 
-        某些模型（如 kimi-k3）硬性要求 temperature=1，传入其他值会
+        某些 thinking 模型硬性要求 temperature=1，传入其他值会
         400 "only 1 is allowed for this model"；自动按模型名适配 +
         支持 LLM_FIXED_TEMPERATURE 环境变量显式覆盖。
         """
@@ -278,7 +278,7 @@ class LLM:
     def _extract_bad_param(self, e: Exception) -> Optional[str]:
         """从 400 错误中提取不受支持的参数名（None 表示无法识别）。
 
-        优先读取供应商返回的 param 字段（OpenAI 标准错误体结构），
+        优先读取供应商返回的 param 字段（标准错误体结构），
         否则用正则从错误信息文本兜底匹配。
         """
         message = str(e)
@@ -543,7 +543,7 @@ class LLM:
 
         Args:
             messages: 对话历史
-            tools: OpenAI 格式的工具列表（BaseTool.to_openai_schema() 的结果）
+            tools: 标准格式的工具列表（BaseTool.to_openai_schema() 的结果）
             model / temperature / max_tokens / top_p: 同 chat()
             tool_choice: auto / required / none / {"type":"function","function":{"name":...}}
 
@@ -647,7 +647,7 @@ class LLM:
         for attempt in range(self.max_retries + 1):
             try:
                 # 计时必须从**发起请求前**开始。此前 t0 取在 create() 返回之后，
-                # 而部分网关（实测 Agnes）即使 stream=True 也会先把整段回复缓冲好、
+                # 而部分网关（实测）即使 stream=True 也会先把整段回复缓冲好、
                 # 等生成结束才返回流对象：于是 elapsed 只量到本地排空缓冲的 0.1s、
                 # 首 token 记成 0.02s，状态行的「LLM 耗时 / 首 token」双双失真。
                 # 放在循环内 → 连接重试的退避等待不计入（那是空等，不是模型耗时）。

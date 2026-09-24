@@ -67,12 +67,39 @@ def test_zero_value_is_not_treated_as_empty():
     assert p.stdout.strip() == "0.0"
 
 
-class TestTestCommandPerPlatform:
-    """测试命令的默认值必须跟着平台选 venv 路径（2026-09-24 审计）。
+class TestCursorOverlaySwitch:
+    """`COMPUTER_CURSOR_OVERLAY` 的取值形式：文档与该键的 docstring 一直写的是 `=1`。
 
-    Windows 的虚拟环境在 `.venv\\Scripts`、POSIX 在 `.venv/bin`。默认值写死成
-    Windows 那份时，Linux 上 agent 会照着一个不存在的解释器跑测试：一路失败，
-    而且开了 EDIT_PREFLIGHT 的话每次 edit 都会被自动回滚。
+    回归背景：开关从 `os.getenv(...) in ("1","true","on","yes")` 挪进 config.py 时
+    只写成 `== "true"`，于是文档里写的 `=1` 静默失效（实测：os.getenv 读到 1，
+    config 里却是 False，浮层不显示）。
+    """
+
+    def _value_with(self, raw: str) -> str:
+        p = subprocess.run(
+            [sys.executable, "-c",
+             "from config import COMPUTER_USE_CONFIG as c; print(c['cursor_overlay'])"],
+            cwd=str(PROJECT_ROOT),
+            env={**os.environ, "COMPUTER_CURSOR_OVERLAY": raw},
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180)
+        assert p.returncode == 0, (p.stderr or "")[-500:]
+        return p.stdout.strip()
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "on", "yes", "  1  "])
+    def test_on_forms(self, raw):
+        assert self._value_with(raw) == "True"
+
+    @pytest.mark.parametrize("raw", ["0", "false", "", "no", "off"])
+    def test_off_forms(self, raw):
+        assert self._value_with(raw) == "False"
+
+
+class TestTestCommandPerPlatform:
+    """测试命令的默认值跟着平台选 venv 路径（Windows 是 Scripts、POSIX 是 bin）。
+
+    写死 Windows 那份时，Linux 上会照着一个不存在的解释器跑测试：一路失败，
+    且 EDIT_PREFLIGHT 打开时每次 edit 都会被回滚。
     """
 
     def test_default_follows_platform(self):
@@ -104,11 +131,10 @@ class TestTestCommandPerPlatform:
 
 
 class TestLlmConfigProvenance:
-    """`.env` 的 LLM_* 被 ANTHROPIC_* 静默顶掉时要能查得出来（2026-09-24 实测踩到）。
+    """`.env` 的 LLM_* 被 ANTHROPIC_* 静默顶掉时要能查得出来。
 
-    取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_*；在 Claude Code 里跑 agent（或它
-    派生的任何子进程）时环境里带着 CLI 自己的 ANTHROPIC_*，`.env` 的端点/模型会被
-    忽略 —— 看配置是一个端点、实际打的是另一个。
+    取值顺序 MY_AGENT_* → ANTHROPIC_* → LLM_*：环境里带着 ANTHROPIC_* 时，
+    `.env` 的端点/模型会被忽略 —— 看配置是一个端点、实际打的是另一个。
     """
 
     def test_no_shadowing_when_only_llm_vars(self):

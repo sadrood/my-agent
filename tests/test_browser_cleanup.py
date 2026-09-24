@@ -1,13 +1,7 @@
 """残留浏览器进程清理：两个平台各一条取进程表的实现。
 
-背景（2026-09-24 审计）：`_force_cleanup_residual()` 原来只有 PowerShell + taskkill
-一条路 —— Linux 上 `powershell: not found` → 静默返回 0，残留的 Chromium 与
-Playwright 的 node 会一直累积，而 `reset()` 的注释还写着"必须真正清掉残留进程"。
-
-这里钉住两段**平台无关**的逻辑（在本机就能测，不需要真 Linux）：
-  · 从进程表里挑出"命令行确实指向本工具 profile 目录"的进程；
-  · 杀进程的语义（先 TERM、还活着再 KILL；已经没了也算清掉）。
-关键是不能误伤：前缀相似的目录（`/tmp/p` vs `/tmp/p2`）必须区分开。
+本机（Windows）也能测：钉住"从进程表里挑出指向本工具 profile 目录的进程"与
+杀进程语义（先 TERM、还活着再 KILL）；关键是前缀相似的目录不能误伤。
 """
 import os
 import signal
@@ -110,8 +104,7 @@ class TestPosixKill:
         monkeypatch.setattr(os, "kill", fake_kill)
         assert BrowserTool._kill_residual_posix("42") is True
         assert sent[0] == signal.SIGTERM
-        # 用数字 9 而不是 signal.SIGKILL：后者在 Windows 上**不存在**（AttributeError），
-        # 而这条测试要能在本机（Windows）跑起来。SIGKILL 在所有 POSIX 上都是 9。
+        # 用数字 9：signal.SIGKILL 在 Windows 上不存在，测试要能在本机跑
         assert sent[-1] == 9
 
     def test_failed_sigkill_is_reported_as_failure(self, monkeypatch):

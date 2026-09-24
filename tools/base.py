@@ -2,7 +2,7 @@
 工具基类模块（v2：JSON Schema + 审批元数据，借鉴同类框架工具设计）。
 
 设计要点（与主流开源 agent 框架实现对齐）：
-1. 每个工具通过 ``schema`` 暴露 JSON Schema（OpenAI function calling 格式），
+1. 每个工具通过 ``schema`` 暴露 JSON Schema（function calling 格式），
    LLM 以结构化参数调用，而不是解析自由文本。
 2. ``ToolResult`` 支持截断标记（truncated），超大输出只回喂摘要，节省 token。
 3. 每个工具声明审批元数据：
@@ -126,7 +126,7 @@ class BaseTool(ABC):
     @property
     def schema(self) -> dict:
         """
-        工具的 JSON Schema（OpenAI function calling 的 parameters 字段）。
+        工具的 JSON Schema（function calling 的 parameters 字段）。
         子类应覆盖此属性提供精确 schema。
 
         默认实现：接受一个可选的 "input" 字符串参数（向后兼容）。
@@ -159,7 +159,7 @@ class BaseTool(ABC):
         return self.execute(input_str)
 
     def to_openai_schema(self) -> dict:
-        """生成 OpenAI function calling 所需的工具描述。"""
+        """生成 function calling 所需的工具描述。"""
         return {
             "type": "function",
             "function": {

@@ -296,7 +296,7 @@ class TestLoadOnceIdempotent:
 
 class TestRestoreModelRespectsExplicitConfig:
     """回归：用户显式配置默认模型后，恢复对话不再被绑定模型覆盖
-    （曾出现 .env 设 glm-5.2 却被旧对话绑定的 sensenova 覆盖）。"""
+    （曾出现 .env 设其它模型却被旧对话绑定的默认供应商覆盖）。"""
 
     def _make_agent(self, tmp_path, monkeypatch, model_env="glm-5.2"):
         from agent.agent import Agent, AgentConfig
@@ -329,7 +329,7 @@ class TestRestoreModelRespectsExplicitConfig:
         )
         data = agent.session_store.load_conversation("conv-bound")
         agent._restore_conversation_model(data)
-        # 显式配置了 glm-5.2 → 不被绑定模型覆盖
+        # 显式配置了其它模型 → 不被绑定模型覆盖
         assert agent.llm.default_model == "glm-5.2"
 
     def test_no_explicit_config_restores_bound_model(self, tmp_path, monkeypatch):

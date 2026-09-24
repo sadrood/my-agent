@@ -268,7 +268,7 @@ _LLM_CACHE: Dict[tuple, Any] = {}
 
 
 def parse_spec(spec: str, endpoints: Optional[dict] = None) -> Tuple[str, str, dict]:
-    """把 "main" / "agnes" / "agnes:模型名" 解析成 (端点名, 模型名, 端点配置)。"""
+    """把 "main" / "<端点名>" / "<端点名>:<模型名>" 解析成 (端点名, 模型名, 端点配置)。"""
     eps = endpoints if endpoints is not None else ARTICLE_ENDPOINTS
     name, _, override = str(spec or "main").partition(":")
     name = name.strip() or "main"
@@ -569,7 +569,7 @@ def merge_issues(*groups: List[ArticleIssue]) -> List[ArticleIssue]:
 
 
 #: 值得"重试/换端点"的暂时性故障。配额耗尽的端点除了回 429，**还会回空正文**
-#: （实测商汤：第一次 429，紧接着一次 HTTP 200 但 content 为空）——只认 429
+#: （上游实测：第一次 429，紧接着一次 HTTP 200 但 content 为空）——只认 429
 #: 会漏掉这半数的限流表现，导致明明另一家能用却直接失败。
 _TRANSIENT_HINTS = _RATE_LIMIT_HINTS + (
     "返回空内容", "timeout", "timed out", "502", "503", "504",
@@ -740,7 +740,7 @@ class ArticlePipeline:
         """调用一个阶段，带限流退避与跨端点兜底。
 
         上游配额是真实存在的硬约束：长文流水线一次跑 8+ 次大请求，很容易撞
-        TPM/RPM（实测 商汤 就在 revise 阶段 429 过）。所以这里分三层兜：
+        TPM/RPM（实测默认供应商就在 revise 阶段 429 过）。所以这里分三层兜：
         同端点退避重试 → 换另一家端点继续 → 都不行才失败，并把已完成的部分留住。
         """
         own = self._spec(stage)

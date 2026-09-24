@@ -189,26 +189,13 @@ class VideoEditor:
 
     def extract_frames(self, video: str, count: int = 6, max_width: int = 768,
                        out_dir: str = None) -> List[str]:
-        """等间隔抽取 count 帧存成 jpg，返回**按时间顺序**排列的路径列表。
+        """等间隔抽 count 帧存成 jpg，返回按时间顺序排列的路径列表。
 
-        为什么是抽帧：商汤 `GET /models` 的 `input_modalities` 里，
-        全端点只有 `text` 与 `text,image` 两种，**没有任何模型声明 video**
-        （2026-09-23 实测）。所以"让 agent 看视频"只能抽帧成多张图，
-        再一次请求按时间顺序交给视觉模型——分多次问会丢掉帧间时序。
-
-        Args:
-            video: 视频文件路径。
-            count: 抽几帧（1-16；越长/变化越快的片子要越多帧，也越费 token）。
-            max_width: 单帧宽度的上限（等比缩放，用来控制单帧 token）。
-            out_dir: 帧存放目录；默认新建系统临时目录，**调用方负责清理**。
-
-        Returns:
-            帧文件路径列表（时间顺序）。
+        out_dir 默认新建系统临时目录，**调用方负责清理**。
         """
         if not video or not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
-        # 注意 `count or 6` 会把显式的 0 也当成"没给"：0 帧没有意义，
-        # 按文档收敛到 1（而不是悄悄变成 6）
+        # 显式的 0 按文档收敛到 1：`count or 6` 会把它当成"没给"
         if count is None or count == "":
             count = 6
         try:
@@ -219,12 +206,11 @@ class VideoEditor:
         out_dir = out_dir or tempfile.mkdtemp(prefix="vframes-")
         os.makedirs(out_dir, exist_ok=True)
 
-        # 帧率 = 目标帧数 / 时长：fps 滤镜按固定间隔吐帧，正好覆盖全片
+        # fps = 帧数/时长：fps 滤镜按固定间隔吐帧，正好覆盖全片
         duration = self.duration(video)
         fps = (count / duration) if duration > 0 else 1.0
         fps = max(0.02, min(fps, 30.0))          # 极短/极长片子都别炸
-        # 表达式里带逗号（min(...)）在不过 shell 的 argv 里会被当成滤镜分隔符，
-        # 所以这里用定宽缩放，不做条件表达式
+        # 不带 shell 时 argv 里的逗号会被当成滤镜分隔符，所以用定宽缩放而非 min(...)
         vf = f"fps={fps:.6f},scale={int(max_width)}:-2"
 
         pattern = os.path.join(out_dir, "f%03d.jpg")

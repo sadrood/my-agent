@@ -1,7 +1,7 @@
 """
-Toonflow 工具（ToonflowTool）：让 agent 通过 REST API 驱动外部短剧工厂。
+短剧工厂服务工具（短剧工具类）：让 agent 通过 REST API 驱动外部短剧工厂。
 
-为什么是 API 而不是点界面：Toonflow 的后端是独立 Express 服务
+为什么是 API 而不是点界面：短剧工厂服务的后端是独立 Express 服务
 （默认 127.0.0.1:10588），169 个 /api 路由覆盖
 原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片 全流程，
 登录一次拿 JWT 即可无人值守编排；用 computer 工具点 GUI 既慢又脆。
@@ -20,7 +20,7 @@ _WRITE_COMMANDS = ("create_project", "add_novel", "call_write")
 
 
 class ToonflowTool(BaseTool):
-    """Toonflow 短剧工厂对接工具。"""
+    """短剧工厂服务对接工具。"""
 
     risk_level: str = "medium"          # 能建项目/导入原文/触发付费生成
     approval: str = "auto"
@@ -151,9 +151,8 @@ class ToonflowTool(BaseTool):
                     "type": "string", "description": "gen_videos 用：分辨率，如 720P",
                 },
                 "duration": {
-                    # 只有 add_track 会读它（写进出片轨道）。旧描述写成"gen_videos 用"，
-                    # 模型于是给 gen_videos 传 duration 却**被静默忽略**，还回"已提交
-                    # 出片任务"，可能按错误时长出片并计费（2026-09-22 审计）。
+                    # 只有 add_track 读它；描述写错会让模型给 gen_videos 传 duration
+                    # 而被静默忽略，按错误时长出片并计费。
                     "type": "number", "description": "add_track 用：单镜时长（秒，4-12）",
                 },
                 "audio": {
@@ -193,9 +192,8 @@ class ToonflowTool(BaseTool):
         from models.toonflow import ToonflowError
 
         try:
-            # 注意：Toonflow 的读接口**几乎全是 POST + JSON body**（不是 GET+query），
+            # 该服务的读接口几乎全是 POST + JSON body（GET 会 404），
             # 且 Storyboard 用 scriptId、VideoList 要 projectId+scriptId。
-            # 这些契约是从上游源码逐个核实的（实测 GET 会 404 "API 404 Not Found"）。
             handler = {
                 "health": self._health,
                 "models": lambda c, a: self._read(c, "/api/modelSelect/getModelList",
@@ -293,7 +291,7 @@ class ToonflowTool(BaseTool):
                           metadata={"base_url": info["base_url"]})
 
     def _read(self, client, path: str, body: dict = None) -> ToolResult:
-        """读接口：**POST + JSON body**（Toonflow 的读接口不用 GET/query）。"""
+        """读接口：**POST + JSON body**（该服务的读接口不用 GET/query）。"""
         data = client.request("POST", path, json_body=body if body is not None else {})
         return ToolResult(success=True, output=client.summarize(data),
                           metadata={"path": path})

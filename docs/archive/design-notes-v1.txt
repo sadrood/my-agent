@@ -209,26 +209,26 @@ Plan 可以来自 LLM。
                 LLM
                   │
                   ▼
-      OpenAI Compatible API
+      兼容协议的 API
 ```
 
 ---
 
 # 我们决定使用
 
-不是 OpenAI 官方。
+不是官方端点。
 
 而是：
 
-**OpenAI Compatible API**
+**兼容协议的 API**
 
 这样以后可以换：
 
-* DeepSeek
-* Qwen
-* Kimi
-* 智谱
-* GPT
+* 默认供应商
+* 其它供应商
+* 其它供应商
+* 其它供应商
+* 通用模型
 * SiliconFlow
 
 不用改 Agent。
@@ -276,11 +276,11 @@ llm.chat(messages)
 
 不用知道：
 
-DeepSeek
+默认供应商
 
-Qwen
+其它供应商
 
-GPT
+通用模型
 
 是谁。
 
@@ -395,7 +395,7 @@ OpenCV
 
 Whisper
 
-Qwen-VL
+其它供应商-VL
 
 ---
 

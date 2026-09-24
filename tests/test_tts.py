@@ -1,7 +1,7 @@
 """
 models/tts.py 与 tools/tts.py 的离线单元测试（不联网）。
 
-edge-tts 的合成被 monkeypatch 拦截。
+本地兜底 TTS 的合成被 monkeypatch 拦截。
 """
 import pytest
 
@@ -9,7 +9,7 @@ from tools.tts import TTSTool
 
 
 class FakeCommunicate:
-    """假 edge-tts：记录参数并把内容写进目标文件。"""
+    """假兜底 TTS：记录参数并把内容写进目标文件。"""
 
     calls = []
 
@@ -145,7 +145,7 @@ class TestTTSTool:
 
 
 # ======================================================================
-# OpenRouter 供应商（/api/v1/audio/speech，可挂 fish-audio 等 TTS 模型）
+# 第三方网关供应商（/audio/speech，可挂各类 TTS 模型）
 # 全部离线：httpx.post 被替换成假实现
 # ======================================================================
 
@@ -339,7 +339,7 @@ class TestOpenRouterProvider:
             m.synthesize("hi")
 
     def test_falls_back_to_edge_on_failure(self, or_model, monkeypatch, tmp_path):
-        """OpenRouter 挂了要能兜到 edge-tts，且把降级事实如实回传。"""
+        """在线合成挂了要能兜到本地 TTS，且把降级事实如实回传。"""
         m, _ = or_model(FakeResponse(500, payload={"error": {"message": "boom"}}))
         calls = []
 
@@ -387,10 +387,10 @@ class TestOpenRouterProvider:
         assert r.metadata["provider"] == "openrouter"
 
     def test_tool_shows_fallback_warning(self, tmp_path, or_model, monkeypatch):
-        """降级到 edge-tts 时必须在输出里写明。
+        """降级到本地 TTS 时必须在输出里写明。
 
         注意：这里必须把 edge 合成打桩。旧写法让降级路径**真的跑了一遍
-        edge-tts**（实测唯一的外部网络调用：GETADDRINFO speech.platform.bing.com），
+        本地兜底 TTS**（实测唯一的外部网络调用：GETADDRINFO speech.platform.bing.com），
         而且断言写成 `if r.success:` —— 离线时它会静默变成空操作，
         既依赖网络又失去检出能力。
         """

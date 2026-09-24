@@ -103,7 +103,7 @@ def _isolate_heavy_runtime_switches(monkeypatch):
         pass
 
     # 关掉监管者：它默认走**真实 LLM 端点** —— SUPERVISOR_CONFIG["model"] 留空时
-    # 回退到硬编码的 "agnes-3.0-flash"，key/base 再回退 GUARDIAN_API_KEY /
+    # 回退到硬编码的默认模型名，key/base 再回退 GUARDIAN_API_KEY /
     # GUARDIAN_BASE_URL。于是任何建 Agent 的测试都会真打外部 API（12 个测试文件
     # 都没关它），直接违反 AGENTS.md「不依赖网络的测试优先（FakeLLM 脚本化）」，
     # 还会烧真实额度。

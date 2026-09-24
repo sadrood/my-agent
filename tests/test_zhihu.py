@@ -4,7 +4,7 @@
 契约来自官方文档逐接口核实（2026-09-18）：
 - 鉴权: Authorization: Bearer <secret> + X-Request-Timestamp(秒级 Unix 时间戳)
 - 信封: {"Code":0,"Message":"success","Data":{...}}；Code!=0 时原因在 Message
-- 特例: 直答 /v1/chat/completions 是 OpenAI 兼容格式（无信封，且路径不带 /api）
+- 特例: 直答 /v1/chat/completions 是兼容协议格式（无信封，且路径不带 /api）
 - 参数名是 PascalCase，工具侧 snake_case，映射在 models/zhihu.py
 """
 import json
@@ -402,7 +402,7 @@ class TestUpload:
 
 
 # ----------------------------------------------------------------------
-# 直答（OpenAI 兼容，非信封）
+# 直答（兼容格式，非信封）
 # ----------------------------------------------------------------------
 
 class TestZhida:

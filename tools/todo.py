@@ -18,7 +18,7 @@ from config import resolve_under_root
 
 # 必须锚定项目根：这是**硬编码的相对路径**，open() 按 cwd 解析——agent 在 output/xxx
 # 下跑时清单就落到那里去了。实测本机已被拆成三份（memory/todos、
-# output/memory/todos、output/qici_toonflow_ep1/memory/todos 各一份），
+# 不同工作目录下各存一份），
 # 界面看到的进度和"完成度闸门"读到的都不是同一份。详见 config.resolve_under_root。
 _TODO_DIR = resolve_under_root(os.path.join("memory", "todos"))
 

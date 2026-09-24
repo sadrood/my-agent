@@ -6,7 +6,7 @@
           X-Request-Timestamp: <秒级 Unix 时间戳>（与服务端相差不得超过 10 分钟）
     信封: {"Code": 0, "Message": "success", "Data": {...}}
           Code != 0 时 Data 通常为 null，原因在 Message 里（错误码表见 ERROR_HINTS）
-    特例: 直答 /v1/chat/completions 是 **OpenAI 兼容**格式（没有 Code/Message/Data
+    特例: 直答 /v1/chat/completions 是 **兼容协议**格式（没有 Code/Message/Data
           信封，错误是 {"error": {...}}），并且路径**不带 /api 前缀**。
 
 两类容易踩的坑，本模块都已处理：
@@ -356,7 +356,7 @@ class ZhihuClient:
         return self.request("POST", ENDPOINTS["kb_upload"][1], files=files, data=data,
                             timeout=self.upload_timeout)
 
-    # ---- 直答（OpenAI 兼容，非信封格式）----
+    # ---- 直答（兼容格式，非信封）----
 
     def zhida(self, question: str, model: str = "zhida-thinking-1p5",
               history: Optional[List[Dict[str, str]]] = None,

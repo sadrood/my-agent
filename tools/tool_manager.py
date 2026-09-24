@@ -6,7 +6,7 @@ v2 变化：
 - register 支持结构化工具（BaseTool.schema / execute_json）
 - execute_json(): 按 JSON Schema 参数执行工具（function calling 入口）
 - execute(): 字符串入口（旧接口保留），两个入口都统一做输出截断
-- list_openai_schemas(): 输出 OpenAI function calling 格式的工具列表
+- list_openai_schemas(): 输出 function calling 格式的工具列表
 """
 from typing import Optional
 
@@ -119,13 +119,13 @@ class ToolManager:
         except Exception:
             pass
 
-        # 桌面操控工具（只有 Windows 有实现）：截图/无障碍树/鼠标键盘，高危走审批门。
-        # 非 Windows 平台**不注册** —— 注册了也只是让模型反复调用一个恒返回
-        # 「仅支持 Windows」的工具，而且 agent 会因为它存在而追加桌面操控提示，
-        # 白白烧轮数（2026-09-24 审计）。
+        # 桌面操控工具（仅 Windows 有实现，且受 COMPUTER_USE_ENABLED 控制）：高危走审批门。
+        # 不注册时模型看不到它 —— 否则非 Windows 上会反复调用一个恒返回「仅支持 Windows」
+        # 的工具，而 agent 还会因它存在而追加整套桌面操控提示。
         try:
+            from config import COMPUTER_USE_CONFIG
             from tools.computer_use import COMPUTER_SUPPORTED, DesktopTool
-            if COMPUTER_SUPPORTED:
+            if COMPUTER_SUPPORTED and COMPUTER_USE_CONFIG.get("enabled", True):
                 self.register(DesktopTool())
         except Exception:
             pass
@@ -144,13 +144,11 @@ class ToolManager:
         except Exception:
             pass
 
-        # 下面四个多媒体工具此前**无条件注册**，`*_ENABLED=false` 形同虚设：
-        # 那几个开关只在各自的 `models/*.py::is_configured()` 里被读，而那个函数
-        # 全仓库**没有任何调用点**（2026-09-22 审计）。结果是把 `IMAGE_GEN_ENABLED`
-        # 设成 false 之后，模型工具表里照样有文生图、agent 照样调上游接口并计费。
-        # 统一按 toonflow / zhihu 已有的写法在注册处判一次。
+        # 多媒体工具的 `*_ENABLED` 开关必须在注册处判一次：只在
+        # `models/*.py::is_configured()` 里读没有调用点，设成 false 也照样注册、
+        # 照样调上游计费。写法与其它按开关注册的工具一致。
 
-        # 文生图工具（OpenAI 兼容 images 端点；b64 与 url 两种返回都落盘）
+        # 文生图工具（兼容 images 端点；b64 与 url 两种返回都落盘）
         try:
             from config import IMAGE_GEN_CONFIG
             if IMAGE_GEN_CONFIG.get("enabled", True):
@@ -159,7 +157,7 @@ class ToolManager:
         except Exception:
             pass
 
-        # 文生视频工具（OpenAI Videos 兼容异步任务：创建 → 轮询 → 下载 mp4）
+        # 文生视频工具（兼容异步任务：创建 → 轮询 → 下载 mp4）
         try:
             from config import VIDEO_GEN_CONFIG
             if VIDEO_GEN_CONFIG.get("enabled", True):
@@ -177,7 +175,7 @@ class ToolManager:
         except Exception:
             pass
 
-        # 语音合成工具（edge-tts 配音）
+        # 语音合成工具（在线 TTS 配音）
         try:
             from config import TTS_CONFIG
             if TTS_CONFIG.get("enabled", True):
@@ -186,7 +184,7 @@ class ToolManager:
         except Exception:
             pass
 
-        # Toonflow 短剧工厂对接（外部 REST 服务，可选；不在跑也不影响其它工具）
+        # 短剧工厂服务对接（外部 REST 服务，可选；不在跑也不影响其它工具）
         try:
             from config import TOONFLOW_CONFIG
             if TOONFLOW_CONFIG.get("enabled", True):
@@ -377,7 +375,7 @@ class ToolManager:
     # ================================================================
 
     def list_openai_schemas(self) -> list[dict]:
-        """全部工具的 OpenAI function calling 格式描述。"""
+        """全部工具的 function calling 格式描述。"""
         return [tool.to_openai_schema() for tool in self._tools.values()]
 
     def get_tool_schema(self, tool_name: str) -> Optional[dict]:
@@ -473,13 +471,9 @@ class ToolManager:
         """为一次结构化调用生成审批请求。
 
         这里统一补全工具声明的 `approval` 元数据（auto / on-request）。工具层有
-        8 份 `build_approval_request` 覆写（terminal / file / patch / browser /
-        python / installer / toonflow / zhihu），谁都没传这个字段，而
-        `ApprovalPolicy.decide` 第 3 步判的正是 `request.approval` —— 于是
-        `DesktopTool`（`approval="on-request"`，操控真实鼠标键盘）在
-        `danger-full-access` 下被静默降级成**零确认执行**（2026-09-22 审计）。
-
-        补在这里而不是逐个改覆写：工具只需声明一次，链路自动带上，新工具不会再漏。
+        覆写 `build_approval_request` 的工具若都不传该字段，`ApprovalPolicy.decide`
+        就判不到 `request.approval`，`approval="on-request"` 的工具会被静默降级成
+        零确认执行。统一在这里补齐：工具声明一次，链路自动带上。
         """
         tool = self._tools.get(tool_name)
         if tool is None:

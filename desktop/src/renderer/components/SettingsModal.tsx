@@ -1,6 +1,6 @@
 /**
  * 设置中心（分栏导航式）：左侧导航 + 右侧内容区。
- * - 模型供应商：预设卡片（DeepSeek / Kimi / 智谱 / Anthropic / 自定义），选中即写入
+ * - 模型供应商：预设卡片（常用端点 / 自定义），选中即写入
  *   appConfig 并经 syncRuntimeConfig 下发到后端运行时；API Key 走 safeStorage 加密。
  * - 技能 Skills：只读能力面板（与右栏「技能」tab 同源）。
  * - 通用：主题切换。
@@ -31,7 +31,7 @@ function saveExtras(list: ExtraProvider[]) {
   try { localStorage.setItem(EXTRA_KEY, JSON.stringify(list)); } catch { /* 忽略 */ }
 }
 
-/** 预设模型供应商（OpenAI 兼容端点；名称/端点/推荐模型） */
+/** 预设模型供应商（兼容端点：名称 / 端点 / 推荐模型） */
 const PROVIDERS = [
   {
     id: 'deepseek',

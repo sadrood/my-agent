@@ -110,7 +110,7 @@ class TestSupervisorParsing:
 
 class TestSupervisorLLMSelection:
     def test_defaults_to_cross_vendor(self, monkeypatch):
-        """默认另一家厂商（Agnes）：同源模型自评容易自我确认。"""
+        """默认另一个厂商：同源模型自评容易自我确认。"""
         import config
         seen = {}
 

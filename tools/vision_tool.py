@@ -3,9 +3,8 @@
 把原来 Executor 里的 "see" 动作升级为标准工具：模型可以主动请求
 "截取当前页面 → 视觉模型分析 → 返回分析文本"，用于 Computer Use 场景。
 
-同时支持本地文件：给 `path` 就分析该图片/视频文件。视频走"等间隔抽帧 → 多图
-一次请求"——上游（商汤 / Agnes）`GET /models` 里没有任何模型声明 video 输入
-模态，视频没法直接喂给模型（2026-09-23 实测）。
+给 `path` 时改为分析本地图片/视频；视频走"等间隔抽帧 → 多图一次请求"
+（上游没有模型支持 video 输入）。
 
 依赖：tools.browser.BrowserTool（截图）+ models.vision.VisionModel（分析）。
 视觉模型不可用时返回错误，模型会自行改用 text/html 等方式。
@@ -16,8 +15,7 @@ from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
-# 提示词统一放 models/prompts.py（AGENTS.md 规则 5）。这里此前抄了一份
-# 逐字相同的副本，两边已经开始漂移（多一行空行）——改为单一来源。
+# 提示词统一放 models/prompts.py（AGENTS.md 规则 5）
 from models.prompts import VISION_IMAGE_FILE_QUESTION, VISION_PAGE_ANALYSIS_QUESTION as DEFAULT_QUESTION
 
 #: 视频扩展名：走抽帧理解

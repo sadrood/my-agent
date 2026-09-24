@@ -8,7 +8,7 @@ from models.llm import LLM
 
 
 class _FakeResponse:
-    """openai 异常构造函数只存储 response，不校验类型。"""
+    """异常构造函数只存储 response，不校验类型。"""
     status_code = 429
     headers = {}
     request = None
@@ -126,7 +126,7 @@ def test_chat_with_tools_retry():
 # ============================================================
 
 def make_bad_request(param, message="unsupported param"):
-    """构造带 param 字段的 400 错误（OpenAI 标准错误体）。"""
+    """构造带 param 字段的 400 错误（标准错误体）。"""
     return BadRequestError(
         message,
         response=_FakeResponse(400),

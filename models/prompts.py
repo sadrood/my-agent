@@ -249,11 +249,7 @@ VISION_STEP_RESULT_QUESTION = """请结合截图判断上一步操作是否达�
 用中文简要回答。"""
 
 # ------------------------------------------------------------
-# 视频理解 Prompt
-#
-# 上游（商汤 / Agnes）没有任何模型声明 video 输入模态（`GET /models` 只有
-# text 与 text,image），所以"看视频"是**抽帧 + 多图一次请求**：帧必须同一个
-# 请求给出，模型才能比较帧间变化；分多次问只能得到各帧的孤立描述。
+# 视频理解 Prompt（上游无 video 输入，走"抽帧 + 多图一次请求"）
 # ------------------------------------------------------------
 VISION_VIDEO_ANALYSIS_QUESTION = """这个视频里发生了什么？请按时间顺序描述：
 1. 主要内容和场景
@@ -336,10 +332,8 @@ APPROVAL_NOTICE_TEMPLATE = """
 # ============================================================
 # 运行环境提示（注入系统提示，避免模型用错平台命令）
 # ============================================================
-# 平台无关的部分抽成共享段，两个平台各自只写差异 —— 免得改了一边漏另一边。
-# 背景（2026-09-24 审计）：原先只有 Windows cmd 一份，而 agent 在 Linux 上会填
-# shell=sh，提示词却整段在教模型用 findstr/dir/type/Get-Content，等于主动把模型
-# 引向不存在的命令。
+# 平台无关的部分抽成共享段，两端各自只写差异 —— 免得改了一边漏另一边。
+# （原先只有 Windows cmd 一份，Linux 上会主动把模型引向 findstr/dir/Get-Content。）
 _PLATFORM_NOTICE_TAIL = """\
 - **长任务（全量测试 / 构建 / 大文件下载）的正确姿势**：
   1) terminal(command="...", background=true) 启动 → 立即拿到任务 ID
@@ -353,8 +347,7 @@ _PLATFORM_NOTICE_TAIL = """\
   默认绑 0.0.0.0，会把整个目录暴露给局域网（实测有过把 output/ 整个开在
   0.0.0.0:8899 的情况）。用完记得 bg kill 关掉。"""
 
-#: `bg` 的用法两个平台一样（它是 terminal 工具的子命令，不是 shell 命令），
-#: 所以这段在两边都出现，只写一次。
+#: `bg` 的用法两端一致（它是 terminal 工具的子命令，不是 shell 命令）。
 _PLATFORM_NOTICE_BG = """\
   · 后台任务：**不要把 `bg ...` 当 shell 命令直接写**。bg 是 terminal 工具的子命令，
     通过 command 参数传入：command="bg list" / "bg output job-xxx 30" / "bg kill job-xxx"；
@@ -387,17 +380,14 @@ PLATFORM_NOTICE_POSIX = ("""
   · 文本搜索：grep -r / rg；列目录用 ls；看文件用 cat / head / tail
 """ + _PLATFORM_NOTICE_TAIL)
 
-#: 向后兼容：旧名字指 Windows 那份（历史调用方与测试仍在用）。
-#: 新代码请用 `platform_notice()`，别自己判断平台。
+#: 向后兼容：旧名字指 Windows 那份；新代码请用 `platform_notice()`。
 PLATFORM_NOTICE_TEMPLATE = PLATFORM_NOTICE_WINDOWS
 
 
 def platform_notice(system: str, shell: str) -> str:
-    """按平台挑"运行环境"提示并填好占位符（调用方不必自己判断平台）。
+    """按平台挑运行环境提示并填好占位符（调用方不必自己判断平台）。
 
-    Args:
-        system: `platform.system()` 的返回值（Windows / Linux / Darwin）。
-        shell: 终端工具实际会用的 shell 名（Windows 是 cmd.exe，POSIX 取 $SHELL）。
+    system: `platform.system()`；shell: 终端工具实际用的 shell（Windows 是 cmd.exe）。
     """
     tpl = (PLATFORM_NOTICE_WINDOWS if str(system).lower().startswith("win")
            else PLATFORM_NOTICE_POSIX)

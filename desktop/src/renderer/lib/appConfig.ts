@@ -21,12 +21,12 @@ const KEY = 'my-agent-config';
 
 export const DEFAULT_CONFIG: AppConfig = {
   apiKey: '',
-  // deepseek-flash = DeepSeek V4.1 Flash（2026-09-23 实测：原生工具调用/流式/
-  // reasoning 回传/JSON 全过，1M 上下文、自带视觉、定价 0）
+  // 默认模型：原生工具调用 / 流式 / reasoning 回传 / JSON 均可用，
+  // 1M 上下文、自带视觉、零定价
   model: 'deepseek-flash',
-  // 端点默认与 .env 一致：商汤官方 token plan（任何网络都可达，缺点见下）
-  // 备选：内网网关 http://172.16.10.242:3000/v1 —— 实测中位 0.7s、不计费、不限流，
-  // 但要内网可达；在设置里改 baseUrl 即可，你选的端点会被保留（见 loadConfig）。
+  // 端点默认与 .env 一致（任何网络可达；限流缺点见下）
+  // 备选：自建网关 —— 中位 0.7s、不计费、不限流，但需网络可达；
+  // 在设置里改 baseUrl 即可，用户选的端点会被保留（见 loadConfig）。
   baseUrl: 'https://token.sensenova.cn/v1',
   agentName: '小悟',
   workDir: '',
@@ -70,12 +70,11 @@ export function loadConfig(): AppConfig {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const saved = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-      // 注：这里曾有一条迁移，把指向内网网关（172.16.10.242:3000）的配置**强制改回**
-      // 商汤官方端点，理由是"该网关不稳定、与 .env 不一致"。2026-09-23 复测后删掉了
-      // 这条迁移：内网网关实测 12/12 成功、中位 0.7s、不计费不限流，它是个**正当的
-      // 备选**（.env 里也整段留着）；一个"把用户选的端点悄悄改掉"的迁移，会让想用它
-      // 的人每次加载都被弹回去。端点该由用户选，默认值已经和 .env 对齐（商汤官方）。
-      // 迁移：商汤免费 plan 有 rpm/tpm 限流（429），模型切回默认（端点同上）
+      // 注：这里曾有一条迁移，把用户指向自建网关的配置强制改回默认端点。
+      // 已删除：自建网关是正当备选（成功率高、不计费不限流），
+      // 「把用户选的端点悄悄改掉」会让想用它的人每次加载都被弹回去。
+      // 保留的迁移：默认端点免费档有 rpm/tpm 限流（429），命中时模型切回默认。
+      // 端点本身始终由用户决定。
       if (saved.baseUrl === 'https://token.sensenova.cn/v1' && saved.model === 'sensenova-6.8-flash-lite') {
         return { ...saved, model: DEFAULT_CONFIG.model, baseUrl: DEFAULT_CONFIG.baseUrl, apiKey: '' };
       }

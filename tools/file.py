@@ -1,24 +1,11 @@
 """
-文件操作工具模块（v2：JSON Schema + 结构化调用）。
-提供文件读写、目录浏览、文件信息查询等能力。
+文件操作工具模块（JSON Schema + 结构化调用）。
+提供读写、追加、复制、移动、删除、列目录、存在性检查与文件信息。
 
-v2 变化：
-- schema: {"operation": read|write|append|copy|move|list|exists|info, ...}
-- execute_json() 把结构化参数映射到旧字符串命令，复用全部内部逻辑
-- 风险分级：读操作 low，写操作 medium
-
-v4 变化（2026-09-18）：
-- 补齐 delete：此前 schema 只有 read/write/append/copy/move/list/exists/info，
-  **没有任何删除能力**，而 python 工具的 shutil 被黑名单拦下 → Agent 只能新建、
-  无法清理，产物目录（output/）只涨不减（实测膨胀到 36GB，其中一个坏 wav 占 34GB）。
-  删除=破坏性操作，因此：目录必须显式 recursive=true、危险路径（.git/项目根/盘根）
-  一律拒绝、审批分级 medium（递归删除 high）。
-
-v3 变化（2026-09-15）：
-- 补齐 append：schema 与 executor 提示词一直在教模型「用 file append 分段写大文件」，
-  但本工具从未实现该操作，模型照做必然失败。
-- 补齐 copy/move：复制文件的正规入口。此前只有 write（纯文本覆盖），而 shutil 被
-  python 工具黑名单正确拦下 → 模型想复制产物图片时无路可走（实测连续 3 轮瞎猜）。
+约定：
+- execute_json() 直接按字段取值，不回落字符串解码
+- 风险分级：读操作 low，写/删除 medium，递归删除 high
+- delete 是破坏性操作：目录必须显式 recursive=true；.git / 项目根 / 盘根一律拒绝
 """
 import os
 import shutil
@@ -95,13 +82,9 @@ class FileTool(BaseTool):
         }
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
-        """结构化入口：**直接按字段取值**，不再回落到字符串解码。
+        """结构化入口：**直接按字段取值**，不回落字符串解码。
 
-        回归（实测）：此前把 JSON 参数拼成 `"write <path> <content>"` 再交给
-        execute() 按空格切分，于是路径里只要有空格就会写错文件——
-        `{"path": "C:\\My Documents\\notes.txt"}` 实际写出一个名为 `My` 的文件，
-        内容变成 `Documents\\notes.txt hello`，而且返回 success=True。
-        静默写错文件比报错危险得多，所以结构化路径必须直连实现。
+        拼字符串再按空格切分会让含空格的路径静默写错文件，路径必须直连实现。
         """
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
@@ -146,9 +129,8 @@ class FileTool(BaseTool):
         )
 
     def execute(self, input_str: str) -> ToolResult:
-        # 这里只 lstrip、不 strip：write/append 的内容必须原样落盘。
-        # 此前对整串 strip，导致「以换行结尾的文本文件」写出来丢掉末尾换行。
-        # 路径类参数由各自的 handler 自行 strip，因此不受影响。
+        # 只 lstrip 不 strip：write/append 的内容要原样落盘（末尾换行不能丢）。
+        # 路径类参数由各自的 handler 自行 strip。
         if not input_str or not input_str.strip():
             return ToolResult(success=False, output="", error="操作指令为空。")
 
@@ -211,11 +193,8 @@ class FileTool(BaseTool):
         old_content = tracker.snapshot(path)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            # newline=""：原样写入，不做换行符的隐式转换。文本模式在 Windows 上会把
-            # LF 自动翻成 CRLF，与 edit 工具（保留文件原有行尾）策略相反 —— 两个写工具
-            # 交替使用会把整个文件的行尾来回翻（2026-09-22 审计）。
-            # 与 edit 工具（保留文件原有风格）策略相反，两个写工具交替用会把整个文件的
-            # 行尾来回翻（2026-09-22 审计）。
+            # newline=""：原样写入。文本模式在 Windows 会把 LF 翻成 CRLF，与 edit
+            # 工具（保留原有行尾）策略相反，交替使用会来回翻整个文件的行尾。
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             tracker.record_with_old(path, self.name, old_content, existed=existed)
@@ -270,12 +249,8 @@ class FileTool(BaseTool):
     def _delete_guard(self, path: str) -> str:
         """返回拒绝原因（"" = 允许删除）。
 
-        比较一律走 `os.path.normcase`：Windows 文件系统**大小写不敏感**，而这里
-        原先做的是大小写敏感比较，于是守卫形同虚设（2026-09-22 审计实测）：
-        - `...\\.GIT` → 放行，而 `os.path.isdir` 为真（就是真 .git）
-        - `...\\.ENV` → 放行（删掉含密钥的 .env）
-        - `D:\\AAA\\WORK\\WORK\\MY_AGENT` → 放行（`recursive: true` 会删掉整个仓库）
-        POSIX 上 `normcase` 是恒等变换，行为不变。
+        比较一律走 `os.path.normcase`：Windows 大小写不敏感，敏感比较会让 .GIT /
+        .ENV / 盘符大小写变体绕过守卫。POSIX 上 normcase 是恒等变换。
         """
         if not path or not path.strip():
             return "删除操作需要路径"

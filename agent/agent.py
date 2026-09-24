@@ -279,7 +279,7 @@ class Agent:
         self.consent_ask = self._build_consent_ask()
         # 任务监管者：独立模型复核"目标做完没有"（默认另一家厂商，避免同源自评）
         self.supervisor = self._build_supervisor()
-        # 小快模型（杂活专用：会话标题等）——学 Claude Code 把跑腿活从主模型挪走
+        # 小快模型（杂活专用：会话标题等）——把跑腿活从主模型挪走
         self.small_model = self._build_small_model()
 
         self.instructions_text = ""
@@ -514,7 +514,7 @@ class Agent:
         """构建小快模型（杂活专用：会话标题等）。禁用或失败时返回 None。
 
         为什么单独一个：这类活（起标题/写摘要）不需要主模型的智商，却会花掉它的
-        时间与上下文预算。Claude Code 就是这么干的（后台小模型跑杂活）。
+        时间与上下文预算。后台小模型跑杂活，正是主流做法。
         """
         from config import SMALL_MODEL_CONFIG
         if not SMALL_MODEL_CONFIG.get("enabled", True):

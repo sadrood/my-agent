@@ -90,7 +90,7 @@ def _tool_round(round_idx, n_calls=2):
 
 def test_compact_keeps_tool_round_integrity(tmp_path):
     """回归：截断线切在 tool 闭环中间时，compaction 后不能出现孤立的
-    role=tool 消息（其 tool_calls 被截掉）——glm-5.2 等严格校验会 400。"""
+    role=tool 消息（其 tool_calls 被截掉）——其它模型等严格校验会 400。"""
     def summarizer(msgs):
         return "摘要"
 

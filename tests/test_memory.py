@@ -317,7 +317,7 @@ class _NoLLM:
 
 def test_recall_without_llm_uses_lightweight_rank():
     """默认召回不调用 LLM（回归：旧实现每次任务启动都用主 LLM 排序，
-    glm-5.2 单轮 25-50s 拖慢启动且结果不稳定）。"""
+    其它模型单轮 25-50s 拖慢启动且结果不稳定）。"""
     m, tmp = _make_memory()
     m.save_experience(goal="用 Python 生成 Excel 报表", plan_steps=["s1"], success=True,
                       summary="用 openpyxl", tool_usage={"python": 2})

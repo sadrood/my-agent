@@ -98,7 +98,7 @@ def test_restore_conversation_model_switches(monkeypatch):
 
 def test_restore_conversation_model_respects_explicit_env(monkeypatch):
     """用户显式配置默认模型（环境变量）时，恢复对话**不**覆盖（回归：
-    .env 设 glm-5.2 却被旧对话绑定模型覆盖）。"""
+    .env 设其它模型却被旧对话绑定模型覆盖）。"""
     monkeypatch.setenv("LLM_DEFAULT_MODEL", "glm-5.2")
     from agent import Agent, AgentConfig
     config = AgentConfig(
@@ -168,13 +168,11 @@ def test_vision_model_auto_detect_with_ox_alpha():
 
 
 @pytest.mark.parametrize("base_url, model, expected", [
-    # 1) 主模型已知自带视觉 → 直接用它，不看端点
+    # 主模型已知自带视觉 → 直接用它，不看端点
     ("https://token.sensenova.cn/v1", "stealth/ox-alpha", "stealth/ox-alpha"),
-    # 2) OpenAI 官方端点 + 主模型不在推荐表 → 退回推荐表第一个（那些名字在那里一定存在）
+    # 官方端点 + 主模型不在推荐表 → 退回推荐表第一个（那些名字在那一定存在）
     ("https://api.openai.com/v1", "o1-preview", "gpt-4o"),
-    # 3) 第三方/自建端点 + 主模型不在推荐表 → 用主模型。
-    #    这是 2026-09-24 修掉的坑：旧实现一律选 gpt-4o，而它在这些端点上**不存在**，
-    #    于是每次视觉调用都先白失败一轮（模板留空 VISION_MODEL 时人人踩）。
+    # 第三方/自建端点 → 用主模型：盲选通用模型名在这些端点上并不存在，会白失败一轮
     ("https://token.sensenova.cn/v1", "deepseek-flash", "deepseek-flash"),
     ("http://172.16.10.242:3000", "deepseek-flash", "deepseek-flash"),
     ("https://openrouter.ai/api/v1", "qwen/qwen3-vl-72b", "qwen/qwen3-vl-72b"),

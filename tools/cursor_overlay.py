@@ -8,18 +8,19 @@
 - 光环跟随真实光标（半径 16 的橙色圆环 + 中心点）
 - 每次点击在落点画一圈扩散涟漪
 - 仅 Windows；Agent 操作期间显示，空闲 COMPUTER_CURSOR_IDLE 秒后自动隐藏
-- 环境变量 COMPUTER_CURSOR_OVERLAY=0 可整体关闭
+- 默认关闭，`COMPUTER_CURSOR_OVERLAY=1` 才开（见 config.COMPUTER_USE_CONFIG）
 
 实现要点：tkinter 无边框置顶窗 + `-transparentcolor` 抠出透明底，
 再用 Win32 扩展样式 WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|
 WS_EX_TOOLWINDOW 让鼠标事件穿透（不挡用户操作、不进任务栏、不抢焦点）。
 """
-import os
 import sys
 import threading
 import time
 from collections import deque
 from typing import Optional
+
+from config import COMPUTER_USE_CONFIG
 
 _TRANSPARENT_KEY = "#010203"     # 抠透明用的键色（近乎不会出现在 UI 里）
 _RING_COLOR = "#ff9d2e"          # 光环颜色（与 CLI 强调色一致）
@@ -27,14 +28,12 @@ _RIPPLE_COLOR = "#ffd08a"
 
 
 def overlay_enabled() -> bool:
-    """是否启用光标可视化。
+    """是否启用光标可视化（开关见 config.COMPUTER_USE_CONFIG）。
 
-    默认**关闭**（必须显式 COMPUTER_CURSOR_OVERLAY=1 才开）：
-    全屏置顶浮层一旦穿透失效会吞掉整屏鼠标事件并抢焦点，
+    默认**关闭**：全屏置顶浮层一旦点击穿透失效会吞掉整屏鼠标事件并抢焦点，
     风险高于收益，改为按需开启。
     """
-    return str(os.getenv("COMPUTER_CURSOR_OVERLAY", "0")).strip().lower() in (
-        "1", "true", "on", "yes")
+    return bool(COMPUTER_USE_CONFIG.get("cursor_overlay"))
 
 
 class CursorOverlay:
@@ -49,6 +48,8 @@ class CursorOverlay:
         self._alive_until = 0.0
         self._ripples: list = []          # [(born_ts, x, y)]
         self._hwnd = 0
+        #: 持住 Tk 根窗引用：销毁与析构都会拆 Tcl，跨线程做会把解释器带崩（见 stop()）
+        self._root = None
 
     # ---------------- 对外 API（线程安全、永不抛） ----------------
     @staticmethod
@@ -79,8 +80,10 @@ class CursorOverlay:
             self._cmds.append(("ripple", int(x), int(y)))
 
     def stop(self) -> None:
-        with self._lock:
-            self._cmds.append(("quit", 0, 0))
+        """隐藏浮层（不销毁窗口）：跨线程拆 Tcl 会在任意时刻把解释器带崩。
+        窗口常驻、空闲时画布清空即全透明，随 daemon 线程结束即可。
+        """
+        self._alive_until = 0.0
 
     # ---------------- 内部实现 ----------------
     def _ensure_started(self) -> None:
@@ -99,6 +102,7 @@ class CursorOverlay:
             return
         try:
             root = tk.Tk()
+            self._root = root
             root.overrideredirect(True)
             root.attributes("-topmost", True)
             try:
@@ -111,10 +115,9 @@ class CursorOverlay:
             canvas = tk.Canvas(root, width=sw, height=sh, bg=_TRANSPARENT_KEY,
                                highlightthickness=0, bd=0)
             canvas.pack()
-            # 点击穿透 + 不抢焦点 + 不进任务栏。
-            # 关键教训：只给顶层窗口设 WS_EX_TRANSPARENT 不够——Tk 的 Canvas 是
-            # **子窗口**，会自己吞掉整屏鼠标事件（曾导致鼠标"失灵"、焦点被抢）。
-            # 这里对顶层 + 所有子窗口都设置，并在设置后**读回校验**，任一失败即销毁禁用。
+            # 点击穿透 + 不抢焦点 + 不进任务栏：必须给顶层**和所有子窗口**都设
+            # WS_EX_TRANSPARENT（Tk 的 Canvas 是子窗口，只设顶层会吞掉整屏鼠标事件），
+            # 并在设置后读回校验，任一失败即放弃显示。
             GWL_EXSTYLE = -20
             WS_EX_LAYERED, WS_EX_TRANSPARENT = 0x00080000, 0x00000020
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
@@ -149,10 +152,8 @@ class CursorOverlay:
                     ok = False
             if not ok:
                 print("[cursor_overlay] 点击穿透校验失败，已放弃显示（避免吞掉鼠标事件）", file=sys.stderr)
-                try:
-                    root.destroy()
-                except Exception:
-                    pass
+                # 不销毁窗口：拆 Tcl 会在随后任意时刻把解释器带崩（见 stop()）。
+                # 此时还没 ShowWindow，保持不映射即可；self._root 持着引用防析构
                 self._ready.set()
                 return
             try:
@@ -180,9 +181,6 @@ class CursorOverlay:
                     cmds = list(self._cmds)
                     self._cmds.clear()
                 for kind, x, y in cmds:
-                    if kind == "quit":
-                        root.destroy()
-                        return
                     if kind == "ripple":
                         cx, cy = (x, y) if (x or y) else cursor_pos()
                         self._ripples.append((now, cx, cy))
@@ -220,5 +218,6 @@ def get_overlay() -> Optional[CursorOverlay]:
         return None
     with _overlay_lock:
         if _overlay is None:
-            _overlay = CursorOverlay()
+            _overlay = CursorOverlay(
+                idle_seconds=float(COMPUTER_USE_CONFIG.get("cursor_idle_seconds", 6)))
         return _overlay

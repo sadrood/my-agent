@@ -340,11 +340,7 @@ class ComputerUseMixin:
 #       min_sandbox_mode=danger-full-access（AppContainer 沙箱内无法操控 GUI）。
 # ================================================================
 
-#: 桌面操控是否有本平台实现。整个工具的能力（鼠标/键盘/窗口/UIA 无障碍树）都
-#: 建立在 Win32 + UIAutomation 上，Linux/macOS 上没有任何替代实现。
-#: 公开名字（不是 `_COMPUTER_SUPPORTED`）：工具注册方要据此决定**是否注册** ——
-#: 否则非 Windows 平台也会拿到一个每个 action 都返回"仅支持 Windows"的工具，
-#: 而 agent 还会因为它存在而追加桌面操控提示，白白烧轮数（2026-09-24 审计）。
+#: 桌面操控（鼠标/键盘/窗口/UIA）只有 Win32 实现；工具注册方据此决定是否注册。
 COMPUTER_SUPPORTED = _platform.system() == "Windows"
 
 # Windows 虚拟键码（key 动作支持的键名 → VK）
@@ -388,8 +384,7 @@ _LAST_SYNTHETIC_MS = 0.0
 def _now_ms() -> int:
     """与 GetLastInputInfo 同基准的毫秒时钟（GetTickCount，开机起算）。
 
-    注意：不能用 time.time()（纪元毫秒）——两者基准不同会让"多久没输入"
-    永远算错（实测踩过：用户明明在动鼠标，却判定为无人操作）。
+    time.time() 是纪元毫秒，基准不同会让"多久没输入"永远算错。
     """
     try:
         import ctypes

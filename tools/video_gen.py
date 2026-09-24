@@ -5,18 +5,17 @@
     generate → POST /videos 创建任务 → 轮询等待 → 完成下载 mp4
     status   → 查询已有任务（等待超时/长任务稍后取结果）
 
-为什么要 status 命令：5 秒 / 720P 实测约 41 秒完成，更长视频可能超过
-工具内等待上限（VIDEO_GEN_MAX_WAIT，默认 240s，需小于工具级硬超时 300s）。
-超时时不会丢任务——返回 task_id，模型可稍后用 status 取回。
+超时不会丢任务：返回 task_id，模型可稍后用 status 取回
+（VIDEO_GEN_MAX_WAIT 默认 240s，需小于工具级硬超时 300s）。
 
 依赖：models.video_gen.VideoGenModel。
-配置：VIDEO_GEN_*（.env），默认 Agnes：https://api.agnes-ai.cn/v1。
+配置：VIDEO_GEN_*（.env），端点与模型均在 .env 里指定。
 """
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
-# 实测支持的档位（Flash 仅 720P；2.5 更多，配置可覆盖）
+# 支持的档位（Flash 仅 720P；2.5 更多，可由配置覆盖）
 SIZE_CHOICES = ["720P", "1080P"]
 ASPECT_CHOICES = ["16:9", "9:16", "1:1", "4:3", "3:4"]
 SECOND_CHOICES = ["3", "5", "10"]
@@ -28,10 +27,8 @@ class VideoGenTool(BaseTool):
     risk_level: str = "low"
     approval: str = "auto"
     min_sandbox_mode: str = "workspace-write"   # 需写入视频文件
-    # 输出文件唯一命名（vid-<时间戳>-<task_id>.mp4），互不冲突，可并行。
-    # 实测意义很大：模型本来就会一轮发 4-5 个镜头，此前被串行成一个个跑，
-    # 26 镜的漫剧有 48/60 分钟都耗在"等视频"。执行器侧已有并发上限
-    # （TOOL_CONFIG.max_parallel_tools，默认 4），不会把上游打爆。
+    # 输出唯一命名（vid-<时间戳>-<task_id>.mp4）故可并行：模型常一轮发 4-5 个镜头，
+    # 串行会把大部分时间耗在等视频；执行器侧有并发上限 max_parallel_tools（默认 4）。
     parallel_safe: bool = True
 
     def __init__(self, video_model=None):
@@ -123,10 +120,8 @@ class VideoGenTool(BaseTool):
         prompt = str(args.get("prompt") or "").strip()
         task_id = str(args.get("task_id") or "").strip()
 
-        # 容错：实测模型经常把整段提示词塞进 command、顺手漏掉 prompt
-        # （30 次调用里 7 次如此）。旧代码直接回 "未知命令: <两百字提示词>"，
-        # 模型只能重做一次——每次白等约 110 秒。这里按意图纠正，别让工具比
-        # 模型更死板；字符串入口 execute() 早就是宽松的，两条路径保持一致。
+        # 容错：模型常把整段提示词塞进 command 而漏掉 prompt；直接回"未知命令"
+        # 会让它重做一次、白等一轮。按意图纠正，与宽松的 execute() 保持一致。
         low = cmd.lower()
         if low in ("", "generate", "gen", "create"):
             cmd = "generate"
@@ -224,11 +219,8 @@ class VideoGenTool(BaseTool):
                 f"稍后用 video_gen(command=\"status\", task_id=\"{vid}\") 取结果。")
 
         # `wait=false`（schema 推荐的"超长视频"用法）时任务刚 queued，local/url 必然都
-        # 为空 —— 旧实现 `success=bool(local or url)` 把它报成"执行失败"，而
-        # agent/executor.py 对失败结果只回"执行失败（无错误信息）"、把 output（含
-        # task_id）整段丢掉 ⇒ 模型拿不到 task_id，只能重新创建任务，重复烧配额。
-        # 任务**已经创建**就该算成功，与上面的 timed_out 分支保持一致
-        # （2026-09-22 审计实测：任务已计费却报失败）。
+        # 任务已经创建就该算成功：报失败会让 executor 丢掉 output（含 task_id），
+        # 模型只能重建任务、重复烧配额。与上面的 timed_out 分支保持一致。
         return ToolResult(
             success=bool(local or url or vid),
             output="\n".join(lines),
