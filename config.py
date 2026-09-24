@@ -182,7 +182,8 @@ BROWSER_CONFIG = {
 #   VISION_MODEL=<商汤视觉模型名>
 #
 # 2026-09-23 实测（同一张答案已知的图；单图 2 次 + 多图/时序 2 次）：
-#   agnes-3.0-flash 30s×2 全超时；deepseek-flash（= DeepSeek V4.1 Flash）与
+#   agnes-3.0-flash 能读图（复测 2.0s/18.7s，3/3）但延迟波动大、认字精度略逊；
+#   deepseek-flash（= DeepSeek V4.1 Flash）与
 #   sensenova-6.8-flash-lite 都 3/3 命中、多图 4/4，1-4s。**关键：商汤
 #   `GET /models` 把 deepseek-flash 的 input_modalities 标成 ["text"]，实测却
 #   完全能读图** —— 判断某模型能不能读图不能只看元数据，要拿答案已知的图打一次。
