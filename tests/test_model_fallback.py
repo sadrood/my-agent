@@ -120,6 +120,94 @@ class TestVisionFallback:
             vm.analyze("ZmFrZQ==", "看图")
 
 
+class TestVisionFallbackChain:
+    """备用链支持"每个条目自带端点"（`模型@预设名`）——跨厂商兜底必需。
+
+    背景：`VISION_FALLBACK_API_KEY` 只有一份，而"商汤主 + Agnes 备"需要两套 key；
+    把 key 写进模型列表又会被 `/config`、doctor 打印出来（等于写进日志）。所以 key
+    放 `VISION_FALLBACK_ENDPOINT_<预设>_API_KEY`，列表里只写 `模型@预设名`。
+    """
+
+    def _cfg(self, monkeypatch, models, presets=None, **over):
+        monkeypatch.setitem(cfg.VISION_CONFIG, "vision_model", "primary-vision")
+        monkeypatch.setitem(cfg.VISION_CONFIG, "base_url", "https://primary.example/v1")
+        monkeypatch.setitem(cfg.VISION_CONFIG, "api_key", "k-primary")
+        monkeypatch.setitem(cfg.VISION_CONFIG, "fallback_models", list(models))
+        monkeypatch.setitem(cfg.VISION_CONFIG, "fallback_base_url", "https://backup.example/v1")
+        monkeypatch.setitem(cfg.VISION_CONFIG, "fallback_api_key", "k-backup")
+        monkeypatch.setitem(cfg.VISION_CONFIG, "fallback_presets", presets or {})
+        monkeypatch.setitem(cfg.VISION_CONFIG, "fallback_timeout", 20.0)
+        for key, value in over.items():
+            monkeypatch.setitem(cfg.VISION_CONFIG, key, value)
+        return cfg.VISION_CONFIG
+
+    def test_plain_entry_uses_shared_endpoint(self, monkeypatch):
+        self._cfg(monkeypatch, ["backup-a"])
+        entries = vision_mod.parse_fallback_entries()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert (entry["model"], entry["base_url"], entry["api_key"]) == (
+            "backup-a", "https://backup.example/v1", "k-backup")
+        assert entry["preset"] == "" and entry["preset_known"] is True
+        assert entry["timeout"] == 20.0
+
+    def test_preset_entry_uses_its_own_endpoint_and_key(self, monkeypatch):
+        self._cfg(monkeypatch, ["backup-a", "other-model@agnes"],
+                  presets={"agnes": {"base_url": "https://agnes.example/v1",
+                                     "api_key": "k-agnes"}})
+        entries = vision_mod.parse_fallback_entries()
+        assert [e["model"] for e in entries] == ["backup-a", "other-model"]
+        assert entries[0]["base_url"] == "https://backup.example/v1"
+        assert entries[1]["base_url"] == "https://agnes.example/v1"
+        assert entries[1]["api_key"] == "k-agnes"
+        assert entries[1]["preset"] == "agnes" and entries[1]["preset_known"] is True
+
+    def test_preset_name_is_case_insensitive(self, monkeypatch):
+        self._cfg(monkeypatch, ["m@AgNeS"],
+                  presets={"agnes": {"base_url": "https://agnes.example/v1",
+                                     "api_key": "k-agnes"}})
+        assert vision_mod.parse_fallback_entries()[0]["preset_known"] is True
+
+    def test_unknown_preset_falls_back_but_is_flagged(self, monkeypatch):
+        """预设名写错不能抛错（视觉要 fail-open），但要标记出来让 --doctor 报。"""
+        self._cfg(monkeypatch, ["other@typo"], presets={})
+        entry = vision_mod.parse_fallback_entries()[0]
+        assert entry["base_url"] == "https://backup.example/v1"      # 回落共享端点
+        assert entry["preset"] == "typo" and entry["preset_known"] is False
+
+    def test_blank_entries_are_skipped(self, monkeypatch):
+        self._cfg(monkeypatch, ["", "  ", "@agnes", "ok"])
+        assert [e["model"] for e in vision_mod.parse_fallback_entries()] == ["ok"]
+
+    def test_chain_order_and_per_entry_endpoints(self, monkeypatch):
+        """三级链：主 → 同端点备用 → 跨厂商备用；顺序与各自端点都要对。"""
+        self._cfg(monkeypatch, ["same-vendor", "cross@agnes"],
+                  presets={"agnes": {"base_url": "https://agnes.example/v1",
+                                     "api_key": "k-agnes"}})
+        created = []
+
+        class _C:
+            def __init__(self, base_url, api_key):
+                self.base_url, self.api_key = base_url, api_key
+                created.append((base_url, api_key))
+
+        monkeypatch.setattr(vision_mod, "OpenAI",
+                            lambda **kw: _C(kw.get("base_url"), kw.get("api_key")))
+        vm = VisionModel()
+        chain = ([(vm.vision_model, str(vm.base_url))]
+                 + [(model, str(client.base_url)) for model, client in vm._fallback_clients()])
+        assert [model for model, _ in chain] == ["primary-vision", "same-vendor", "cross"]
+        assert chain[1][1] == "https://backup.example/v1"
+        assert chain[2][1] == "https://agnes.example/v1"
+        assert ("https://agnes.example/v1", "k-agnes") in created
+
+    def test_duplicate_entries_are_skipped(self, monkeypatch):
+        self._cfg(monkeypatch, ["dup", "dup"])
+        monkeypatch.setattr(vision_mod, "OpenAI",
+                            lambda **kw: _FakeClient(str(kw.get("base_url"))))
+        assert [m for m, _ in VisionModel()._fallback_clients()] == ["dup"]
+
+
 class TestImageGenFallback:
     def _model(self, monkeypatch, primary_ok=False):
         """桩掉 httpx.post：主端点按需失败，备用端点成功。"""

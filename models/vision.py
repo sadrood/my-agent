@@ -15,6 +15,52 @@ from openai import OpenAI
 from config import LLM_CONFIG, VISION_CONFIG
 
 
+def parse_fallback_entries(config: dict = None) -> list:
+    """把 `VISION_FALLBACK_MODELS` 解析成备用链条目（纯函数，便于单测与自检）。
+
+    条目写法（逗号分隔，顺序即尝试顺序）：
+      `模型名`        → 用共享端点（VISION_FALLBACK_BASE_URL / _API_KEY）
+      `模型名@预设名`  → 用该预设自己的端点与 key
+                        （VISION_FALLBACK_ENDPOINT_<预设名>_BASE_URL / _API_KEY）
+
+    为什么要有预设写法：跨厂商备用（商汤主 + Agnes 备）需要**各自一套 key**，而
+    `VISION_FALLBACK_API_KEY` 只有一份；把 key 写进模型列表又会被 `/config` 之类
+    的地方打印出来（等于把密钥写进日志）。预设名大小写不敏感。
+
+    返回 [{model, base_url, api_key, timeout, preset, preset_known}, ...]。
+    预设名写错时**不抛错**（视觉必须 fail-open），而是回落到共享端点并把
+    preset_known 置 False —— `my-agent --doctor` 会把这种条目当配置错误报出来。
+    """
+    cfg = VISION_CONFIG if config is None else config
+    presets = cfg.get("fallback_presets") or {}
+    default_base = str(cfg.get("fallback_base_url") or cfg.get("base_url") or "")
+    default_key = str(cfg.get("fallback_api_key") or cfg.get("api_key") or "")
+    timeout = float(cfg.get("fallback_timeout", 60))
+
+    entries = []
+    for raw in cfg.get("fallback_models") or []:
+        item = str(raw).strip()
+        if not item:
+            continue
+        model, _, preset_name = item.partition("@")
+        model, preset_name = model.strip(), preset_name.strip()
+        if not model:
+            continue
+        preset_known = True
+        if preset_name:
+            preset = presets.get(preset_name.lower())
+            preset_known = preset is not None
+            preset = preset or {}
+            base = str(preset.get("base_url") or default_base)
+            key = str(preset.get("api_key") or default_key)
+        else:
+            base, key = default_base, default_key
+        entries.append({"model": model, "base_url": base, "api_key": key,
+                        "timeout": timeout, "preset": preset_name,
+                        "preset_known": preset_known})
+    return entries
+
+
 class VisionModel:
     """
     视觉分析模型。
@@ -81,28 +127,27 @@ class VisionModel:
         任务连续分析几十张截图就会创建几十个连接池，只能等 GC 回收
         （2026-09-22 审计）。
         """
-        models = VISION_CONFIG.get("fallback_models") or []
-        base = VISION_CONFIG.get("fallback_base_url") or VISION_CONFIG.get("base_url")
-        key = VISION_CONFIG.get("fallback_api_key") or VISION_CONFIG.get("api_key")
-        timeout = float(VISION_CONFIG.get("fallback_timeout", 60))
-        cache_key = (tuple(models), str(base), str(key),
-                     str(self.vision_model), str(self.base_url), timeout)
+        entries = parse_fallback_entries()
+        cache_key = (tuple((e["model"], e["base_url"], e["api_key"]) for e in entries),
+                     str(self.vision_model), str(self.base_url),
+                     float(VISION_CONFIG.get("fallback_timeout", 60)))
         if getattr(self, "_fallback_cache_key", None) == cache_key:
             return self._fallback_cache
 
         out = []
-        if models:
-            for model in models:
-                if not model:
-                    continue
-                # 与主端点+主模型完全相同的条目没有意义（重试同一个东西）
-                if model == self.vision_model and str(base) == str(self.base_url):
-                    continue
-                try:
-                    client = OpenAI(api_key=key, base_url=base, timeout=timeout, max_retries=0)
-                except Exception:                   # noqa: BLE001
-                    continue
-                out.append((model, client))
+        seen = {(str(self.vision_model), str(self.base_url))}
+        for entry in entries:
+            model, base = entry["model"], entry["base_url"]
+            # 与主端点+主模型完全相同、或链里重复的条目没有意义（重试同一个东西）
+            if (str(model), str(base)) in seen:
+                continue
+            seen.add((str(model), str(base)))
+            try:
+                client = OpenAI(api_key=entry["api_key"] or "", base_url=base,
+                                timeout=float(entry["timeout"]), max_retries=0)
+            except Exception:                       # noqa: BLE001
+                continue
+            out.append((model, client))
         self._fallback_cache_key = cache_key
         self._fallback_cache = out
         return out

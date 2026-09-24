@@ -412,7 +412,7 @@ OCR_PREFER_FOR_TEXT=true         # 要文字时直接用 OCR，不先问视觉�
 
 | 用途 | 可用的模型 | 备注 |
 |---|---|---|
-| 视觉（能读图） | `deepseek-flash`（= DeepSeek V4.1 Flash）、`sensenova-6.8-flash-lite` | 用答案已知的图实测：单图 3/3、多图（视频抽帧时序）4/4。**注意 `deepseek-flash` 的 `input_modalities` 只写 `["text"]`，实测却完全能读图**——元数据不可尽信，判断能不能读图要拿图打一次（见 三·十四）；`gpt-5.6-terra` 也能读图但中文 OCR 会幻觉（"橙子七号"→"魔法导览"）；`sensenova-6.7-flash-lite` 对多模态返回 404 |
+| 视觉（能读图） | `deepseek-flash`（= DeepSeek V4.1 Flash）、`sensenova-6.8-flash-lite`、`agnes-3.0-flash` | 用答案已知的图实测：单图 3/3、多图（视频抽帧时序）4/4。**注意 `deepseek-flash` 的 `input_modalities` 只写 `["text"]`，实测却完全能读图**——元数据不可尽信，判断能不能读图要拿图打一次（见 三·十四）；`agnes-3.0-flash` 也能读图（2.0s/18.7s），但延迟波动大、认字精度略逊（把 7391 读成 7301），适合当**跨厂商备用**；`gpt-5.6-terra` 也能读图但中文 OCR 会幻觉（"橙子七号"→"魔法导览"）；`sensenova-6.7-flash-lite` 对多模态返回 404 |
 | 生图 | `sensenova-u1.5-lite`、`sensenova-u1.5-fast`、`sensenova-u1-fast` | `/images/generations` 均可用，返回 b64_json |
 | 纯文本 | `deepseek-v4-pro`、`glm-5.2`、`kimi-k3` 等 | 见下方"列出可用模型" |
 
@@ -480,6 +480,22 @@ see path="D:/clips/demo.mp4"         # 本地视频
 ```
 
 - **图片**：原图直接交给视觉模型；只要"文字"时先走本地 OCR（离线、免费、不超时）。
+- **视觉超时有三层**（实测行为，别只看配置）：
+  1. `VISION_MODEL` → `VISION_FALLBACK_MODELS` 的模型级备用链，**超时会触发**它
+     （实测：主模型超时 0.05s → 备用顶上并在输出里注明"本次由备用模型 X 应答"）；
+  2. 备用链**每个条目可以自带端点**（`模型@预设名`，预设见
+     `VISION_FALLBACK_ENDPOINT_<名字>_BASE_URL / _API_KEY`）——所以能配成
+     "商汤主 → 商汤备用 → 跨厂商 Agnes"：同端点那级兜"某个模型坏了"，跨端点那级才兜得住
+     "整个端点限流/变慢"（实测主备同端点时两条一起 `Request timed out`，等于没有备用）；
+     真机验证过两级都会顶上：主模型写错 → 商汤 `sensenova-6.8-flash-lite` 3.5s 答对；
+     商汤两级都写错 → Agnes 5.5s 答对；
+  3. 模型链全挂 → **本地 OCR** 兜底（`see` 的截图/图片路径、`computer screenshot`、
+     `ocr` 工具），至少把文字读出来，但给不了版面/元素坐标/画面理解。
+  - ⚠️ **超时预算要压在调用方预算内**：`browser visionclick` 只有 60s，所以
+    `VISION_TIMEOUT` + 备用链各级超时之和应小于 60（本机 15+20+20=55s）。
+    429 会立刻失败、不吃满预算，所以这个和不建议再放大。
+  - 预设名写错**不会报错**（视觉必须 fail-open），而是静默回落到共享端点；
+    `my-agent --doctor` 的「子系统模型对账」会把这种条目当配置错误报出来。
 - **视频**：上游**没有任何模型声明 video 输入模态**（商汤 `GET /models` 只有 `text`
   与 `text,image`），所以视频是**等间隔抽帧 → 多图一次请求**：帧必须放在同一个请求里，
   模型才能比较帧间变化（分多次问只能拿到各帧的孤立描述）。抽出的临时帧用完即删。
