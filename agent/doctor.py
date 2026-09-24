@@ -247,9 +247,13 @@ def _subsystem_endpoints() -> List[dict]:
     if VISION_CONFIG.get("enabled", True):
         add("视觉", VISION_CONFIG.get("base_url"), VISION_CONFIG.get("api_key"),
             VISION_CONFIG.get("vision_model"))
-        for model in VISION_CONFIG.get("fallback_models") or []:
-            add("视觉备用", VISION_CONFIG.get("fallback_base_url"),
-                VISION_CONFIG.get("fallback_api_key"), model)
+        # 备用链的每个条目可能**各自带端点**（`模型@预设`），要按解析结果逐条对账
+        try:
+            from models.vision import parse_fallback_entries
+            for idx, entry in enumerate(parse_fallback_entries(), 1):
+                add(f"视觉备用{idx}", entry["base_url"], entry["api_key"], entry["model"])
+        except Exception:                           # noqa: BLE001
+            pass
     if GUARDIAN_CONFIG.get("enabled", False):
         add("Guardian", GUARDIAN_CONFIG.get("base_url"), GUARDIAN_CONFIG.get("api_key"),
             GUARDIAN_CONFIG.get("model"))
@@ -300,6 +304,24 @@ def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
     主 LLM key 的备用链就会拿 A 家的 key 去打 B 家的端点）。
     """
     fetch = fetch or _fetch_model_ids
+
+    # 预设名写错（`模型@不存在的预设`）会**静默回落到共享端点** —— 那可能变成拿
+    # A 家 key 打 B 家端点，所以必须在联网对账之前就报出来
+    try:
+        from models.vision import parse_fallback_entries
+        bad_presets = sorted({e["preset"] for e in parse_fallback_entries()
+                              if not e["preset_known"]})
+    except Exception:                               # noqa: BLE001
+        bad_presets = []
+    if bad_presets:
+        return {
+            "name": "子系统模型对账",
+            "ok": False,
+            "message": "视觉备用链里引用了**不存在**的端点预设：" + ", ".join(bad_presets),
+            "hint": ("预设由 VISION_FALLBACK_ENDPOINT_<名字>_BASE_URL / _API_KEY 定义；"
+                     "名字写错时不会报错，而是回落到共享端点（可能拿 A 家 key 打 B 家端点）"),
+        }
+
     items = _subsystem_endpoints()
     if not items:
         return {"name": "子系统模型对账", "ok": True,

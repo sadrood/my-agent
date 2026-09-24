@@ -174,6 +174,40 @@ BROWSER_CONFIG = {
 # ============================================================
 # 视觉模型配置
 # ============================================================
+
+#: VISION_FALLBACK_MODELS 里 `模型@预设名` 用到的端点预设前缀
+VISION_FALLBACK_PRESET_PREFIX = "VISION_FALLBACK_ENDPOINT_"
+
+
+def vision_fallback_presets() -> dict:
+    """收集视觉备用链的**命名端点预设**：{预设名: {"base_url":..., "api_key":...}}。
+
+    背景（2026-09-23 实测踩到）：跨厂商备用（商汤主 + Agnes 备）需要**各自一套
+    key**，可 `VISION_FALLBACK_API_KEY` 只有一份。把 key 直接写进
+    `VISION_FALLBACK_MODELS` 列表虽然能跑，但那份列表会被 `/config`、doctor 之类
+    的地方打印出来 —— 等于把密钥写进了日志。所以 key 放独立变量、列表里只留
+    `模型@预设名`：
+
+        VISION_FALLBACK_MODELS=sensenova-6.8-flash-lite,agnes-3.0-flash@agnes
+        VISION_FALLBACK_ENDPOINT_AGNES_BASE_URL=https://api.agnes-ai.cn/v1
+        VISION_FALLBACK_ENDPOINT_AGNES_API_KEY=sk-...
+
+    预设名大小写不敏感；空值视为未设置。
+    """
+    out: dict = {}
+    for name, value in list(os.environ.items()):
+        if not name.startswith(VISION_FALLBACK_PRESET_PREFIX):
+            continue
+        rest = name[len(VISION_FALLBACK_PRESET_PREFIX):]
+        for suffix, field in (("_BASE_URL", "base_url"), ("_API_KEY", "api_key")):
+            if rest.endswith(suffix):
+                preset = rest[: -len(suffix)].strip().lower()
+                if preset and str(value).strip():
+                    out.setdefault(preset, {})[field] = str(value).strip()
+                break
+    return out
+
+
 # 视觉模型可使用独立端点（VISION_API_KEY / VISION_BASE_URL），
 # 留空时回退到主 LLM 的 key / base_url。
 # 例如主模型用 OpenRouter，视觉模型用商汤 SenseNova：
@@ -196,14 +230,16 @@ VISION_CONFIG = {
     # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
     # browser visionclick 仅 60s），必须显式收紧
     "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
-    # 备用视觉模型：主模型超时/报错/不支持图片时按顺序接着试
-    # （实测商汤 sensenova-6.8-flash-lite 能读图，主模型抖动时可顶上）。
-    # 注意**只有一组 base_url/api_key**：多个模型名共用同一个备用端点，
-    # 所以"跨厂商兜底"只能选一家——要主备分属两家就：主走 VISION_*、备用放这里。
-    # 逗号分隔多个模型；base_url/api_key 留空 = 用主 LLM 端点（商汤）。
+    # 备用视觉模型：主模型超时/报错/不支持图片时按顺序接着试。
+    # 条目写法（逗号分隔）：
+    #   模型名            → 用下面这组共享端点（fallback_base_url / fallback_api_key）
+    #   模型名@预设名      → 用该预设自己的端点与 key（见 vision_fallback_presets）
+    # 顺序敏感：**先同厂商模型、再跨厂商**——同端点的那级能兜"单个模型坏了"，
+    # 跨厂商那级才兜得住"整个端点限流/变慢"（实测主备同端点时两条一起 timed out）。
     "fallback_models": [m.strip() for m in
                         os.getenv("VISION_FALLBACK_MODELS",
                                   "sensenova-6.8-flash-lite").split(",") if m.strip()],
+    "fallback_presets": vision_fallback_presets(),
     "fallback_base_url": os.getenv("VISION_FALLBACK_BASE_URL", "") or LLM_CONFIG["base_url"],
     "fallback_api_key": os.getenv("VISION_FALLBACK_API_KEY", "") or LLM_CONFIG["api_key"],
     "fallback_timeout": float(os.getenv("VISION_FALLBACK_TIMEOUT", "60")),

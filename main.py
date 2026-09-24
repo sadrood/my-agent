@@ -441,10 +441,16 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print(f"[dim]  主模型    {agent.llm.default_model} @ {agent.llm.client.base_url}[/dim]")
             c.print(f"[dim]  主 key     {masked}[/dim]")
             c.print(f"[dim]  视觉      {VISION_CONFIG.get('vision_model') or LLM_CONFIG.get('default_model')} @ {VISION_CONFIG.get('base_url')}[/dim]")
-            _vis_fb = VISION_CONFIG.get("fallback_models") or []
-            if _vis_fb:
-                c.print(f"[dim]  视觉备用  {'/'.join(_vis_fb)} @ {VISION_CONFIG.get('fallback_base_url')}"
-                        f"（单次超时 {VISION_CONFIG.get('timeout')}s 后自动换）[/dim]")
+            # 备用链可能每个条目各自带端点（`模型@预设`），按解析结果逐级显示
+            # （只显示模型与端点，不显示 key）
+            try:
+                from models.vision import parse_fallback_entries
+                _vis_chain = parse_fallback_entries()
+            except Exception:
+                _vis_chain = []
+            for _i, _entry in enumerate(_vis_chain, 1):
+                c.print(f"[dim]  视觉备用{_i} {_entry['model']} @ {_entry['base_url']}"
+                        f"（超时 {_entry['timeout']:g}s 后换下一级）[/dim]")
             c.print("[dim]  看图/看视频 see 工具（视频=等间隔抽帧后多图理解；OCR 兜底识字）[/dim]")
             c.print(f"[dim]  Guardian  {'开' if GUARDIAN_CONFIG.get('enabled') else '关'}"
                     f"{' · ' + (GUARDIAN_CONFIG.get('model') or '') if GUARDIAN_CONFIG.get('model') else ''}[/dim]")

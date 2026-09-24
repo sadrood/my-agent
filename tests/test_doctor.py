@@ -341,3 +341,43 @@ class TestSubsystemModelCheck:
         monkeypatch.setattr(doc, "_check_subsystem_models", lambda: stub)
         names = {r["name"] for r in doc.run_doctor(include_llm=True)}
         assert "子系统模型对账" in names
+
+
+class TestVisionFallbackReconciliation:
+    """备用视觉链的条目可能各自带端点（`模型@预设`），对账要按各自端点来。"""
+
+    def _vision(self, monkeypatch, models, presets=None):
+        from config import VISION_CONFIG
+        monkeypatch.setitem(VISION_CONFIG, "vision_model", "vm")
+        monkeypatch.setitem(VISION_CONFIG, "base_url", "https://a.example/v1")
+        monkeypatch.setitem(VISION_CONFIG, "api_key", "k1")
+        monkeypatch.setitem(VISION_CONFIG, "fallback_models", list(models))
+        monkeypatch.setitem(VISION_CONFIG, "fallback_base_url", "https://b.example/v1")
+        monkeypatch.setitem(VISION_CONFIG, "fallback_api_key", "k2")
+        monkeypatch.setitem(VISION_CONFIG, "fallback_presets", presets or {})
+        return VISION_CONFIG
+
+    def test_each_entry_listed_with_its_own_endpoint(self, monkeypatch):
+        self._vision(monkeypatch, ["m1", "m2@agnes"],
+                     {"agnes": {"base_url": "https://agnes.example/v1", "api_key": "k3"}})
+        items = {i["name"]: i for i in doc._subsystem_endpoints()}
+        assert items["视觉备用1"]["model"] == "m1"
+        assert items["视觉备用1"]["base_url"] == "https://b.example/v1"
+        assert items["视觉备用2"]["model"] == "m2"
+        assert items["视觉备用2"]["base_url"] == "https://agnes.example/v1"
+
+    def test_unknown_preset_is_reported_as_failure(self, monkeypatch):
+        """预设名写错会静默回落共享端点 → 自检必须当配置错误报出来（不联网）。"""
+        self._vision(monkeypatch, ["m@typo"], presets={})
+        r = doc._check_subsystem_models(fetch=lambda *a, **k: [])
+        assert r["ok"] is False
+        assert "typo" in r["message"] and "预设" in r["message"]
+        assert "VISION_FALLBACK_ENDPOINT_" in r["hint"]
+
+    def test_known_preset_passes(self, monkeypatch):
+        self._vision(monkeypatch, ["m@agnes"],
+                     {"agnes": {"base_url": "https://agnes.example/v1", "api_key": "k3"}})
+        # 对账会检查**所有**子系统，所以桩要返回全部条目的模型名，否则别的子系统会报缺失
+        expected = [i["model"] for i in doc._subsystem_endpoints()]
+        r = doc._check_subsystem_models(fetch=lambda base, key, timeout=8.0: expected)
+        assert r["ok"] is True
