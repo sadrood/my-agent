@@ -456,13 +456,16 @@ agent 每天真正依赖这几件事，缺一个就残废——用 `tools/local/
 
 | 端点 | 能力 | 延迟 | 限流 |
 |---|---|---|---|
-| 内网网关 | 7/7（工具 + 流式 + reasoning 回传 + JSON + 逻辑题） | 中位 0.7s、最慢 1.6s | 无（12/12 成功） |
-| 商汤外网 | 未测全（429 打断） | 单次普通问答 12.5s | 配额已满，探针在 51-111s 退避里空转 |
+| 商汤 token.sensenova.cn（官方 token plan，定价 0） | 7/7（工具 + 流式 + reasoning 回传 + JSON + 逻辑题） | 能答时 2-7s | **免费档限流硬**：6 项检查里 3 项撞 429，退避 32-110s |
+| 内网网关 | 7/7（同一套检查） | 中位 0.7s、最慢 1.6s | 无（12/12 成功），不计费 |
 
-结论：**同一个模型换个端点，可用性天差地别** —— 主模型要指向快且不限流的那个端点。
+结论：**同一个模型换个端点，可用性天差地别**——但选哪个是"官方托管/任何网络可达"
+与"快而不限流/依赖那条内网"之间的取舍。本机 `.env` 用**官方端点**（`deepseek-flash`），
+内网网关整段注释在它下面，撞限流时切过去即可；两个端点的实测数字都写在注释里。
 
 ```cmd
 # 换模型/换端点后先压一遍（思考模型的推理也占 --max-tokens，别调太小）
+python tools/local/llm_bench.py deepseek-flash                                      # 当前端点
 python tools/local/llm_bench.py deepseek-flash --base-url http://<内网网关>:3000/v1 --api-key sk-xxx
 ```
 
@@ -578,7 +581,7 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| LLM_DEFAULT_MODEL | — | 主模型（当前 `deepseek-flash` = DeepSeek V4.1 Flash，走内网网关；免费 plan 的外网端点配额常满，见 三·十三） |
+| LLM_DEFAULT_MODEL | — | 主模型（当前 `deepseek-flash` = DeepSeek V4.1 Flash，走商汤官方端点；免费档有限流，见 三·十三） |
 | LLM_BASE_URL / LLM_API_KEY | — | 主模型端点 |
 | LLM_TIMEOUT | 300 | 请求超时秒数（防挂死） |
 | LLM_MAX_RETRIES | 2 | 限流自动重试次数 |
