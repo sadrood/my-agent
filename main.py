@@ -273,6 +273,23 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
         "api_key": f"{_api_key}…" if _api_key else "（未设置）",
         "restored": bool(conv),
     })
+    # 环境变量遮挡告警：带着 CLI 注入的 ANTHROPIC_* 跑时（Claude Code 内、或其派生
+    # 子进程），.env 的 LLM_* 会被静默忽略 —— 面板上显示的是生效值，用户却以为
+    # 是自己配的那个。这里把"被谁顶掉"说清楚，别让人对着 .env 排查半天。
+    try:
+        from config import llm_config_provenance
+        _prov = llm_config_provenance(os.environ)
+        if _prov["shadowed"]:
+            _pairs = "、".join(f"{s['set']} 被 {s['overridden_by']} 顶掉"
+                              for s in _prov["shadowed"])
+            print_warning(
+                f"{_pairs}；当前实际用的是 {_prov['model']} @ {_prov['base_url']}。"
+                "（当前 shell 里有 CLI 注入的 ANTHROPIC_* 变量；要按 .env 跑，"
+                "先 unset ANTHROPIC_BASE_URL ANTHROPIC_MODEL ANTHROPIC_API_KEY）",
+                use_rich=True,
+            )
+    except Exception:
+        pass                                     # 告警失败绝不能挡住启动
     if conv:
         # 恢复对话的全部记录
         for m in conv.get("messages", []):

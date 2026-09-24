@@ -101,3 +101,73 @@ class TestTestCommandPerPlatform:
         import config
         expected = ".venv\\Scripts\\python" if os.name == "nt" else ".venv/bin/python"
         assert config.TEST_CONFIG["command"].startswith(expected)
+
+
+class TestLlmConfigProvenance:
+    """`.env` 的 LLM_* 被 ANTHROPIC_* 静默顶掉时要能查得出来（2026-09-24 实测踩到）。
+
+    取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_*；在 Claude Code 里跑 agent（或它
+    派生的任何子进程）时环境里带着 CLI 自己的 ANTHROPIC_*，`.env` 的端点/模型会被
+    忽略 —— 看配置是一个端点、实际打的是另一个。
+    """
+
+    def test_no_shadowing_when_only_llm_vars(self):
+        from config import llm_config_provenance
+        p = llm_config_provenance({
+            "LLM_BASE_URL": "https://token.sensenova.cn/v1",
+            "LLM_DEFAULT_MODEL": "deepseek-v4-flash",
+        })
+        assert p["shadowed"] == []
+        assert p["base_url_source"] == "LLM_BASE_URL"
+        assert p["model_source"] == "LLM_DEFAULT_MODEL"
+        assert p["base_url"] == "https://token.sensenova.cn/v1"
+
+    def test_anthropic_vars_shadow_env_file(self):
+        from config import llm_config_provenance
+        p = llm_config_provenance({
+            "LLM_BASE_URL": "https://token.sensenova.cn/v1",
+            "LLM_DEFAULT_MODEL": "deepseek-v4-flash",
+            "ANTHROPIC_BASE_URL": "http://172.16.10.242:3000",
+            "ANTHROPIC_MODEL": "deepseek-flash",
+        })
+        shadowed = {s["set"]: s for s in p["shadowed"]}
+        assert set(shadowed) == {"LLM_BASE_URL", "LLM_DEFAULT_MODEL"}
+        assert shadowed["LLM_BASE_URL"]["overridden_by"] == "ANTHROPIC_BASE_URL"
+        assert shadowed["LLM_BASE_URL"]["effective"] == "http://172.16.10.242:3000"
+        assert p["base_url"] == "http://172.16.10.242:3000"
+
+    def test_my_agent_vars_win_over_anthropic(self):
+        from config import llm_config_provenance
+        p = llm_config_provenance({
+            "MY_AGENT_BASE_URL": "https://my.example/v1",
+            "ANTHROPIC_BASE_URL": "http://gateway:3000",
+            "LLM_BASE_URL": "https://env.example/v1",
+        })
+        shadowed = {s["set"]: s["overridden_by"] for s in p["shadowed"]}
+        assert shadowed["LLM_BASE_URL"] == "MY_AGENT_BASE_URL"
+        assert p["base_url"] == "https://my.example/v1"
+
+    def test_alias_alone_is_not_reported_as_shadowing(self):
+        """只设了 ANTHROPIC_*、没设 LLM_*：这是别名在**填坑**，不是顶掉谁。"""
+        from config import llm_config_provenance
+        p = llm_config_provenance({"ANTHROPIC_BASE_URL": "http://gateway:3000"})
+        assert p["shadowed"] == []
+
+    def test_api_key_value_is_never_returned(self):
+        """告警只该报变量名与端点，绝不能把密钥带进返回值（会被打进日志/终端）。"""
+        from config import llm_config_provenance
+        secret = "sk-super-secret-value"
+        p = llm_config_provenance({
+            "LLM_API_KEY": secret,
+            "ANTHROPIC_API_KEY": "sk-anthropic-value",
+            "ANTHROPIC_BASE_URL": "http://gateway:3000",
+        })
+        key_entry = [s for s in p["shadowed"] if s["set"] == "LLM_API_KEY"]
+        assert len(key_entry) == 1
+        assert key_entry[0]["overridden_by"] == "ANTHROPIC_API_KEY"
+        assert key_entry[0]["effective"] == ""
+        assert secret not in str(p) and "sk-anthropic-value" not in str(p)
+
+    def test_key_shadowing_only_when_both_set(self):
+        from config import llm_config_provenance
+        assert llm_config_provenance({"ANTHROPIC_API_KEY": "k"})["shadowed"] == []
