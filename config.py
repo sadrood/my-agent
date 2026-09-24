@@ -94,6 +94,42 @@ def resolve_llm_config(env: dict) -> dict:
     }
 
 
+def llm_config_provenance(env: dict) -> dict:
+    """LLM 连接配置的**来源**（纯函数）：实际生效的是哪一组变量、有没有被顶掉。
+
+    为什么需要（2026-09-24 实测踩到）：取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_*。
+    在带着 Claude Code 自身 ANTHROPIC_* 变量的环境里跑（CLI 内、或它派生的任何
+    子进程、或 agent 自改自测），`.env` 里的 LLM_BASE_URL / LLM_DEFAULT_MODEL 会被
+    **静默忽略** —— 配置文件写着商汤、实际打的是 CLI 的网关，排查"到底连的哪家"
+    时极具误导性（我当时据此做的模型探针问错了对象，结论作废）。
+
+    返回 `shadowed`：被更高优先级的别名实际顶掉的显式配置项（key 只报名字，
+    不带值）。为空 = 没有遮挡，`.env` 怎么写就怎么生效。
+    """
+    def source(*names):
+        for name in names:
+            if env.get(name):
+                return name, env[name]
+        return "", ""
+
+    key_src, _key = source("MY_AGENT_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY")
+    url_src, url = source("MY_AGENT_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_BASE_URL")
+    model_src, model = source("MY_AGENT_MODEL", "ANTHROPIC_MODEL", "LLM_DEFAULT_MODEL")
+
+    shadowed = []
+    for explicit, src, effective in (("LLM_API_KEY", key_src, ""),
+                                     ("LLM_BASE_URL", url_src, url),
+                                     ("LLM_DEFAULT_MODEL", model_src, model)):
+        if env.get(explicit) and src and src != explicit:
+            shadowed.append({"set": explicit, "overridden_by": src,
+                             "effective": effective})
+    return {
+        "base_url": url, "base_url_source": url_src,
+        "model": model, "model_source": model_src,
+        "shadowed": shadowed,
+    }
+
+
 # 极简模式：禁用一切非必要功能
 MINIMAL_MODE = resolve_minimal_mode(os.environ)
 
