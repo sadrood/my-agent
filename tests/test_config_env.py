@@ -65,3 +65,39 @@ def test_zero_value_is_not_treated_as_empty():
         timeout=180)
     assert p.returncode == 0, (p.stderr or "")[-500:]
     assert p.stdout.strip() == "0.0"
+
+
+class TestTestCommandPerPlatform:
+    """测试命令的默认值必须跟着平台选 venv 路径（2026-09-24 审计）。
+
+    Windows 的虚拟环境在 `.venv\\Scripts`、POSIX 在 `.venv/bin`。默认值写死成
+    Windows 那份时，Linux 上 agent 会照着一个不存在的解释器跑测试：一路失败，
+    而且开了 EDIT_PREFLIGHT 的话每次 edit 都会被自动回滚。
+    """
+
+    def test_default_follows_platform(self):
+        from config import resolve_test_command
+        assert resolve_test_command({}, is_windows=True) == \
+            ".venv\\Scripts\\python -m pytest tests -q"
+        assert resolve_test_command({}, is_windows=False) == \
+            ".venv/bin/python -m pytest tests -q"
+
+    def test_explicit_config_wins_on_every_platform(self):
+        from config import resolve_test_command
+        for win in (True, False):
+            assert resolve_test_command({"TEST_COMMAND": "mypy ."},
+                                        is_windows=win) == "mypy ."
+
+    def test_blank_value_falls_back_to_platform_default(self):
+        """`.env` 里 `TEST_COMMAND=` 留空是常见写法，不能当成"用户填了个空命令"。"""
+        from config import resolve_test_command
+        assert resolve_test_command({"TEST_COMMAND": "   "},
+                                    is_windows=False).startswith(".venv/bin/python")
+
+    def test_import_picks_this_hosts_path(self):
+        """真实导入时也按本机平台选 —— 在 Linux 上跑测试会直接暴露漏改。"""
+        if os.getenv("TEST_COMMAND"):
+            pytest.skip("本机显式设了 TEST_COMMAND，默认值不参与")
+        import config
+        expected = ".venv\\Scripts\\python" if os.name == "nt" else ".venv/bin/python"
+        assert config.TEST_CONFIG["command"].startswith(expected)

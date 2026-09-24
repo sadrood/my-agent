@@ -919,11 +919,24 @@ TEAM_CONFIG = {
 # ============================================================
 # 测试命令配置（跨平台可配：循环提示词中引用的测试命令）
 # ============================================================
+def resolve_test_command(env: dict, is_windows: bool = None) -> str:
+    """测试命令解析（纯函数，便于测试）：显式配置优先，否则按平台选 venv 路径。
+
+    为什么默认值必须分平台：虚拟环境在 Windows 是 `.venv\\Scripts`、POSIX 是
+    `.venv/bin`。给错平台不是"小瑕疵"——agent 会照着它跑测试、跑不通就一路失败；
+    若开了 EDIT_PREFLIGHT，每次 edit 都会被自动回滚（2026-09-24 审计）。
+    """
+    explicit = str(env.get("TEST_COMMAND") or "").strip()
+    if explicit:
+        return explicit
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    return (".venv\\Scripts\\python -m pytest tests -q" if is_windows
+            else ".venv/bin/python -m pytest tests -q")
+
+
 TEST_CONFIG = {
-    "command": os.getenv(
-        "TEST_COMMAND",
-        ".venv\\Scripts\\python -m pytest tests -q",   # Windows 默认；Linux/Mac 在 .env 覆盖
-    ),
+    "command": resolve_test_command(os.environ),
 }
 
 # ============================================================

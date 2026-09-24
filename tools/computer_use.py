@@ -340,7 +340,12 @@ class ComputerUseMixin:
 #       min_sandbox_mode=danger-full-access（AppContainer 沙箱内无法操控 GUI）。
 # ================================================================
 
-_COMPUTER_SUPPORTED = _platform.system() == "Windows"
+#: 桌面操控是否有本平台实现。整个工具的能力（鼠标/键盘/窗口/UIA 无障碍树）都
+#: 建立在 Win32 + UIAutomation 上，Linux/macOS 上没有任何替代实现。
+#: 公开名字（不是 `_COMPUTER_SUPPORTED`）：工具注册方要据此决定**是否注册** ——
+#: 否则非 Windows 平台也会拿到一个每个 action 都返回"仅支持 Windows"的工具，
+#: 而 agent 还会因为它存在而追加桌面操控提示，白白烧轮数（2026-09-24 审计）。
+COMPUTER_SUPPORTED = _platform.system() == "Windows"
 
 # Windows 虚拟键码（key 动作支持的键名 → VK）
 _VK_MAP = {
@@ -708,7 +713,7 @@ class DesktopTool(BaseTool):
         return self._vision_model
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
-        if not _COMPUTER_SUPPORTED:
+        if not COMPUTER_SUPPORTED:
             return ToolResult(success=False, output="",
                               error="computer 工具目前仅支持 Windows。")
         action = str(arguments.get("action", "")).strip().lower()

@@ -1603,14 +1603,16 @@ class Agent:
 
         # 4. 系统提示：人格 + 循环规则 + 审批提示 + 运行环境 + AGENTS.md
         import platform as _platform
-        from models.prompts import PLATFORM_NOTICE_TEMPLATE
+        from models.prompts import platform_notice
         system_prompt = LOOP_SYSTEM_PROMPT.format(
             test_command=TEST_CONFIG.get("command", "pytest tests -q"),
             agent_name=self._agent_name(),
         )
-        system_prompt += PLATFORM_NOTICE_TEMPLATE.format(
-            system=_platform.system(),
-            shell="cmd.exe" if _platform.system() == "Windows" else "sh",
+        _system = _platform.system()
+        system_prompt += platform_notice(
+            system=_system,
+            # POSIX 上报真实登录 shell（terminal 工具用的就是它），别写死 "sh"
+            shell="cmd.exe" if _system == "Windows" else os.environ.get("SHELL", "sh"),
         )
         # 注册了桌面操控工具时，附带使用指南（先感知再操作，避免盲点坐标）
         if self.tool_manager.get_tool("computer") is not None:

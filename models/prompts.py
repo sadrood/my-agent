@@ -336,7 +336,31 @@ APPROVAL_NOTICE_TEMPLATE = """
 # ============================================================
 # 运行环境提示（注入系统提示，避免模型用错平台命令）
 # ============================================================
-PLATFORM_NOTICE_TEMPLATE = """
+# 平台无关的部分抽成共享段，两个平台各自只写差异 —— 免得改了一边漏另一边。
+# 背景（2026-09-24 审计）：原先只有 Windows cmd 一份，而 agent 在 Linux 上会填
+# shell=sh，提示词却整段在教模型用 findstr/dir/type/Get-Content，等于主动把模型
+# 引向不存在的命令。
+_PLATFORM_NOTICE_TAIL = """\
+- **长任务（全量测试 / 构建 / 大文件下载）的正确姿势**：
+  1) terminal(command="...", background=true) 启动 → 立即拿到任务 ID
+  2) terminal(command="bg output job-xxx 30") 取最近 30 行看进展/结果
+  3) terminal(command="bg kill job-xxx") 结束
+  不要把长任务放在前台阻塞，也不要写脚本轮询等它完成。
+- 能读能写的文件操作优先用 file 工具，避免 shell 转义坑；
+  复杂处理（解析/统计/循环）一律用 python 工具，不要在 shell 里拼。
+- **起本地预览服务必须绑回环**：要给别人/自己看产物而起 http 服务时，一律写
+  `python -m http.server <端口> --bind 127.0.0.1`。裸 `python -m http.server`
+  默认绑 0.0.0.0，会把整个目录暴露给局域网（实测有过把 output/ 整个开在
+  0.0.0.0:8899 的情况）。用完记得 bg kill 关掉。"""
+
+#: `bg` 的用法两个平台一样（它是 terminal 工具的子命令，不是 shell 命令），
+#: 所以这段在两边都出现，只写一次。
+_PLATFORM_NOTICE_BG = """\
+  · 后台任务：**不要把 `bg ...` 当 shell 命令直接写**。bg 是 terminal 工具的子命令，
+    通过 command 参数传入：command="bg list" / "bg output job-xxx 30" / "bg kill job-xxx"；
+    启动后台任务用 background=true 参数（会立即返回任务 ID）"""
+
+PLATFORM_NOTICE_WINDOWS = ("""
 ## 运行环境
 - 操作系统: {system}，终端是 {shell}（Windows cmd）
 - Windows cmd 没有 ls/head/tail/grep/pwd/sleep/bg 等 Unix 命令，
@@ -345,23 +369,39 @@ PLATFORM_NOTICE_TEMPLATE = """
   · 查看文件尾部：用 python 读文件最后 N 行，或
     `powershell -NoProfile -Command "Get-Content 文件 -Tail N"`
   · 查看命令输出尾部：直接运行命令（工具层会自动截断展示）；长命令改用后台任务（见下）
-  · 后台任务：**不要把 `bg ...` 当 shell 命令直接写**。bg 是 terminal 工具的子命令，
-    通过 command 参数传入：command="bg list" / "bg output job-xxx 30" / "bg kill job-xxx"；
-    启动后台任务用 background=true 参数（会立即返回任务 ID）
+""" + _PLATFORM_NOTICE_BG + """
   · 睡眠等待：没有 sleep —— 用 `powershell -NoProfile -Command "Start-Sleep -Seconds N"`；
     **不要在 python 工具里写 sleep 轮询等外部任务**（python 工具 30 秒即超时失败）
   · 文本搜索：用 findstr 或 python；列目录用 dir；看文件用 type
-- **长任务（全量测试 / 构建 / 大文件下载）的正确姿势**：
-  1) terminal(command="...", background=true) 启动 → 立即拿到任务 ID
-  2) terminal(command="bg output job-xxx 30") 取最近 30 行看进展/结果
-  3) terminal(command="bg kill job-xxx") 结束
-  不要把长任务放在前台阻塞，也不要写脚本轮询等它完成。
-- 能读能写的文件操作优先用 file 工具，避免 shell 转义坑；
-  复杂处理（解析/统计/循环）一律用 python 工具，不要在 cmd 里拼 shell。
-- **起本地预览服务必须绑回环**：要给别人/自己看产物而起 http 服务时，一律写
-  `python -m http.server <端口> --bind 127.0.0.1`。裸 `python -m http.server`
-  默认绑 0.0.0.0，会把整个目录暴露给局域网（实测有过把 output/ 整个开在
-  0.0.0.0:8899 的情况）。用完记得 bg kill 关掉。"""
+""" + _PLATFORM_NOTICE_TAIL)
+
+PLATFORM_NOTICE_POSIX = ("""
+## 运行环境
+- 操作系统: {system}，终端是 {shell}（POSIX shell）
+- 标准 Unix 命令都在（ls/head/tail/grep/pwd/sleep 等），`命令 | tail -N`、`| head -N`
+  可以放心用：
+  · 查看文件/输出尾部：`tail -N 文件`、`命令 | tail -N` 都行（工具层还会自动截断展示）
+""" + _PLATFORM_NOTICE_BG + """
+  · 睡眠等待：`sleep N` 可用；但**不要在 python 工具里写 sleep 轮询等外部任务**
+    （python 工具 30 秒即超时失败），等长任务一律用后台任务（见下）
+  · 文本搜索：grep -r / rg；列目录用 ls；看文件用 cat / head / tail
+""" + _PLATFORM_NOTICE_TAIL)
+
+#: 向后兼容：旧名字指 Windows 那份（历史调用方与测试仍在用）。
+#: 新代码请用 `platform_notice()`，别自己判断平台。
+PLATFORM_NOTICE_TEMPLATE = PLATFORM_NOTICE_WINDOWS
+
+
+def platform_notice(system: str, shell: str) -> str:
+    """按平台挑"运行环境"提示并填好占位符（调用方不必自己判断平台）。
+
+    Args:
+        system: `platform.system()` 的返回值（Windows / Linux / Darwin）。
+        shell: 终端工具实际会用的 shell 名（Windows 是 cmd.exe，POSIX 取 $SHELL）。
+    """
+    tpl = (PLATFORM_NOTICE_WINDOWS if str(system).lower().startswith("win")
+           else PLATFORM_NOTICE_POSIX)
+    return tpl.format(system=system, shell=shell)
 
 # ============================================================
 # 单循环模式系统提示词（v3.1：一次对话完成目标）

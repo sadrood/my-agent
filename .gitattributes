@@ -1,0 +1,10 @@
+# 换行策略（显式钉死，不依赖各自的 core.autocrlf）
+#
+# 为什么需要：本机 core.autocrlf=true，而这两种脚本对换行的要求恰好相反 ——
+#   · shell 脚本必须 LF：CRLF 会让 shebang 变成 `#!/usr/bin/env bash\r`，
+#     Linux 上报 "bad interpreter: No such file or directory"；
+#   · Windows 批处理必须 CRLF：cmd.exe 按字节解析，LF 会让它的解析错位
+#     （install_deps.bat 的文件头注释也写明了这一点）。
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
