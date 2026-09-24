@@ -81,8 +81,19 @@ my_agent 是一个 Python 实现的通用 AI Agent，融合了主流开源 agent
     python tools/local/stage_mine.py config.py .env.example --mark <只出现在你改动里的词> --list
     # --list 先看归属；去掉 --list 才真的暂存；暂存后它会自动复查暂存区有没有混进别人的行
     ```
-    这条规则被违反过三次（`config.py` 两次、`.env.example` 一次），第三次是
-    **检查已经报警、人却没停**——所以别依赖"我会注意"，依赖命令。
+    这条规则被违反过**四次**（`config.py` 两次、`.env.example` 两次），其中两次是
+    **检查已经报警、人却没停**。最近一次（2026-09-23）的形态是：对公共文件用了
+    整文件 `git add .env.example`（不是逐 hunk），把另一会话未完成的
+    `LOOP_STAGNATION_WARN` 三行卷进提交；而泄露检查**当场打印了那一行**，人还是
+    提交了，最后靠"加一次再减一次"（`6e387f8` 删掉 + 放回工作区）才归零。
+
+    所以两条硬规矩：
+    1. **公共文件（`config.py` / `.env.example` / `AGENTS.md` / `main.py` 等）
+       永远走 `stage_mine.py` 逐 hunk 暂存，禁止 `git add <file>`**；
+    2. 报警（退出码 2 或 `⚠ 警告：暂存区里出现了本应丢弃的他人内容`）出现时
+       **必须停下来处理**，不能"看一眼继续提交"。
+
+    别依赖"我会注意"，依赖命令。
 
 ## 测试
 - 全部测试必须通过后再交付（命令见 `.env` 的 `TEST_COMMAND`）
