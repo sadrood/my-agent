@@ -1,32 +1,6 @@
 """文章工坊：多模型互审的写作流水线。
-
-为什么要多个模型：让同一个模型审自己写的稿子，它的知识边界、行文偏好、盲点
-与作者完全重合，"互审"最后只会变成自我复述（同厂不同名的模型也基本重合）。
-跨厂商互审才有信息增益——所以默认让**另一家**的模型当审阅/校对，
-写稿与修订留在主模型（可用 ARTICLE_MODEL_* 逐个阶段改）。
-
-流水线（每一步都落盘，随时可查可回滚）：
-
-    大纲(可关) → 初稿
-       ↑            ↓
-       │        审阅(换模型，只提问题不改稿)
-       │            ↓
-       │      事实核查(只查被点名的可疑说法 → 联网检索 → 依据资料判定真伪)
-       │            ↓
-       └──── 修订(作者逐条回应 + 出完整新稿)   ← 最多 max_revise_rounds 轮
-                    ↓
-                校对(换模型，只挑错)  → 定稿(只落校对修正) → final.md
-
-设计要点：
-- **职责分离**：审阅/校对只提问题，改写只由作者模型做——否则审阅方会顺手重写，
-  作者就失去了"回应意见"的机会，改动也不可追溯。
-- **有界循环**：审阅方没有"严重/中等"问题就立刻停；某轮修订后正文没变化也停
-  （继续问下去只是烧 token）；到上限就带着剩余意见定稿。
-- **fall-open 解析**：结构化阶段要求只输出 JSON，但解析失败时降级为"把原文当建议
-  文本"继续跑——格式问题绝不能让整条流水线断在半路。
-- **事实核查只查被点名的**：全文逐条联网既慢又贵，且大部分句子本来就不需要核实。
-- 每一轮的意见、事实核查结论、修订说明都落盘，最终 `changes.md` 是完整的修改台账。
-"""
+作者就失去了"回应意见"的机会，改动也不可追溯。
+（继续问下去只是烧 token）；到上限就带着剩余意见定稿。"""
 import json
 import os
 import re
@@ -280,11 +254,7 @@ def parse_spec(spec: str, endpoints: Optional[dict] = None) -> Tuple[str, str, d
 
 
 def build_llm(spec: str, endpoints: Optional[dict] = None):
-    """按端点规格构建 LLM 实例（同规格复用，避免重复建客户端）。
-
-    端点没配密钥时回退主模型：宁可用同一个模型把文章写完，也不要整条流水线失败
-    ——但调用方会把这件事记进 warnings，因为同模型互审价值有限。
-    """
+    """按端点规格构建 LLM 实例（同规格复用，避免重复建客户端）。"""
     from models.llm import LLM
 
     name, model, ep = parse_spec(spec, endpoints)
@@ -447,9 +417,7 @@ def parse_factcheck(text: str, claim: str, query: str = "") -> FactCheck:
 
 def split_revision(text: str) -> Tuple[str, str]:
     """把修订输出拆成 (修改说明, 新正文)。
-
-    模型没按规定加分隔符时：整段当正文，说明里注明——**不能因为格式就丢掉新稿**。
-    """
+    模型没按规定加分隔符时：整段当正文，说明里注明——**不能因为格式就丢掉新稿**。"""
     m = _ARTICLE_DELIM.search(_strip_fence(text))
     if not m:
         # 宽松兜底：只有起始标记，取标记之后到结尾
@@ -468,8 +436,7 @@ def _clip(text: str, limit: int) -> str:
     return t if len(t) <= limit else t[:limit] + "…"
 
 
-#: 限流/配额类错误的识别串。上游各家写法不一（429 / tpm / rpm / insufficient_quota /
-#: "配额已满"），按文本识别才不会漏——漏了就变成"换个端点也没试就直接失败"。
+# : 限流/配额类错误的识别串。上游各家写法不一（429 / tpm / rpm / insufficient_quota /: "配额已满"），按文本识别才不会漏——漏了就变成"换个端点也没试就直接失败"。
 _RATE_LIMIT_HINTS = ("429", "rate limit", "rate_limit", "tpm", "rpm", "quota",
                      "限流", "配额", "too many requests")
 
@@ -493,12 +460,7 @@ def _strip_code(text: str) -> str:
 
 
 def mechanical_issues(text: str) -> List[ArticleIssue]:
-    """确定性机械校对：半角标点、引号配对、叠字、省略号写法。
-
-    为什么要用规则补模型：实测模型校对会漏掉"全文都用了半角逗号"这种惯例问题
-    （它更关注语义与措辞），而这恰恰是最该被逐条指出来的。规则部分不花 token、
-    可复现、可测试；语义问题仍交给另一个模型。
-    """
+    """确定性机械校对：半角标点、引号配对、叠字、省略号写法。"""
     body = _strip_code(text)
     if not body.strip():
         return []
@@ -568,9 +530,7 @@ def merge_issues(*groups: List[ArticleIssue]) -> List[ArticleIssue]:
     return out
 
 
-#: 值得"重试/换端点"的暂时性故障。配额耗尽的端点除了回 429，**还会回空正文**
-#: （上游实测：第一次 429，紧接着一次 HTTP 200 但 content 为空）——只认 429
-#: 会漏掉这半数的限流表现，导致明明另一家能用却直接失败。
+# : 值得"重试/换端点"的暂时性故障。配额耗尽的端点除了回 429，**还会回空正文**: （上游第一次 429，紧接着一次 HTTP 200 但 content 为空）——只认 429: 会漏掉这半数的限流表现。
 _TRANSIENT_HINTS = _RATE_LIMIT_HINTS + (
     "返回空内容", "timeout", "timed out", "502", "503", "504",
     "connection", "temporarily", "overloaded",
@@ -583,13 +543,7 @@ def _is_transient_error(message: str) -> bool:
 
 
 def zhihu_lookup(query: str, limit: int = 3) -> List[dict]:
-    """知乎全网搜索（开放平台 global_search，5000 次/日）作为核查检索通道。
-
-    为什么优先用它而不是抓搜索引擎结果页：返回的是结构化的
-    Title/Url/ContentText，直接可用；抓 Bing/Google 的 HTML 既不稳又常被拦
-    （实测抓取通道经常一个来源都取不到，事实核查只能退化成"未查到"）。
-    未配置 ZHIHU_ACCESS_SECRET 时返回空列表，调用方自动落到下一个通道。
-    """
+    """知乎全网搜索（开放平台 global_search，5000 次/日）作为核查检索通道。"""
     from models.zhihu import ZhihuClient
 
     client = ZhihuClient()
@@ -622,21 +576,7 @@ def slugify(topic: str, limit: int = 24) -> str:
 # ================================================================
 
 class ArticlePipeline:
-    """多模型互审写作流水线。
-
-    用法：
-        p = ArticlePipeline()
-        result = p.write("AI Agent 的记忆机制", requirements="给技术读者，3000 字")
-        print(result.summary())
-
-    Args:
-        llms: {阶段: LLM} 覆盖默认端点解析（测试注入假模型用）
-        config: 覆盖 ARTICLE_CONFIG
-        save_dir: 覆盖产物目录
-        emit: 事件回调 emit(event_type, data)（→ dashboard/rollout）
-        lookup: 事实核查用的检索函数 lookup(query, limit) -> [{title,url,snippet}]
-        tool_manager: 未注入 lookup 时用它 + DeepResearcher 现建一个
-    """
+    """多模型互审写作流水线。"""
 
     def __init__(self, llms: Optional[Dict[str, Any]] = None,
                  config: Optional[dict] = None,
@@ -668,11 +608,7 @@ class ArticlePipeline:
         return str((self.cfg.get("stages") or {}).get(stage, "main"))
 
     def _stage_llm(self, stage: str, spec: Optional[str] = None) -> Tuple[Any, str, str]:
-        """取该阶段要用的 LLM 实例与 (端点名, 模型名) 标签。
-
-        注入的假模型优先（测试），键可以是阶段名（本阶段默认端点），
-        也可以是 "阶段@端点"（用于验证限流换端点后的行为）。
-        """
+        """取该阶段要用的 LLM 实例与 (端点名, 模型名) 标签。"""
         spec = spec if spec is not None else self._spec(stage)
         name, model, _ = parse_spec(spec, self.endpoints)
         injected = self.llms.get(f"{stage}@{name}")
@@ -737,12 +673,7 @@ class ArticlePipeline:
         return (endpoint, model, text, round(time.time() - t0, 1))
 
     def _call(self, stage: str, system: str, user: str) -> str:
-        """调用一个阶段，带限流退避与跨端点兜底。
-
-        上游配额是真实存在的硬约束：长文流水线一次跑 8+ 次大请求，很容易撞
-        TPM/RPM（实测默认供应商就在 revise 阶段 429 过）。所以这里分三层兜：
-        同端点退避重试 → 换另一家端点继续 → 都不行才失败，并把已完成的部分留住。
-        """
+        """调用一个阶段，带限流退避与跨端点兜底。"""
         own = self._spec(stage)
         specs = [own]
         fallback = self._fallback_spec(stage)
@@ -750,8 +681,7 @@ class ArticlePipeline:
             specs.append(fallback)
         retries = max(0, int(self.cfg.get("stage_retries") if
                              self.cfg.get("stage_retries") is not None else 1))
-        # 注意不能写 `cfg.get("retry_wait", 20) or 20`：配 0（测试里就是不等待）
-        # 会被 or 当成假值换成 20 秒，白白拖慢每次重试。
+        # 注意不能写 `cfg.get("retry_wait", 20) or 20`：配 0（测试里就是不等待）会被 or 当成假值换成 20 秒，白白拖慢每次重试。
         raw_wait = self.cfg.get("retry_wait")
         wait_base = float(20 if raw_wait is None else raw_wait)
 
@@ -831,14 +761,7 @@ class ArticlePipeline:
 
     def check_text(self, text: str, mode: str = "proofread", title: str = "",
                    source: str = "") -> CheckResult:
-        """对**已有文稿**做审阅或校对。
-
-        mode="review"     ：只提意见（事实/逻辑/结构），有事实类问题时顺带核查
-        mode="proofread"  ：只挑错（错别字/标点/术语/语法/格式），并把修正落成 final.md
-
-        与 write() 的区别：不写大纲、不重写全文——用户要的是"看看我这篇有什么问题"，
-        不是"照这个主题另写一篇"。改动只以修正稿形式给出，是否覆盖原文件由调用方决定。
-        """
+        """对**已有文稿**做审阅或校对。"""
         body = (text or "").strip()
         if not body:
             raise ArticleError("没有可检查的正文（text / file 都为空）")
@@ -931,11 +854,7 @@ class ArticlePipeline:
 
     def _lookup_hits(self, query: str, limit: int) -> List[dict]:
         """按配置顺序取检索资料，凑够 limit 条就停。
-
-        多通道串联是必要的：知乎开放平台搜索稳定但需要配 secret，浏览器抓搜索
-        结果页不依赖密钥但经常取不到东西——任何一条通道失败/为空都落到下一条，
-        全都拿不到才记"未查到"。
-        """
+        全都拿不到才记"未查到"。"""
         if self.lookup is not None:             # 调用方注入（测试/自定义通道）
             try:
                 return list(self.lookup(query, limit) or [])
@@ -999,11 +918,7 @@ class ArticlePipeline:
     def write(self, topic: str, requirements: str = "", target_length: str = "",
               outline: str = "", max_rounds: Optional[int] = None) -> ArticleResult:
         """跑完整条流水线，返回 ArticleResult（产物已落盘）。
-
-        任何阶段失败时**不丢已完成的成果**：把当前最好的一版写成 partial.md、
-        元数据写成 meta.json，再抛错并告知目录——长文流水线跑一次要几分钟和
-        好几次大模型调用，因为最后一步限流就全部作废是不可接受的。
-        """
+        好几次大模型调用，因为最后一步限流就全部作废是不可接受的。"""
         try:
             return self._run(topic, requirements=requirements,
                              target_length=target_length, outline=outline,

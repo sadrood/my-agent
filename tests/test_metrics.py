@@ -37,9 +37,7 @@ class TestRunMetrics:
         assert m.output_tokens == 300
         assert m.cached_tokens == 1000
         assert m.first_token_avg == 3.0
-        # 速率分母是**纯解码时长**（LLM 总耗时 − 首 token 等待），
-        # 旧实现用 llm_seconds 当分母，会把首 token 延迟也算成生成时间，
-        # 系统性低估速率（此处 15s 里有 6s 是等首 token）
+        # 速率分母是**纯解码时长**（LLM 总耗时 − 首 token 等待），旧实现用 llm_seconds 当分母，会把首 token 延迟也算成生成时间，系统性低估速率（此处 15s 里有 6s 是等首 token）
         assert m.decode_seconds == 15.0 - 6.0
         assert m.tokens_per_sec == 300 / 9.0
         assert m.cache_hit_rate == 1000 / 1500
@@ -86,13 +84,7 @@ class TestRunMetrics:
 
 
 class TestWallClockElapsed:
-    """「这次一共跑了多久」——用户感知的是墙钟，不是分项之和。
-
-    背景（2026-09-23）：统计行原先只有 `LLM 42.3s · 工具 0.8s` 这类**分项之和**，
-    没有总时间。而分项与墙钟的**差额**才是信息量所在：那部分是"看不见的等待"
-    （限流退避 / 等人工审批 / 快照 git 操作 / 压缩 / 浏览器启动 / MCP 连接）。
-    实测一次简单任务：工具 2.0s，但墙钟 5s。
-    """
+    """「这次一共跑了多久」——用户感知的是墙钟，不是分项之和。"""
 
     def test_elapsed_is_wall_clock(self):
         m = RunMetrics()

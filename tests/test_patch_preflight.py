@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
 """preflight 失败摘要的测试（tools/patch.py::_summarize_test_failure）。
-
-背景（agent 在运行日志里明确反馈的坑）：
-    preflight 失败时原先只回喂 pytest 输出的**尾部 40 行**。全套测试失败时
-    FAILURES 段很长，固定窗口经常只截到断言片段、丢掉"哪个用例失败"，实测导致
-    agent 拿着 `assert 110 == 100` 全项目搜不到对应测试名，把（并发改动引起的）
-    失败误判成自己改坏了代码。
-
-夹具直接取自本机 pytest 9.1.1 的真实输出格式（含分隔符风格与
-`FAILED ::test_x` 这种没有文件部分的 node id）。
-"""
+失败误判成自己改坏了代码。"""
 import os
 import subprocess
 
@@ -69,9 +60,7 @@ class TestFailureDigest:
 
     def test_attributes_via_assertion_file_when_node_id_lacks_path(self):
         """`FAILED ::test_x` 没有文件部分时，用断言处的 `path:line:` 补出文件。
-
-        否则"与本次改动无关"这个很有价值的提示会永远发不出来。
-        """
+        否则"与本次改动无关"这个很有价值的提示会永远发不出来。"""
         out = _sum(REAL_OUTPUT, edited="agent/memory.py")
         assert "无关" in out and "test_sample.py" in out
 
@@ -156,10 +145,7 @@ class TestPreflightWiring:
 
         class _Proc:
             """假 Popen：把真实 pytest 输出写进工具给的输出文件。
-
-            （preflight 现在用 `Popen` + 输出落临时文件，而不是 `subprocess.run`
-            + 管道 —— 管道会被后代进程继承写端，把超时拖住，见 tools/patch.py。）
-            """
+            + 管道 —— 管道会被后代进程继承写端，把超时拖住，见 tools/patch.py。）"""
             returncode = 1
 
             def __init__(self, cmd, shell=True, stdout=None, stderr=None, **kw):

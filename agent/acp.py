@@ -1,19 +1,4 @@
-"""
-ACP 客户端：以 Agent Client Protocol（JSON-RPC 2.0 over stdio）与外部 agent 引擎双向通信。
-
-启动 `claude-agent-acp`（ACP 1.2 wrapper），
-走 initialize → session/new → session/prompt，把 session/update 通知映射为
-桌面端事件流（文本/思考/工具调用/计划/审批），支持双向（agent 主动询问权限）。
-
-事件映射：
-  agentMessageChunk  → stream_delta{kind:text}
-  agentThoughtChunk  → stream_delta{kind:reasoning}
-  toolCall           → tool_call（工具卡）
-  toolCallUpdate     → tool_result（回填）
-  plan               → plan{steps}
-  state_update       → turn 结束（stopReason）
-  session/request_permission → approval + 自动允许（前端可改）
-"""
+"""ACP 客户端：以 Agent Client Protocol（JSON-RPC 2.0 over stdio）与外部 agent 引擎双向通信。"""
 import json
 import os
 import shutil
@@ -87,10 +72,7 @@ class ACPClient:
                     pass
                 continue
             if not isinstance(frame, dict):
-                # 合法但**不是对象**的 JSON 行（`[]` / `123` / `"x"`）会让下面的
-                # `frame.get(...)` 抛 AttributeError —— 异常在 _pump 的循环里没人接，
-                # **读线程直接退出**，之后所有帧被丢弃，wait_turn 只能等满超时
-                # （2026-09-22 审计）。当噪音跳过即可。
+                # 合法但**不是对象**的 JSON 行（`[]` / `123` / `"x"`）会让下面的 `frame.get(...)` 抛 AttributeError —— 异常在 _pump 的循环里没人接，**读线程直接退出**。
                 try:
                     self._on_event("stream_delta", {"kind": "text", "text": line + chr(10)})
                 except Exception:
@@ -179,11 +161,7 @@ class ACPClient:
         desc = str(params.get("description") or params.get("title") or "ACP 请求权限")
         self._on_event("approval", {"tool": "ACP", "command": desc[:300], "risk_level": "medium"})
         if self._perm_auto_allow:
-            # 自动允许并回传
-            # JSON-RPC 的**请求**必须用**同 id 的 response** 应答。旧实现发的是自造的
-            # `session/response_permission` 通知（还塞了协议里不存在的 permissionId），
-            # wrapper 永远等不到响应 —— wait_turn 只能等满 600s 超时、状态判成 failed
-            # （2026-09-22 审计）。载荷字段沿用原实现的命名，未对着 ACP 规范核对过。
+            # 自动允许并回传 JSON-RPC 的**请求**必须用**同 id 的 response** 应答。
             rid = frame.get("id")
             payload = {
                 "sessionId": self._session_id or "",
@@ -276,12 +254,7 @@ class ACPClient:
 
 def run_acp_session(goal: str, cwd: str, on_event, stop_event=None, argv=None,
                     model: str | None = None) -> str:
-    """跑一次 ACP 任务：initialize → session/new → prompt → 等 turn 结束。返回最终文本。
-
-    model: 覆盖 ACP wrapper 使用的模型（ANTHROPIC_MODEL）。默认继承环境；若你的
-    ~/.claude/settings.json 指向的网关缺少默认模型会 503——此时传网关
-    实际服务的模型（如主力模型 / 其它模型）。
-    """
+    """跑一次 ACP 任务：initialize → session/new → prompt → 等 turn 结束。返回最终文本。"""
     if model:
         os.environ.setdefault("ANTHROPIC_MODEL", model)
     client = ACPClient(cwd, on_event, stop_event, argv=argv)

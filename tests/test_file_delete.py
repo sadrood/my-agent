@@ -74,14 +74,7 @@ class TestDeleteGuards:
 
 
 class TestDeleteGuardCaseInsensitive:
-    """Windows 上守卫必须按大小写不敏感比较（`os.path.normcase`）。
-
-    实测故障（2026-09-22 审计）：`_delete_guard` 原先用大小写敏感的
-    `target == root` / `root.startswith` / `bad in parts`，而 Windows 文件系统
-    不区分大小写，于是：
-    - `...\\.GIT` / `.ENV` → 放行，而 `os.path.isdir` 为真（就是真 .git / .env）
-    - `D:\\AAA\\WORK\\WORK\\MY_AGENT` → 放行，`recursive: true` 会删掉整个仓库
-    """
+    """Windows 上守卫必须按大小写不敏感比较（`os.path.normcase`）。"""
 
     _posix = pytest.mark.skipif(
         os.path.normcase("A") == "A",

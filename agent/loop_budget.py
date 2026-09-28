@@ -1,28 +1,5 @@
 # -*- coding: utf-8 -*-
-"""动态轮数预算：由"有没有进展"决定续多少轮，而不是固定上限。
-
-用户痛点（原话）："总是任务没完成轮数耗尽，导致任务中断"。
-根因是 `for turn in range(max_ops)` —— 一个**常数**同时要服务简单任务和复杂任务：
-简单任务浪费额度，复杂任务必定半途被砍。
-
-为什么改成动态而不是把常数调大：
-  · 调大只是把问题推后，遇到更大的任务照样断；调小则更容易断，两头不讨好；
-  · 主流 agent 实现不拿"工具调用次数"当主要闸门，而是靠
-    **停止条件**（任务完成 / 用户中断 / 没有进展）+ 成本预算；
-  · 真正该被拦的是**空转**（原地重复、反复失败却换汤不换药），而不是"轮数多"。
-
-所以这里的规则：
-  · 起步 base 轮；每出现一轮**有进展**就 +extend（直到 hard_cap 这个安全网）；
-  · 自上次进展以来打转 stall_limit 轮 → 判定空转，提前停——比撞上限更省时间，
-    而且给出的理由（"连续 N 轮无进展"）比"轮数耗尽"准确得多；
-  · hard_cap 可设为 0 = 不设绝对上限（此时只由进展/停滞与用户的停止按钮决定）。
-
-判定"有进展"刻意保守：
-  · 改了文件 → 最硬的信号（进度可被外部验证）；
-  · 有成功调用**且不是原样重复上一轮** → "又尝试了新东西"（查资料、跑命令、看文件）；
-  · 失败本身**不算**停滞：调试任务里"失败 → 换个方式再试"是正常推进；
-    真正的空转由"原样重复"和"连续无进展"共同刻画。
-"""
+"""动态轮数预算：由"有没有进展"决定续多少轮，而不是固定上限。"""
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -40,10 +17,7 @@ class TurnOutcome:
 
     @property
     def productive(self) -> bool:
-        """能否续期：必须真的往前走了。
-
-        原样重复不算——哪怕它"改了文件"（反复写同一内容是典型的假装干活）。
-        """
+        """能否续期：必须真的往前走了。"""
         if self.repeated:
             return False
         return self.files_changed > 0 or self.succeeded > 0
@@ -51,11 +25,7 @@ class TurnOutcome:
     @property
     def spinning(self) -> bool:
         """是否在原地打转（计入停滞）：原样重复调用，或空回复。
-
-        ⚠️ 与 productive 分开是刻意的：**"换了新做法但失败"不算打转**——
-        调试任务里连续失败是正常推进，判成停滞会误杀。这类轮次既不续期、
-        也不计停滞，最终由预算上限兜住（理由是"任务比预期复杂"，不是"打转"）。
-        """
+        也不计停滞，最终由预算上限兜住（理由是"任务比预期复杂"，不是"打转"）。"""
         return self.repeated or self.empty_response
 
     def describe(self) -> str:
@@ -74,11 +44,7 @@ class TurnOutcome:
 
 
 def tool_signature(tool_calls: Sequence[Any]) -> Tuple[str, ...]:
-    """把一轮的调用压成可比较的签名（名称 + 参数），用于识别"原样重复"。
-
-    参数排序后再字符串化：顺序不同但内容相同的调用同样算重复
-    （模型有时会打乱参数顺序，那不是"换了新办法"）。
-    """
+    """把一轮的调用压成可比较的签名（名称 + 参数），用于识别"原样重复"。"""
     sig = []
     for tc in tool_calls or ():
         name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
@@ -108,7 +74,8 @@ class LoopBudget:
     spinning_turns: int = 0         # 自上次进展以来"原地打转"的轮数（有进展即清零）
     stagnation_turns: int = 0       # 连续**无任何进展**轮数（不管是否换新做法；有进展即清零）
     extensions: int = 0
-    stop_reason: str = ""           # "exhausted" / "stalled" / ""（未停）
+    stop_reason: str = ""           # "exhausted" / "stalled" / "interrupted" / ""（未停）
+    interrupt_error: str = ""       # 中断收尾时的最后一条上游错误（仅用于说明文案）
 
     def __post_init__(self):
         self.base = max(1, int(self.base))
@@ -120,10 +87,7 @@ class LoopBudget:
 
     def _capped(self, value: int) -> int:
         """硬上限就是硬上限：即使它小于起步轮数也以它为准。
-
-        （先前写成 max(hard_cap, base) 会让显式 max_ops=5 被 base 顶掉——
-         而 --max-ops 的语义是"就跑这么多轮"，必须被尊重。）
-        """
+        而 --max-ops 的语义是"就跑这么多轮"，必须被尊重。）"""
         if self.hard_cap <= 0:
             return value
         return min(value, self.hard_cap)
@@ -131,21 +95,14 @@ class LoopBudget:
     @classmethod
     def fixed(cls, turns: int) -> "LoopBudget":
         """固定轮数预算（显式 --max-ops 的旧语义：不续期、不因停滞提前停）。
-
-        为什么显式传参时要退回固定语义：这个参数的含义就是"最多跑这么多轮"，
-        调用方（CLI 参数 / 测试）依赖它可预测；动态续期只应作为默认行为。
-        """
+        调用方（CLI 参数 / 测试）依赖它可预测；动态续期只应作为默认行为。"""
         turns = max(1, int(turns))
         return cls(base=turns, extend=0, stall_limit=turns + 1, hard_cap=turns)
 
     @classmethod
     def from_config(cls, hard_cap_fallback: int = 120,
                     config: Optional[Dict[str, Any]] = None) -> "LoopBudget":
-        """从 TOOL_CONFIG 构造。
-
-        hard_cap 缺省回退到旧的 `max_loop_ops`（历史语义就是"最大轮数"），
-        这样没有配置新旋钮的机器行为与升级前一致（最坏情况不劣化）。
-        """
+        """从 TOOL_CONFIG 构造。"""
         if config is None:
             from config import TOOL_CONFIG
             config = TOOL_CONFIG
@@ -167,13 +124,7 @@ class LoopBudget:
         return True
 
     def allow_next(self) -> bool:
-        """能否再跑一轮；不能则设置 stop_reason。
-
-        `hard_cap <= 0` 表示**不设绝对上限**：此时不看 limit，只由"原地打转"、
-        用户按停止、或致命错误来结束——这正是"让 agent 做完任务再结束"的语义。
-        （只看 limit 是不够的：不续期的轮次——换了新做法但失败——会把 limit 耗光，
-         于是任务照样被"轮数用尽"打断，那正是要根治的现象。）
-        """
+        """能否再跑一轮；不能则设置 stop_reason。"""
         if self.spinning_turns >= self.stall_limit:
             self.stop_reason = "stalled"
             return False
@@ -196,27 +147,16 @@ class LoopBudget:
                 self.limit = grew
                 self.extensions += 1
         else:
-            # 无进展（打转也算"无进展"的一种）→ 两个计数器都累计。
-            # stagnation 与 spinning 的区别：spinning 只统计"原样重复/空回复"（真实空转），
-            # stagnation 统计**任何**无进展——包括"换了新做法但失败"。后者在调试里是
-            # 正常推进，所以不能拿来停；但无限模式（hard_cap=0）下这类轮次永远到不了
-            # 上限，会无限跑下去。stagnation 就是给这个场景的**可见性**：达到阈值提醒
-            # 一次，让用户/前端知道"它已经很久没有产出了"，而不是默默烧钱。
+            # 无进展（打转也算"无进展"的一种）→ 两个计数器都累计。 stagnation 与 spinning 的区别：spinning 只统计"原样重复/空回复"（真实空转）
             self.stagnation_turns += 1
             if outcome.spinning:
                 self.spinning_turns += 1
-        # 其它情况（换了新做法但失败 / 被审批拦截）：既不续期也不计打转——
-        # 给新尝试留机会，但预算不会因此变宽。
+        # 其它情况（换了新做法但失败 / 被审批拦截）：既不续期也不计打转——给新尝试留机会，但预算不会因此变宽。
 
     # ------------------------------------------------------------
 
     def stagnation_alarm(self) -> bool:
-        """连续无进展轮数是否**刚好达到**预警阈值（每阈值只响一次）。
-
-        阈值（stagnation_limit）为 0 时关闭。注意它**只预警、不自动停**：
-        无限模式的语义是"让 agent 做完任务再结束"，停不停由用户（或 stall 打转）
-        决定；这个报警只是让"卡了很久"这件事变得可见。
-        """
+        """连续无进展轮数是否**刚好达到**预警阈值（每阈值只响一次）。"""
         return (
             self.stagnation_limit > 0
             and self.stagnation_turns == self.stagnation_limit
@@ -224,11 +164,14 @@ class LoopBudget:
 
     # ------------------------------------------------------------
 
+    def mark_interrupted(self, error: str = "") -> None:
+        """LLM 连续失败（限流/超时）导致的收尾。"""
+        self.stop_reason = "interrupted"
+        self.interrupt_error = (error or "").strip()[:200]
+
     def near_limit(self, warn_fraction: float = 0.8) -> bool:
         """是否已接近当前预算（用于预警）。
-
-        无限模式（hard_cap=0）下没有"接近上限"这回事，恒返回 False。
-        """
+        无限模式（hard_cap=0）下没有"接近上限"这回事，恒返回 False。"""
         if self.hard_cap <= 0 or self.limit <= 0:
             return False
         return self.used >= int(self.limit * warn_fraction)
@@ -240,10 +183,20 @@ class LoopBudget:
             "spinning_turns": self.spinning_turns, "stagnation_turns": self.stagnation_turns,
             "hard_cap": self.hard_cap,
             "stop_reason": self.stop_reason,
+            "interrupt_error": self.interrupt_error,
         }
 
     def stop_message(self) -> str:
         """给用户/模型看的中止说明（理由比"轮数耗尽"准确，且能被交接机制识别）。"""
+        if self.stop_reason == "interrupted":
+            detail = f"：{self.interrupt_error}" if self.interrupt_error else ""
+            return (
+                "上游模型连续失败，重试耗尽后停止%s。**轮数预算并未耗尽**"
+                "（起步 %d 轮 / 已用 %d 轮 / 安全网上限 %s）——这不是任务太大，"
+                "是上游暂时不可用；稍后重发即可续跑，已完成的部分不会重做。"
+                % (detail, self.base, self.used,
+                   self.hard_cap if self.hard_cap > 0 else "无")
+            )
         if self.stop_reason == "stalled":
             return (
                 "自上次取得进展以来，已有 %d 轮在原地打转（原样重复调用或空回复），"

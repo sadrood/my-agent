@@ -1,12 +1,4 @@
-"""
-文件操作工具模块（JSON Schema + 结构化调用）。
-提供读写、追加、复制、移动、删除、列目录、存在性检查与文件信息。
-
-约定：
-- execute_json() 直接按字段取值，不回落字符串解码
-- 风险分级：读操作 low，写/删除 medium，递归删除 high
-- delete 是破坏性操作：目录必须显式 recursive=true；.git / 项目根 / 盘根一律拒绝
-"""
+"""文件操作工具模块（JSON Schema + 结构化调用）。"""
 import os
 import shutil
 import json
@@ -83,9 +75,7 @@ class FileTool(BaseTool):
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
         """结构化入口：**直接按字段取值**，不回落字符串解码。
-
-        拼字符串再按空格切分会让含空格的路径静默写错文件，路径必须直连实现。
-        """
+        拼字符串再按空格切分会让含空格的路径静默写错文件，路径必须直连实现。"""
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
         content = str(arguments.get("content", ""))
@@ -129,8 +119,7 @@ class FileTool(BaseTool):
         )
 
     def execute(self, input_str: str) -> ToolResult:
-        # 只 lstrip 不 strip：write/append 的内容要原样落盘（末尾换行不能丢）。
-        # 路径类参数由各自的 handler 自行 strip。
+        # 只 lstrip 不 strip：write/append 的内容要原样落盘（末尾换行不能丢）。路径类参数由各自的 handler 自行 strip。
         if not input_str or not input_str.strip():
             return ToolResult(success=False, output="", error="操作指令为空。")
 
@@ -193,8 +182,7 @@ class FileTool(BaseTool):
         old_content = tracker.snapshot(path)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            # newline=""：原样写入。文本模式在 Windows 会把 LF 翻成 CRLF，与 edit
-            # 工具（保留原有行尾）策略相反，交替使用会来回翻整个文件的行尾。
+            # newline=""：原样写入。文本模式在 Windows 会把 LF 翻成 CRLF，与 edit工具（保留原有行尾）策略相反，交替使用会来回翻整个文件的行尾。
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             tracker.record_with_old(path, self.name, old_content, existed=existed)
@@ -247,11 +235,7 @@ class FileTool(BaseTool):
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def _delete_guard(self, path: str) -> str:
-        """返回拒绝原因（"" = 允许删除）。
-
-        比较一律走 `os.path.normcase`：Windows 大小写不敏感，敏感比较会让 .GIT /
-        .ENV / 盘符大小写变体绕过守卫。POSIX 上 normcase 是恒等变换。
-        """
+        """返回拒绝原因（"" = 允许删除）。"""
         if not path or not path.strip():
             return "删除操作需要路径"
         target = os.path.abspath(path.strip())

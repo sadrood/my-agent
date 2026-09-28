@@ -1,8 +1,4 @@
-"""desktop_gui.apply_event 渲染逻辑单测（不依赖 Tk 显示环境）。
-
-覆盖评审要求的"工具调用卡片"：名称 + 参数 + 状态（成功/失败）+ 耗时，
-以及结果行回写、answer 渲染、同工具多次调用的卡片配对。
-"""
+"""desktop_gui.apply_event 渲染逻辑单测（不依赖 Tk 显示环境）。"""
 import sys
 import os
 

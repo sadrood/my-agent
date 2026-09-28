@@ -21,11 +21,7 @@ def test_sanitize_name():
 
 def test_sanitize_name_disambiguates_after_cleaning():
     """清理会改变原名时补短哈希，否则不同的会话名会折叠成同一个文件。
-
-    实测故障（2026-09-22 审计）：`调研: 2026` 与 `调研 2026`（以及 `a/b` 与 `a_b`）
-    都映射到 `调研_2026.json`，而文件里存的 id 是**原始名** —— 后开的会话静默覆盖
-    前一个，`/open` 打开的是别的内容。
-    """
+    前一个，`/open` 打开的是别的内容。"""
     a = sanitize_name("调研: 2026")
     b = sanitize_name("调研 2026")
     c = sanitize_name("a/b")
@@ -169,13 +165,7 @@ class TestConversationNameIsolation:
 
 
 class TestConcurrentSave:
-    """并发保存同一会话不能互相踩（原子写的临时文件名必须每个写入者唯一）。
-
-    实测故障（2026-09-22 审计）：临时文件名固定为 `path + ".tmp"`，而主 Agent 每轮
-    整份重写会话、dashboard 侧任务同时做"读→追加→写回"，两者共用同一个临时文件 ——
-    互相截断会产生两段 JSON 混杂的损坏文件，`_read_raw` 解析失败返回 None，
-    `list_conversations` 跳过它，用户看到的是"整个对话凭空消失"。
-    """
+    """并发保存同一会话不能互相踩（原子写的临时文件名必须每个写入者唯一）。"""
 
     def test_concurrent_save_keeps_file_readable(self, tmp_path):
         import threading
@@ -303,9 +293,7 @@ class TestRestoreModelRespectsExplicitConfig:
         from agent.memory import Memory
         from agent.session import SessionStore
 
-        # 注意：config.LLM_CONFIG 在模块导入时已缓存环境变量，
-        # 此处 setenv 只为 _user_explicitly_set_default_model() 生效；
-        # 实际默认模型通过 AgentConfig.llm_model 显式注入，避免缓存干扰。
+        # 注意：config.LLM_CONFIG 在模块导入时已缓存环境变量，此处 setenv 只为 _user_explicitly_set_default_model() 生效。
         monkeypatch.setenv("LLM_DEFAULT_MODEL", model_env)
         monkeypatch.setenv("LLM_BASE_URL", "https://token.sensenova.cn/v1")
         monkeypatch.setenv("LLM_API_KEY", "sk-test")

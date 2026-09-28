@@ -1,29 +1,11 @@
-"""
-my_agent 入口程序（Team + Research + Dashboard + 安全审批 + MCP Server 增强版）。
-
-用法:
-    python main.py                           # 交互模式
-    python main.py "你的任务"                 # 单Agent执行
-    python main.py --team "复杂任务"          # 多Agent团队协作
-    python main.py --research "研究主题"      # 深度研究模式
-    python main.py --article "文章主题"       # 文章工坊（多模型互审写作）
-    python main.py --dashboard                # 启动Web监控面板
-    python main.py --dashboard --team "任务"  # Dashboard + 团队模式
-    python main.py --mcp-server               # 以 MCP server 运行（供上游宿主平台调用）
-    python main.py --list-tools               # 列出全部工具（含 JSON Schema）
-
-安全参数:
-    --approval {untrusted,on-failure,on-request,never}   审批策略
-    --sandbox {read-only,workspace-write,danger-full-access}  沙箱等级
-    --guardian / --no-guardian                  Guardian 安全审校
-    --no-rollout                                关闭 Rollout 事件追踪
-    --max-step-ops N                            单步骤内最大工具操作数
-    --session NAME                              会话持久化（保存/恢复对话历史）
-"""
+"""my_agent 入口：交互 / 单 Agent / Team / Research / Article / Dashboard / MCP server。
+常用：python main.py "任务"、--team、--research、--article、--dashboard、--list-tools。
+安全参数：--approval、--sandbox、--guardian/--no-guardian、--max-step-ops、--session。"""
 import sys
 import os
 import argparse
 import threading
+import time
 
 from agent import Agent, AgentConfig, Team
 from tools import ToolManager
@@ -33,16 +15,8 @@ from config import LOG_CONFIG
 
 def build_config(args) -> AgentConfig:
     """根据命令行参数构建 AgentConfig。
-
-    注意哪些字段传 `None`：它们在 AgentConfig 里的语义是"**读配置中心**"
-    （见 `agent/agent.py` 的 `x if x is not None else CONFIG.get(...)`）。传一个恒定
-    的 bool 会把 `.env` 的总开关顶掉 —— 旧实现里 `rollout_enabled=not
-    args.no_rollout` 与 `approval_interactive=True` 就踩了这个坑：
-    `ROLLOUT_ENABLED=false`、`MY_AGENT_MINIMAL=1`（docs/COMMANDS.md 承诺极简模式会
-    关掉 Rollout）以及 `APPROVAL_INTERACTIVE=false` 全部失效（2026-09-22 审计）。
-    `guardian_enabled` 早就是这么做的（见 main.py 里对 `args.guardian is None` 的
-    回落），这里把漏掉的两个对齐。
-    """
+    注意字段传 None 才是"读配置中心"；传恒定 bool 会把 .env 总开关顶掉
+    （rollout_enabled / approval_interactive 就是这样让 ROLLOUT_ENABLED=false 失效的）。"""
     return AgentConfig(
         max_steps=args.max_steps,
         verbose=not args.quiet,
@@ -146,14 +120,9 @@ def run_article(topic: str, requirements: str = ""):
 
 
 def start_dashboard(port: int = 8080, host: str = "127.0.0.1"):
-    """
-    启动 dashboard 后端服务（/api + /ws）。
-
-    注意：浏览器版控制面板（GET / 与 /static）默认已禁用（web 端停用），
-    本服务仅供桌面端客户端 / 手动 API 使用；需要浏览器版页面时先设置
-    MY_AGENT_WEB_UI=1 再调用。桌面端由 Electron 主进程自行拉起（端口 8090），
-    main.py 的 --dashboard 参数不再走这里。
-    """
+    """启动 dashboard 后端（/api + /ws）。
+    浏览器版页面默认禁用，仅供桌面端与手动 API；需要时设 MY_AGENT_WEB_UI=1。
+    桌面端由 Electron 自行拉起（8090），--dashboard 不走这里。"""
     try:
         from dashboard.server import start_server
         t = threading.Thread(target=start_server, kwargs={
@@ -173,13 +142,7 @@ def start_desktop_app():
 
 
 def _parse_command(goal: str):
-    """
-    解析斜杠命令（容忍 `/team任务` 这种命令与参数连写的输入）。
-
-    Returns:
-        (命令名, 参数) 或 (None, None)。
-        命令名 ∈ {"team", "research", "tools", "sessions", "open", "new"}
-    """
+    """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
     for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "consent", "history", "help"):
         prefix = "/" + cmd
         if goal == prefix:
@@ -190,8 +153,7 @@ def _parse_command(goal: str):
             # 空格分隔：/team 任务
             if nxt.isspace():
                 return cmd, rest.strip()
-            # 命令+参数连写：/team任务（中文等非 ASCII 字符）
-            # 排除 /teamwork 这类英文连写（ASCII 字母数字）
+            # 命令+参数连写：/team任务（中文等非 ASCII 字符）排除 /teamwork 这类英文连写（ASCII 字母数字）
             if not nxt.isascii():
                 return cmd, rest.strip()
     return None, None
@@ -199,15 +161,9 @@ def _parse_command(goal: str):
 
 def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
                       header: str = "") -> None:
-    """把对话记录打印到终端（打开旧对话/查看历史时用）。
-
-    为什么需要：`--session` / `-r` 恢复旧对话时**只打印一行"已恢复（N 条记录）"**，
-    屏幕上什么都没有——用户的原话是"重新打开之前的对话 cli 看不到历史记录"。
-    恢复上下文却不显示上下文，等于让人猜上次聊到哪。
-
-    截断是**显式**的：超出 limit 条、或单条超 width 字时给出提示与总数，
-    并告诉用户用 /history 看更多（不做静默截断）。
-    """
+    """把对话记录打印到终端（恢复旧对话时用）。
+    恢复上下文却不显示上下文等于让人猜，所以这里必须打印。
+    截断是显式的：超出 limit/width 会给出提示与总数，不做静默截断。"""
     msgs = [m for m in (messages or []) if str(m.get("content", "")).strip()]
     if not msgs:
         return
@@ -230,14 +186,8 @@ def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
 
 def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                     config: AgentConfig = None):
-    """
-    交互模式：`>` 提示符 + 轮次间弱分割线 + 对话 ID 管理。
-
-    对话管理：
-    - 每次交互自动生成对话 ID（conv-日期-随机码），欢迎区显示
-    - 每轮结束自动全量保存该对话的所有记录
-    - /sessions 列出全部对话；/open <ID> 打开并恢复某对话的全部记录；/new 新开对话
-    - 启动参数 --session <ID> 直接恢复指定对话
+    """交互模式：`>` 提示符 + 对话 ID 管理。
+    每轮自动全量保存；/sessions 列出、/open <ID> 恢复、/new 新开；--session <ID> 直接恢复。
     """
     from agent.ui_theme import (
         print_welcome, print_goodbye, print_final_result, print_info,
@@ -273,8 +223,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
         "api_key": f"{_api_key}…" if _api_key else "（未设置）",
         "restored": bool(conv),
     })
-    # 环境变量遮挡告警：.env 的 LLM_* 被 ANTHROPIC_* 顶掉时要说清楚，
-    # 否则用户会对着 .env 排查半天（面板显示的其实是生效值）。
+    # 环境变量遮挡告警：.env 的 LLM_* 被 ANTHROPIC_* 顶掉时要说清楚，否则用户会对着 .env 排查半天（面板显示的其实是生效值）。
     try:
         from config import llm_config_provenance
         _prov = llm_config_provenance(os.environ)
@@ -319,18 +268,29 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print("[dim]┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄[/dim]")
             c.print()
 
-        def _ask(prompt_text: str) -> str:
-            return _AgentPrompt(prompt_text, console=c)()
+        primary_prompt, continuation_prompt = _prompt_callbacks(c, _AgentPrompt)
 
         try:
             # 粘贴感知的多行读取：粘贴整块合并为一条；行尾 \ 续行
             goal = input_reader.read_goal(
-                prompt_primary=lambda: _ask("[bold white]>[/bold white] "),
-                prompt_continuation=lambda: _ask("[dim]… [/dim]"),
+                prompt_primary=lambda: primary_prompt("[bold white]>[/bold white] "),
+                prompt_continuation=lambda: continuation_prompt("[dim]… [/dim]"),
             )
         except (EOFError, KeyboardInterrupt):
             print_goodbye(use_rich=True)
             break
+        except UnicodeDecodeError as exc:
+            # ↑ 解码错误不再打挂进程；并提醒残留粘贴会被 shell 逐行执行（实测刷屏 command not found）
+            print_warning(
+                "输入解码失败（%s）。终端里可能还残留着未读完的粘贴内容——"
+                "退出后它会被 shell 当成命令逐行执行，请先按 Ctrl+C / Ctrl+U 清空输入行；"
+                "长文本建议先存成文件，再用 file 工具读取。" % exc)
+            continue
+        except Exception as exc:
+            # ↑ 兜底：任何读取异常都只作废本次输入，主循环继续，不让 CLI 退出
+            print_warning("读取输入失败（%s）：%s%s"
+                          % (type(exc).__name__, exc, _exc_where(exc)))
+            continue
         if goal is None:
             print_goodbye(use_rich=True)
             break
@@ -457,8 +417,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print(f"[dim]  主模型    {agent.llm.default_model} @ {agent.llm.client.base_url}[/dim]")
             c.print(f"[dim]  主 key     {masked}[/dim]")
             c.print(f"[dim]  视觉      {VISION_CONFIG.get('vision_model') or LLM_CONFIG.get('default_model')} @ {VISION_CONFIG.get('base_url')}[/dim]")
-            # 备用链可能每个条目各自带端点（`模型@预设`），按解析结果逐级显示
-            # （只显示模型与端点，不显示 key）
+            # 备用链可能每个条目各自带端点（`模型@预设`），按解析结果逐级显示（只显示模型与端点，不显示 key）
             try:
                 from models.vision import parse_fallback_entries
                 _vis_chain = parse_fallback_entries()
@@ -586,12 +545,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 print_info("对话历史未超阈值或压缩失败，保持原样。", style="info")
             continue
         if cmd == "goal":
-            # 查看 / 设置当前会话持久目标。
-            # 变量名**不能**叫 `store`：那会覆盖上面 `store = SessionStore()` 的同一个
-            # 局部变量，而本分支末尾 continue 让覆盖持续存在 —— 之后 `/sessions`
-            # （store.list_conversations()）与 `/open` 必 AttributeError，而命令分发不在
-            # 任何 try 里，异常直接冲出 run_interactive、整个 CLI 带 traceback 退出
-            # （2026-09-22 审计实测）。
+            # 查看 / 设置当前会话持久目标。变量名**不能**叫 `store`：那会覆盖上面 `store = SessionStore()` 的同一个局部变量。
+
             from agent.goal import GoalStore
             goal_store = GoalStore()
             session_name = agent.config.session_name or ""
@@ -659,9 +614,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 result = team.run(goal)
                 print_final_result(result.final_answer)
             else:
-                # 人类输入里若含授权语（"这个我允许/放行/可以执行"），绑定到刚才被
-                # Guardian 拦下的那次调用——授权**只**在这一层（人亲手敲的字）产生，
-                # 模型输出与工具结果永远不会被解析成授权（防提示注入自我放行）。
+                # 人类输入里若含授权语（"这个我允许/放行/可以执行"），绑定到刚才被 Guardian 拦下的那次调用——授权**只**在这一层（人亲手敲的字）产生，模型输出与工具结果永远不会被解析成授权（防提示注入自我放行）。
                 _grant = agent.grant_consent_from_user(goal)
                 if _grant is not None:
                     scope = "本次" if _grant.scope == "once" else "本会话内同一条调用"
@@ -725,11 +678,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dash-port", type=int, default=8080, help="Dashboard端口")
     parser.add_argument("--dash-host", default="127.0.0.1",
                         help="Dashboard 绑定地址（默认 127.0.0.1 仅本机；局域网访问用 0.0.0.0）")
+    parser.add_argument("--llm-health", action="store_true", dest="llm_health",
+                        help="查看 LLM 限流/延迟累计数据（memory/llm_health.json）")
     parser.add_argument("--doctor", action="store_true",
                         help="依赖/浏览器/git/.env/模型连通等环境自检")
     parser.add_argument("--no-vision", action="store_true", help="关闭视觉感知")
 
-    # ---- v2：安全 / 追踪 / 会话 ----
+    # 安全 / 追踪 / 会话 ----
     parser.add_argument(
         "--approval", default=None,
         choices=["untrusted", "on-failure", "on-request", "never"],
@@ -794,10 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_skills_install(args) -> int:
-    """安装/更新技能包（CLI 入口）。
-
-    打印每个技能的安装结果；全部安装成功返回 0，部分失败 / 整体失败返回 1。
-    """
+    """安装/更新技能包（CLI 入口）；全部成功返回 0，部分失败/整体失败返回 1。"""
     from agent.skills import SkillPackManager
     from config import SKILLS_CONFIG
 
@@ -825,7 +777,55 @@ def run_skills_install(args) -> int:
     return 0 if result.ok else 1
 
 
+def _prompt_callbacks(console, prompt_cls=None):
+    """按平台给出"主提示符/续行提示符"回调。
+
+    ↑ POSIX：只**显示**提示符——读取独占 stdin（单一字节读取者），避免 input()/readline
+      与 os.read 抢同一个 fd 把汉字切成半截（UnicodeDecodeError）。
+    ↑ Windows：显示并**读取**（rich Prompt）——粘贴排干走 msvcrt 控制台 API，不抢 fd，
+      这条并存路径一直是安全的；若这里也返回 None，就会变成"没人读输入"。
+    """
+    def _show(prompt_text: str) -> None:
+        console.print(prompt_text, end="")
+
+    if sys.platform != "win32":
+        return _show, _show
+
+    def _read(prompt_text: str) -> str:
+        # prompt_cls 由调用方传入（_AgentPrompt 定义在 run_interactive 内部）
+        return prompt_cls(prompt_text, console=console)()
+
+    return _read, _read
+
+
+def _exc_where(exc: BaseException) -> str:
+    """异常的出错位置（`@ 文件:行`）+ 完整 traceback 落盘，便于事后定位。"""
+    where = ""
+    try:
+        import traceback
+        frames = traceback.extract_tb(exc.__traceback__)
+        if frames:
+            last = frames[-1]
+            where = " @ %s:%d" % (os.path.basename(last.filename), last.lineno)
+        path = os.path.join("output", "input_error.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n---- %s ----\n%s\n"
+                     % (time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))))
+    except Exception:
+        pass
+    return where
+
+
 def main():
+    # ↑ 输出显式设 UTF-8：Linux 上 stdout/stderr 可能被 locale 影响，中文与 emoji 会反向踩坑
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     parser = build_parser()
     args = parser.parse_args()
 
@@ -849,6 +849,12 @@ def main():
         except Exception:
             pass
 
+    # LLM 限流/延迟累计数据（my-agent --llm-health）
+    if args.llm_health:
+        from agent.llm_health import LLMHealth, render
+        print(render(LLMHealth().snapshot()))
+        return
+
     # 环境自检（my-agent --doctor）
     if args.doctor:
         from agent.doctor import run_doctor, render_report
@@ -857,16 +863,12 @@ def main():
 
     # MCP server 模式（优先级最高）
     if args.mcp_server:
-        # ⚠️ 必须**先**处理它，再谈其它输出：stdio MCP 的协议就是 stdout 上的
-        # 行分隔 JSON-RPC，任何一句额外输出都会被宿主判成协议错误。
-        # 旧实现把这下面那段启动自检放在前面，部署副本不是 git 仓库 / 缺 .env 时
-        # 进程一启动就往 stdout 写一行 "! Git 快照安全网: 项目不是 git 仓库…"
-        # （2026-09-22 审计）。
+        # ⚠️ 必须**先**处理它，再谈其它输出：stdio MCP 的协议就是 stdout 上的行分隔 JSON-RPC，任何一句额外输出都会被宿主判成协议错误。
+
         run_mcp_server()
         return
 
-    # 启动轻量预警（只查快检项：.env / git / websockets，静默通过，失败给一行修复提示）
-    # 注意放在 mcp_server 分支**之后**：那段提示走 stdout，会污染 MCP 协议流。
+    # 启动轻量预警（只查快检项：.env / git / websockets，静默通过，失败给一行修复提示）注意放在 mcp_server 分支**之后**：那段提示走 stdout，会污染 MCP 协议流。
     try:
         from agent.doctor import _check_env, _check_git, _check_ws_support
         from agent.ui_theme import print_warning
@@ -917,8 +919,6 @@ def main():
             print("· 自动路由: 团队协作模式")
 
     # Dashboard：浏览器版控制面板已禁用（web 端停用）。
-    # 桌面端（Electron）由主进程自行 spawn `python -m dashboard.server` 做后端，
-    # 与这里的 --dashboard 无关；--dashboard 仅保留参数兼容，不再拉起服务。
     if args.dashboard:
         print("  [Dashboard] 浏览器版控制面板已禁用（web 端已停用）。")
         print("  [Dashboard] 如需浏览器版页面，设置 MY_AGENT_WEB_UI=1 后启动服务。")

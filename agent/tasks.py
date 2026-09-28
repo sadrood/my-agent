@@ -1,14 +1,5 @@
-"""
-任务中心（借鉴同类实现的想法 + 任务状态机）。
-
-- 想法（thought）：快速速记不成熟的想法，持久化到 memory/thoughts.json。
-- 任务（task）：把已确认的目标沉淀为可追踪状态机（todo → in_progress → done/failed），
-  带执行日志，可"恢复"失败任务。持久化到 memory/tasks.json（全局，跨会话）。
-- 会话级待办清单（todo_write）保留不动：那是模型在单个会话里的任务清单；
-  这里是全局任务中心。
-
-变更时 emit `tasks` / `thoughts` 事件，供桌面端任务中心面板实时刷新。
-"""
+"""任务中心（借鉴同类实现的想法 + 任务状态机）。
+带执行日志，可"恢复"失败任务。持久化到 memory/tasks.json（全局，跨会话）。"""
 import json
 import os
 import time
@@ -17,9 +8,7 @@ from typing import Any, Dict, List, Optional
 from tools.base import BaseTool, ToolResult
 
 _MEM_DIR = "memory"
-# 任务清单落盘路径必须锚定项目根：这是**硬编码的相对路径**，open() 会按 cwd 解析——
-# 换个目录启动就会读到另一份（看起来"任务清单凭空清空"），而完成任务判定依赖它。
-# 同一类坑在本仓库已出现多次，详见 config.resolve_under_root。
+# 任务清单落盘路径必须锚定项目根：这是**硬编码的相对路径**，open() 会按 cwd 解析——换个目录启动就会读到另一份（看起来"任务清单凭空清空"），而完成任务判定依赖它。
 from config import resolve_under_root as _resolve_under_root
 
 _MEM_DIR = _resolve_under_root(_MEM_DIR)
@@ -179,12 +168,6 @@ class TaskTool(BaseTool):
             return self.execute_json({"operation": "create", "title": parts[1] if len(parts) > 1 else ""})
         if op in ("status", "complete", "log"):
             # parts 已经按 maxsplit=2 切好了：["status", "<id>", "<其余>"]，直接取即可。
-            # 旧实现对 parts[1] 又 split 了一次（想再拆出 status/content），
-            # 但 parts[1] 本身就是 id，拆不出第三个字段 → `rest` 恒为空串：
-            #   `task status <id> done`  → 报"非法状态: "
-            #   `task log <id> 写第一章` → 报"log 需要 content。"
-            # 于是工具描述里承诺的这两个用法永远不可用（2026-09-22 审计）。
-            # JSON 入口 execute_json 是好的，所以主流程（function calling）没暴露。
             tid = parts[1] if len(parts) > 1 else ""
             rest = parts[2] if len(parts) > 2 else ""
             if op == "complete":

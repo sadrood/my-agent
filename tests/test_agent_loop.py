@@ -96,8 +96,7 @@ class TestAgentLoopMode:
         assert "from agent.ui_theme import print_info" not in src, (
             "_run_loop 内禁止局部导入 print_info（会遮蔽模块级导入导致 UnboundLocalError）"
         )
-        # 功能路径：goal 命中意图检测（示例域名不在浏览器关键词表内，
-        # 不会触发浏览器预启动），verbose=False 使记忆召回分支不执行
+        # 功能路径：goal 命中意图检测（示例域名不在浏览器关键词表内，不会触发浏览器预启动），verbose=False 使记忆召回分支不执行
         agent = make_agent(tmp_path, [
             LLMToolResponse(content="好的，这就去 deepseek 查。"),
         ])
@@ -119,13 +118,7 @@ class TestAgentLoopMode:
         assert agent.config.exec_mode == "plan"
 
     def test_max_steps_is_enforced(self, tmp_path):
-        """`--max-steps` 必须真的生效。
-
-        实测故障（2026-09-22 审计）：判断写在计划循环体的**末尾**，而那之前每条路径
-        都以 continue / break 收尾（执行成功 continue、重规划 continue、重规划失败
-        break、超重规划 break），那句判断**永远执行不到** —— 7 步的计划配
-        `max_steps=3` 会一路跑完，从不提示"已达最大步骤数"。
-        """
+        """`--max-steps` 必须真的生效。"""
         plan = "\n".join(f"{i}. 第{i}步" for i in range(1, 8))    # 7 步
         script = [NotImplementedError("tools not supported by provider"), plan] + [
             json.dumps({"action": "think", "reasoning": "想了下"})   # 每步都成功

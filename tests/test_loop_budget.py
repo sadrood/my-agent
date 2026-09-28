@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """动态轮数预算（agent/loop_budget.py）的单元测试。
-
-背景（用户痛点原话）："总是任务没完成轮数耗尽，导致任务中断"。
-原实现是 `for turn in range(max_ops)`——一个常数同时要服务简单任务和复杂任务。
-这里钉住新语义：**有进展就续期，原地打转才提前停**。
-"""
+这里钉住新语义：**有进展就续期，原地打转才提前停**。"""
 from types import SimpleNamespace
 
 from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
@@ -80,11 +76,7 @@ class TestExtension:
         assert b.limit == 2 + 30, "0 = 不设上限，只由进展/停止条件决定"
 
     def test_infinite_mode_never_exhausts(self):
-        """"让 agent 做完任务再结束"：hard_cap=0 时永远放行下一轮。
-
-        旧行为是固定 80/120 轮封顶——复杂任务跑到一半被砍，用户原话
-        "任务没完成轮数耗尽，导致任务中断"。
-        """
+        """"让 agent 做完任务再结束"：hard_cap=0 时永远放行下一轮。"""
         b = LoopBudget(base=2, extend=0, stall_limit=5, hard_cap=0)
         for _ in range(200):
             assert b.allow_next() is True
@@ -182,12 +174,7 @@ class TestFromConfig:
         b = LoopBudget.from_config(120, config={"loop_hard_cap": 0})
         assert b.hard_cap == 0
 class TestStagnationWarning:
-    """连续无进展（包括"换了新做法但失败"）的可见性预警。
-
-    背景：无限模式（hard_cap=0）下，只有"原样重复 / 空回复"能触发 stalled 停止；
-    "换了新做法但失败"的轮次（productive=False 且 spinning=False）永远到不了上限，
-    会无限跑下去。stagnation 计数器让这件事可见——达到阈值响一次，不自动停。
-    """
+    """连续无进展（包括"换了新做法但失败"）的可见性预警。"""
 
     def test_new_approaches_that_fail_accumulate_stagnation(self):
         b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0,
@@ -250,3 +237,40 @@ class TestStagnationWarning:
         assert b.stop_reason == ""          # 仍不自动停（尊重"做完再结束"）
         assert b.stagnation_turns == 5000   # 但"卡了多久"是可见的
         assert b.spinning_turns == 0
+
+
+class TestInterruptedIsNotRoundCap:
+    """上游 429/中断导致的收尾：不能报成"轮数耗尽"（改上限也没用）。"""
+
+    def test_interrupted_message_does_not_claim_round_cap(self):
+        from agent.loop_budget import LoopBudget, TurnOutcome
+
+        b = LoopBudget(base=30, extend=10, stall_limit=5, hard_cap=0)
+        for _ in range(20):
+            b.observe(TurnOutcome(tool_calls=1, succeeded=1))
+        b.mark_interrupted("Error code: 429 - tpm exhausted")
+
+        msg = b.stop_message()
+        assert b.stop_reason == "interrupted"
+        assert "达到任务最大操作轮数" not in msg
+        assert "429" in msg and "预算并未耗尽" in msg
+        assert "已用 20 轮" in msg and "上限 无" in msg
+
+    def test_exhausted_still_reports_the_limit_not_used(self):
+        from agent.loop_budget import LoopBudget, TurnOutcome
+
+        b = LoopBudget.fixed(5)
+        for _ in range(5):
+            b.observe(TurnOutcome(tool_calls=1, succeeded=1))
+        assert b.allow_next() is False
+        assert b.stop_reason == "exhausted"
+        assert "（5 轮" in b.stop_message()
+
+    def test_summary_carries_interrupt_detail(self):
+        from agent.loop_budget import LoopBudget
+
+        b = LoopBudget()
+        b.mark_interrupted("429 rate limit")
+        s = b.summary()
+        assert s["stop_reason"] == "interrupted"
+        assert "429" in s["interrupt_error"]

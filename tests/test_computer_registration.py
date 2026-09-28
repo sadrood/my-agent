@@ -1,8 +1,4 @@
-"""`computer` 工具只在有实现的平台上注册。
-
-原先无条件注册：非 Windows 上模型会反复调用一个恒返回「仅支持 Windows」的工具，
-agent 还会因它存在而追加整套桌面操控提示。
-"""
+"""`computer` 工具只在有实现的平台上注册。"""
 import platform
 
 import tools.computer_use as computer_use
@@ -19,10 +15,7 @@ class TestDesktopToolRegistration:
         assert ToolManager().get_tool("computer") is not None
 
     def test_registration_matches_this_host(self):
-        """跟着真实平台走：Windows 上必须有、别的平台上必须没有。
-
-        这条同时在两个平台上有效 —— 在 Linux 上跑测试时会直接暴露漏改。
-        """
+        """跟着真实平台走：Windows 上必须有、别的平台上必须没有。"""
         expected = platform.system() == "Windows"
         assert (ToolManager().get_tool("computer") is not None) == expected
 

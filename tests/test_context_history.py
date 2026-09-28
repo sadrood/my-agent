@@ -1,22 +1,5 @@
-"""
-回归测试：会话历史不能丢最后一条（否则模型会回去答上一题）。
-
-真实故障（2026-09-16，用户报"我每次粘贴大量文字到 cli，它都看不见，然后回到上一个
-问题回答"）：
-
-- rollout run-20260916-202234 的 goal 是用户粘贴的 3028 字新剧本，`run_start`
-  里 goal 完整无误，**粘贴本身没问题**；
-- 但 agent 后续 4 轮全在改"字幕太大"——也就是上一个问题；
-- 把当时真正发给模型的 messages 原样回放，模型依然答"字幕"，100% 复现；
-- 原因：`agent.py` 上下文构建里 `for m in recent[:-1]` 假设"memory 最后一条就是
-  本轮 goal"。该假设只在**计划模式**成立（run() 开头就 add_message(goal)）；
-  而默认的**单循环模式**在第 482 行就直接 return _run_loop()，goal 要到本次 run
-  结束才写进 memory（同文件末尾 add_message），于是 recent[:-1] 白白删掉了上一条
-  真实历史。
-- 这次被删掉的恰好是助手那句"新字幕版已经烧好了"，历史便以一句**没人回应的旧
-  抱怨**（"字幕太大了"）结尾，模型于是回去答那个旧问题，完全无视新目标。
-- 对照实验：同一个 goal，仅把被删的最后一条历史补回去，模型立刻正确回应新剧本。
-"""
+"""回归测试：会话历史不能丢最后一条（否则模型会回去答上一题）。
+本轮 goal"。该假设只在**计划模式**成立（run() 开头就 add_message(goal)）；"""
 import pytest
 
 from agent.agent import Agent, AgentConfig
@@ -76,10 +59,7 @@ def user_message(llm) -> str:
 # ----------------------------------------------------------------------
 
 def test_last_history_message_is_kept(tmp_path):
-    """单循环模式下 goal 还没进 memory，最后一条历史必须留下。
-
-    丢掉它会制造"上一轮没人回应的请求"结尾，模型据此回去答旧题。
-    """
+    """单循环模式下 goal 还没进 memory，最后一条历史必须留下。"""
     agent = make_agent(tmp_path)
     agent.memory.add_message("user", "字幕太大了，都占满半边屏幕了")
     agent.memory.add_message("assistant", "搞定了！新字幕版已经烧好了。")

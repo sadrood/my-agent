@@ -1,14 +1,4 @@
-"""
-运行时统计模块（借鉴同类实现的统计行）。
-
-每次运行结束后输出一行统计：
-  4 轮 · 6 步 · LLM 42.3s · 工具 0.8s · 首 token 2.1s · 21 tok/s
-  · 缓存命中 63% · 输入 1.2K · 输出 312
-
-数据来源：
-- 轮数/步数/工具耗时 → Executor 主循环
-- LLM 耗时/首 token/速率/token 用量 → LLM 层（每次调用后记录）
-"""
+"""运行时统计模块（借鉴同类实现的统计行）。"""
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -29,11 +19,7 @@ def humanize_seconds(seconds: float) -> str:
 
 
 def humanize_duration_cn(seconds: float) -> str:
-    """秒数 → **中文时长**（3分03秒 / 12秒 / 1时05分12秒）。
-
-    与 `humanize_seconds` 分工不同：那个是统计行里的分项（英文单位、带小数、偏技术），
-    这个是给"这次一共跑了多久"用的 —— 用户读的是墙钟，中文更好认。
-    """
+    """秒数 → **中文时长**（3分03秒 / 12秒 / 1时05分12秒）。"""
     if seconds is None or seconds < 0:
         seconds = 0
     total = int(seconds)
@@ -91,8 +77,7 @@ class RunMetrics:
         self.input_tokens += input_tokens or 0
         self.output_tokens += output_tokens or 0
         self.cached_tokens += cached_tokens or 0
-        # 每次调用传入的 input_tokens 即该次请求的完整 prompt 长度：
-        # 保留最后一次作为「上下文窗口水位」的近似（多轮重复发送不计入窗口水位）
+        # 每次调用传入的 input_tokens 即该次请求的完整 prompt 长度：保留最后一次作为「上下文窗口水位」的近似（多轮重复发送不计入窗口水位）
         if input_tokens:
             self.last_context_tokens = int(input_tokens)
 
@@ -111,13 +96,7 @@ class RunMetrics:
 
     @property
     def elapsed(self) -> float:
-        """墙钟耗时 —— 用户真正感知的"这次跑了多久"。
-
-        它与 `llm_seconds + tool_seconds` 的**差额**才是信息量所在：那部分是
-        "看不见的等待"（限流退避 / 等人工审批 / 快照 git 操作 / 压缩 / 浏览器启动 /
-        MCP 连接）。只报分项的话，用户看到"等了 5 分钟，但 LLM 42s、工具 1s"时
-        无从知道剩下的时间去哪了。
-        """
+        """墙钟耗时 —— 用户真正感知的"这次跑了多久"。"""
         if not self.started:
             return 0.0
         return max(0.0, time.time() - self.started)
@@ -129,12 +108,7 @@ class RunMetrics:
 
     @property
     def tokens_per_sec(self) -> Optional[float]:
-        """输出速率；无法可靠计算时返回 None（应显示"—"而不是 0.0）。
-
-        旧实现分母用 llm_seconds（把首 token 延迟也算成生成时间 → 速率被低估），
-        且在"没有首 token 记录"时（非流式回退路径）直接返回 0.0 却照样打印，
-        状态行于是显示一个看起来像实测值的 `0.0 tok/s`。
-        """
+        """输出速率；无法可靠计算时返回 None（应显示"—"而不是 0.0）。"""
         if not self.first_token_seconds or self.output_tokens <= 0:
             return None
         secs = self.decode_seconds
@@ -154,13 +128,7 @@ class RunMetrics:
     # ---- 渲染 ----
 
     def render_line(self) -> str:
-        """
-        渲染统计行。
-
-        Returns:
-            "4 轮 · 6 步 · LLM 42.3s · 工具 0.8s · 首 token 2.1s · 21 tok/s
-             · 缓存命中 63% · 输入 1.2K · 输出 312"
-        """
+        """渲染统计行。"""
         parts = [
             f"{self.turns} 轮",
             f"{self.steps} 步",
@@ -172,7 +140,7 @@ class RunMetrics:
             parts.append(f"首 token 平均 {avg:.2f}s" if avg < 1 else f"首 token 平均 {avg:.1f}s")
         if self.output_tokens > 0:
             rate = self.tokens_per_sec
-            # 测不出就明确显示"—"，不要打印一个像实测值的 0.0
+            # 测不出就明确显示"—"，不要打印一个像值的 0.0
             if rate is None:
                 parts.append("tok/s —")
             else:
@@ -193,16 +161,7 @@ class RunMetrics:
         return " · ".join(parts)
 
     def render_status_bar(self, policy: str = "", sandbox_mode: str = "") -> str:
-        """
-        渲染常驻状态栏（每轮模型调用前刷新一次）。
-
-        Args:
-            policy: 审批策略名（空则不显示）
-            sandbox_mode: 沙箱等级名（空则不显示）
-
-        Returns:
-            "轮 3 · ↑12.3K ↓1.8K tok · 缓存 63% · 沙箱 workspace-write · 策略 on-failure"
-        """
+        """渲染常驻状态栏（每轮模型调用前刷新一次）。"""
         parts = [f"轮 {self.turns}"]
         if self.input_tokens or self.output_tokens:
             parts.append(

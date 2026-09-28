@@ -1,13 +1,5 @@
-"""
-持久终端会话（参照上游同类 `terminal`：跨工具调用保持 shell 状态）。
-
-一个会话 = 一个常驻 shell 子进程（Windows cmd.exe / POSIX bash）。
-cd / set / 激活环境等状态跨 tool 调用保留。会话按 key（会话 id）隔离，
-由 TerminalTool 统一管理。
-
-执行方式：写入命令 + 哨兵行（echo __DONE_xxx__），后台 reader 线程持续
-读输出，直到哨兵出现返回该段输出。超时/会话退出则报错，不阻塞 Agent。
-"""
+"""持久终端会话（参照上游同类 `terminal`：跨工具调用保持 shell 状态）。
+读输出，直到哨兵出现返回该段输出。超时/会话退出则报错，不阻塞 Agent。"""
 import atexit
 import os
 import platform
@@ -90,8 +82,7 @@ class TerminalSession:
             return False, f"写入会话失败: {e}"
         self._maybe_update_cwd(cmd)
 
-        # 等待哨兵出现（带超时）。精确匹配：命令回显行「echo __DONE_x__」虽含 token，
-        # 但整行 != token，避免提前命中把真实哨兵输出留到下次。
+        # 等待哨兵出现（带超时）。精确匹配：命令回显行「echo __DONE_x__」虽含 token，但整行 != token，避免提前命中把真实哨兵输出留到下次。
         sentinel_idx = None
         deadline = time.time() + timeout
         with self._cond:
@@ -182,15 +173,7 @@ class TerminalSession:
             pass
 
 
-#: 进程退出时统一收掉常驻会话。
-#:
-#: `TerminalTool.close_all_sessions()` 此前**没有任何生产调用方**（`Agent` 也没有
-#: 退出清理钩子），于是 `terminal session start` 起的常驻 cmd.exe 在进程生命周期内
-#: 一直活着；叠加 `ToolManager.reset_tool` 超时时重建工具实例，旧实例的 sessions 与
-#: 后台 job 会被彻底孤儿化 —— 句柄、临时日志、子进程再无人回收（2026-09-22 审计）。
-#:
-#: 用 WeakSet 装"还活着的管理器"：不入 GC 的路（强引用会让被 reset 掉的旧实例
-#: 永远回收不了），进程退出时把还活着的一并关掉。只注册一次。
+# : 进程退出时统一收掉常驻会话。:: `TerminalTool.close_all_sessions()` 此前**没有任何生产调用方**（`Agent` 也没有: 退出清理钩子）
 _LIVE_MANAGERS: "weakref.WeakSet" = weakref.WeakSet()
 _ATEXIT_REGISTERED = False
 

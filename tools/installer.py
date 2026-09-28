@@ -1,22 +1,4 @@
-"""
-插件安装工具：让 Agent 自主安装「技能包（Skills）」与「MCP 插件」。
-
-- 技能包：复用 agent.skills.SkillPackManager——目标目录白名单（project/user
-  技能目录）、MANIFEST.sha256 完整性校验、默认拒绝未签名包，全部安全边界沿用。
-  来源是本地目录；网络获取交给 terminal 工具（git clone 等，走审批门），
-  本工具只负责「校验 + 落位」。安装后技能即出现在提示词的可用技能列表。
-- MCP 插件：把 {"name","command","args","env"} 写入用户级配置
-  （~/.my_agent/mcp_servers.json，重启自动恢复连接），并立即连接注册工具。
-  连接意味着本机会执行该 command——高风险操作，审批策略会介入（on-failure
-  策略下需要人工确认）。
-
-命令（execute_json）：
-  skill_install  {pack_path, target: user|project, allow_unsigned, overwrite}
-  skill_list     {}
-  mcp_add        {name, command, args, env, overwrite}
-  mcp_list       {}
-  mcp_remove     {name}
-"""
+"""插件安装工具：让 Agent 自主安装「技能包（Skills）」与「MCP 插件」。"""
 import json
 import os
 import shlex
@@ -26,12 +8,7 @@ from tools.base import BaseTool, ToolResult
 
 
 def _describe_installer_call(command: str, arguments: dict) -> str:
-    """把 installer 调用翻成「看得懂要跑什么」的一行，供审批提示展示。
-
-    `arguments` 在 `ApprovalPolicy._ask()` 里从不打印，所以审批文本必须自己带上
-    真正要执行的命令 —— 否则用户看到的只是抽象名字 `installer mcp_add`，按 y 就
-    fork 执行了一个他根本没看见的命令（2026-09-22 审计）。
-    """
+    """把 installer 调用翻成「看得懂要跑什么」的一行，供审批提示展示。"""
     if command == "mcp_add":
         name = str(arguments.get("name") or "")
         cmd = str(arguments.get("mcp_command") or "")
@@ -110,8 +87,7 @@ class InstallerTool(BaseTool):
     def build_approval_request(self, arguments):
         from tools.base import ApprovalRequest
         command = str(arguments.get("command", ""))
-        # mcp_add 意味着允许在本机执行一个新命令（连接时 spawn），高风险；
-        # skill_install 受 SkillPackManager 白名单+验签约束，medium；其余只读/删除配置，low。
+        # mcp_add 意味着允许在本机执行一个新命令（连接时 spawn），高风险；skill_install 受 SkillPackManager 白名单+验签约束，medium；其余只读/删除配置，low。
         if command == "mcp_add":
             risk, sandbox = "high", "workspace-write"
         elif command in ("skill_install",):
@@ -121,9 +97,7 @@ class InstallerTool(BaseTool):
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
-            # 审批提示必须带上**真正要执行的命令**：`arguments` 在 _ask() 里从不打印，
-            # 用户看到的只有抽象名字 `installer mcp_add`，按 y 就 fork 执行了一个他
-            # 根本没看见的命令（2026-09-22 审计）。
+            # 审批提示必须带上**真正要执行的命令**：`arguments` 在 _ask() 里从不打印，用户看到的只有抽象名字 `installer mcp_add`，按 y 就 fork 执行了一个他根本没看见的命令。
             command=_describe_installer_call(command, arguments),
             risk_level=risk,
             min_sandbox_mode=sandbox,
@@ -296,8 +270,7 @@ class InstallerTool(BaseTool):
         if isinstance(args, str):
             if not args.strip():
                 return []
-            # POSIX 模式会吃掉反斜杠：Windows 路径 `C:\Users\me` 变成
-            # `C:Usersme`，服务器直接起不来（2026-09-22 审计）。按平台选模式。
+            # POSIX 模式会吃掉反斜杠：Windows 路径 `C:\Users\me` 变成`C:Usersme`，服务器直接起不来。按平台选模式。
             return shlex.split(args, posix=(os.name != "nt"))
         return [str(args)]
 

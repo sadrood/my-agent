@@ -1,14 +1,5 @@
-"""
-Skills 技能包机制测试（技能包式能力扩展）。
-
-覆盖：frontmatter 解析/降级/损坏容错、关键词命中、多目录发现与去重排序、
-max_chars 截断、enabled=false 与目录不存在、路径安全（.. 跳过）、
-脚本发现与提示（v2 进阶：脚本登记 / 排序 / 隐藏与子目录跳过 / 渲染含
-绝对路径清单与计数）、agent.py 集成（system prompt 注入）、
-技能包安装/更新（SkillPackManager：signed 校验 / unsigned 放行 / 冲突与
-overwrite / 路径穿越与符号链接 / 非技能目录目标拒绝）。
-全部不依赖网络（FakeLLM，无需真调用）。
-"""
+"""Skills 技能包机制测试（技能包式能力扩展）。
+全部不依赖网络（FakeLLM，无需真调用）。"""
 import hashlib
 import os
 
@@ -127,15 +118,7 @@ class TestFrontmatter:
 # 2. 关键词命中
 # ----------------------------------------------------------------------
 class TestMatchPrecision:
-    """2 字母英文词不能靠"词内子串"把技能全捞进来。
-
-    实测故障（2026-09-22 审计）：`_text_hits` 分词之后仍用裸子串 `in` 匹配，而技能
-    description 里必然出现 to/in/is/or/it/on/as —— 本仓库 20 个技能里，
-    "用 terminal 跑一下 pytest，修掉 memory.py 的召回 bug" 竟命中 18 个（"in" 落在
-    terminal、"to" 落在 tool）。命中技能的**全文**随即被注入系统提示，挤掉真正相关的
-    内容。修法是 1~2 字母词只认词边界，3 字母以上保留词内包含（`githelper` 仍能命中
-    `git-helper`）。
-    """
+    """2 字母英文词不能靠"词内子串"把技能全捞进来。"""
 
     def test_two_letter_words_need_word_boundary(self, tmp_path):
         proj = tmp_path / "skills"
@@ -167,13 +150,7 @@ class TestMatchPrecision:
 
 
 class TestRenderBudget:
-    """命中技能的正文必须真的进得了提示词。
-
-    实测故障（2026-09-22 审计）：索引行用**完整 description** 且排在正文之前，
-    总长超 `max_chars` 时只做一次统一尾部截断 —— 索引自己就可能超预算
-    （本仓库索引 9849 字 > SKILLS_MAX_CHARS=6000），于是被命中的技能正文
-    100% 被截掉，命中等于没命中。
-    """
+    """命中技能的正文必须真的进得了提示词。"""
 
     def test_matched_body_survives_tight_budget(self, tmp_path):
         proj = tmp_path / "skills"
@@ -629,10 +606,7 @@ class TestAgentIntegration:
 # 4. 技能包安装 / 更新（SkillPackManager，带完整性校验）
 # ----------------------------------------------------------------------
 def make_skill_pack(base_dir, skills, files=None):
-    """构造技能包：base_dir/pack/<skill>/SKILL.md，返回 pack 目录。
-
-    files: {相对路径: 内容} 追加到包内（可放技能目录内或根目录）。
-    """
+    """构造技能包：base_dir/pack/<skill>/SKILL.md，返回 pack 目录。"""
     pack = base_dir / "pack"
     for sname in skills:
         d = pack / sname

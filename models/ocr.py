@@ -1,20 +1,6 @@
 """本地 OCR：从截图/图片里取文字，**不经过视觉大模型**。
-
-为什么需要它（用户原话）："agent 还缺少截图识别文字的能力，总是依赖视觉模型，
-有的时候视觉模型无响应，就废了。"
-—— 视觉模型（多模态 LLM）能理解版面与语义，但它有超时、有配额、有"这个模型不支持
-图片输入"的坑；而这些时候**文字本身是能拿到的**：系统里就有 OCR 引擎。
-
-后端优先级（自动探测，谁可用用谁）：
-  1. `windows`  —— Windows.Media.Ocr（Win10/11 自带，支持中文，零安装；经 PowerShell
-     WinRT 桥调用，实测在本机可用：zh-Hans-CN）
-  2. `rapidocr` —— rapidocr-onnxruntime（跨平台，pip 安装后自动启用）
-  3. `tesseract`—— pytesseract + tesseract 可执行文件（装了才用）
 全都不可用时给出明确的安装提示，而不是静默失败。
-
-输出做了**中文空格归一**：Windows OCR 会把"系统提示"识别成"系 统 提 示"
-（每个汉字之间插空格），照原样回给模型会很难读，也影响后续检索/比对。
-"""
+输出做了**中文空格归一**（把"系 统 提 示"还原成"系统提示"）。"""
 import atexit
 import base64
 import os
@@ -28,10 +14,7 @@ from typing import List, Optional
 
 from config import OCR_CONFIG, resolve_under_root
 
-#: Windows OCR 的 PowerShell 桥。写成脚本文件（utf-8-sig）而不是 -Command，
-#: 避免引号/换行在命令行里被再解析一遍。
-#: 结果用 WriteAllText 落 UTF-8 文件再由 Python 读——不经过控制台代码页，
-#: 中文不会在管道里变成乱码。
+# : Windows OCR 的 PowerShell 桥。写成脚本文件（utf-8-sig）而不是 -Command，: 避免引号/换行在命令行里被再解析一遍。
 _PS_BRIDGE = r'''
 param([string]$Image, [string]$Out, [string]$Lang)
 $ErrorActionPreference = 'Stop'
@@ -95,25 +78,18 @@ _CJK_PUNCT = "，。：；！？、）》」』】…—“”‘’％．"
 _SPACE_BETWEEN_CJK = re.compile(rf"(?<=[{_CJK}])[ \t]+(?=[{_CJK}])")
 _SPACE_CJK_PUNCT = re.compile(rf"(?<=[{_CJK}])[ \t]+(?=[{re.escape(_CJK_PUNCT)}])")
 _SPACE_PUNCT_CJK = re.compile(rf"(?<=[{re.escape(_CJK_PUNCT)}])[ \t]+(?=[{_CJK}])")
-#: 数字/字母 与 中文标点 之间也去掉空格（"87 ％" → "87％"）；
-#: 半角标点不受影响，所以 "Error: connection refused" 里的空格照旧保留。
+# : 数字/字母与中文标点之间也去掉空格（"87 ％" → "87％"）；: 半角标点不受影响，所以 "Error: connection refused" 里的空格照旧保留。
 _SPACE_ASCII_PUNCT = re.compile(rf"(?<=[0-9A-Za-z%])[ \t]+(?=[{re.escape(_CJK_PUNCT)}])")
 _SPACE_PUNCT_ASCII = re.compile(rf"(?<=[{re.escape(_CJK_PUNCT)}])[ \t]+(?=[0-9A-Za-z])")
-#: 数字里的小数点：Windows OCR 会读成全角「．」或间隔号「·」并加空格
-#: （"98 ． 7％"），对齐成半角小数点更好用，也便于后续比对/检索。
+# : 数字里的小数点：Windows OCR 会读成全角「．」或间隔号「·」并加空格: （"98 ． 7％"），对齐成半角小数点更好用，也便于后续比对/检索。
 _NUM_DOT = re.compile(r"(?<=\d)[ \t]*[．·。][ \t]*(?=\d)")
 _NUM_PERCENT = re.compile(r"(?<=\d)[ \t]*％")
 
 
 def normalize_ocr_text(raw: str) -> str:
     """归一化 OCR 输出：数字写法 + 中文空格。
-
-    只动 CJK 相邻的空格与"数字里的小数点/百分号"——英文单词之间的空格必须保留
     （"connection refused" 不能被粘成一坨）。
-
-    注意顺序：**先**把「．％」对齐成半角，**再**去空格——否则 "98.7％ ，"
-    里的百分号已经变成 `%`，空格规则的前导字符类就匹配不到它了。
-    """
+    注意顺序：**先**把「．％」对齐成半角，**再**去空格——否则 "98.7％ ， """
     text = raw or ""
     text = _NUM_DOT.sub(".", text)
     text = _NUM_PERCENT.sub("%", text)
@@ -158,13 +134,8 @@ _PS_SCRIPT_LOCK = threading.Lock()
 
 def _ps_script_path() -> str:
     """返回桥脚本路径：整个进程只写一份，退出时清理。
-
-    旧实现把它缓存在**实例**属性 `self._ps_script` 上，而 `OcrEngine()` 每次调用都
-    新建实例（`models/ocr.py::recognize_image`、`tools/ocr.py` 的四处都是新实例）
-    —— 于是每调一次 OCR 就在 %TEMP% 留一个 .ps1，永不删除（2026-09-22 审计实测：
     本机已累积 51 个，视觉模型超时降级到 OCR 时涨得更快）。
-    同函数的 `out_file` 与 `recognize_base64` 的 PNG 都有 finally 清理，只有它漏了。
-    """
+    同函数的 `out_file` 与 `recognize_base64` 的 PNG 都有 finally 清理，只有它漏了。"""
     global _PS_SCRIPT_PATH
     with _PS_SCRIPT_LOCK:
         if _PS_SCRIPT_PATH and os.path.exists(_PS_SCRIPT_PATH):
@@ -199,8 +170,7 @@ class OcrEngine:
         self.backend = (backend or cfg.get("backend") or "").strip().lower()
         self.languages = languages or cfg.get("languages") or "zh-Hans-CN,en-US"
         self.timeout = float(timeout if timeout is not None else cfg.get("timeout", 60))
-        # 放大倍数：实测（20px 图 83%→93%、34px 图 87%→89%）2 倍明显更准，
-        # 3 倍对小字不再提升、还会把英文单词切碎（"refu sed"），所以默认 2。
+        # 放大倍数：（20px 图 83%→93%、34px 图 87%→89%）2 倍明显更准，3 倍对小字不再提升、还会把英文单词切碎（"refu sed"），所以默认 2。
         try:
             self.scale = max(1, int(cfg.get("scale", 2) or 1))
         except (TypeError, ValueError):
@@ -296,10 +266,7 @@ class OcrEngine:
 
     def _maybe_upscale(self, path: str, warnings: List[str]):
         """按配置放大图片再识别（返回 (实际路径, 临时文件路径或空)）。
-
-        实测小字号截图放大 2 倍后准确率明显上升；放大的失败一律忽略——
-        识别本身不该因为"想更准一点"而失败。
-        """
+        识别本身不该因为"想更准一点"而失败。"""
         if self.scale <= 1:
             return path, ""
         try:
@@ -317,9 +284,7 @@ class OcrEngine:
 
     def recognize_base64(self, b64: str) -> OcrResult:
         """识别 base64 图片（视觉链路里拿到的就是 base64）。
-
-        落一个临时文件给后端用，识别完立即删除（项目规则：不留临时文件）。
-        """
+        落一个临时文件给后端用，识别完立即删除（项目规则：不留临时文件）。"""
         data = (b64 or "").strip()
         if not data:
             raise OcrError("空图片数据")
@@ -399,19 +364,14 @@ class OcrEngine:
         import pytesseract
         from PIL import Image
 
-        # tesseract 的语言包名不是 BCP-47：默认配置 `zh-Hans-CN,en-US` 直接
-        # `split("-")[0]` 会得到 `zh,en`，而 tesseract 要的是 `chi_sim` / `eng`
-        # —— 这个后端按默认配置**必然失败**，报错还把人引向"去装语言包"
-        # （用户其实已经装了）。旧的兜底 `langs or "chi_sim+eng"` 因为 langs 非空
-        # 永远不生效；分隔符也错了，pytesseract 要 `+` 不是 `,`（2026-09-22 审计）。
+        # tesseract 的语言包名不是 BCP-47：默认配置 `zh-Hans-CN,en-US` 直接 `split("-")[0]` 会得到 `zh,en`
         langs = []
         for raw in self.languages.split(","):
             token = raw.strip().lower()
             if not token:
                 continue
             parts = token.split("-")
-            # 逐级回退：整串 → 前两段（zh-hant）→ 首段（zh）。
-            # 只取首段会把 zh-Hant-TW 错映射成简体 chi_sim。
+            # 逐级回退：整串 → 前两段（zh-hant）→ 首段（zh）。只取首段会把 zh-Hant-TW 错映射成简体 chi_sim。
             mapped = (_TESSERACT_LANGS.get(token)
                       or _TESSERACT_LANGS.get("-".join(parts[:2]))
                       or _TESSERACT_LANGS.get(parts[0]))

@@ -75,8 +75,7 @@ def fake_win32(monkeypatch):
 
 
 def test_uses_input_handle_not_output_handle(fake_win32):
-    # 回归：QuickEdit 是输入模式标志，必须设置在 STD_INPUT_HANDLE(-10) 上。
-    # 旧实现误用 STD_OUTPUT_HANDLE(-11)，导致 QuickEdit 从未真正关闭。
+    # 回归：QuickEdit 是输入模式标志，必须设置在 STD_INPUT_HANDLE(-10) 上。旧实现误用 STD_OUTPUT_HANDLE(-11)，导致 QuickEdit 从未真正关闭。
     assert console_guard.disable_quickedit_if_enabled() is True
     handles = [c[1] for c in fake_win32.calls if c[0] == "GetStdHandle"]
     assert handles == [console_guard.STD_INPUT_HANDLE]

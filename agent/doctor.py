@@ -1,17 +1,4 @@
-"""
-环境自检模块（参考同类开源实现的环境自检）。
-
-把"踩过的坑"固化为自动化检查，一次定位所有环境问题：
-- Python / 依赖完整性（websockets、playwright、fastapi/uvicorn 等）
-- Playwright 浏览器二进制
-- git 与快照安全网
-- .env 与 API key
-- 主模型连通性（真实调用一次）
-- 工具注册 / WebSocket 路由 / 当前安全策略
-
-用法: my-agent --doctor
-所有检查函数返回 {"name", "ok", "message", "hint"}，可单测。
-"""
+"""环境自检模块（参考同类开源实现的环境自检）。"""
 import os
 import sys
 import time
@@ -141,16 +128,7 @@ def _check_env() -> dict:
 
 
 def _check_env_sync(env_path: str = None, example_path: str = None) -> dict:
-    """对比 .env 与 .env.example，报告 .env 里缺失的可调项。
-
-    为什么需要：`.env` 含密钥不入库，从模板复制后就与仓库脱钩——项目后续
-    新增的配置项不会自动出现在用户的 .env 里（典型困惑："这个配置我在
-    .env 里怎么找不到"）。缺失项本身不影响运行（代码有默认值），但用户
-    不知道它们可调。
-
-    返回 ok=True（缺项只是提示，不是错误），message 里给出数量与示例。
-    env_path / example_path 可注入（便于测试）。
-    """
+    """对比 .env 与 .env.example，报告 .env 里缺失的可调项。"""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env_path = env_path or os.path.join(root, ".env")
     example_path = example_path or os.path.join(root, ".env.example")
@@ -286,11 +264,7 @@ def _fetch_model_ids(base_url: str, api_key: str, timeout: float = 8.0) -> List[
 
 def _check_subsystem_models(fetch=None, timeout: float = 8.0) -> dict:
     """对账：各子系统的「模型名 × 端点」是否对得上（逐端点问 /models）。
-
-    子系统的端点常默认跟随主 LLM，而模型名是厂商专有的：主模型一换网关，那些名字
-    在新端点上就不存在（503，杂活无声退回规则实现），或 key 与端点不匹配（401）。
-    端点没有 /models 时只标"未能核对"，401/403 与模型缺失都算失败。
-    """
+    端点没有 /models 时只标"未能核对"，401/403 与模型缺失都算失败。"""
     fetch = fetch or _fetch_model_ids
 
     # 预设名写错会静默回落共享端点（可能拿 A 家 key 打 B 家端点），联网前就报出来
@@ -422,10 +396,7 @@ def _check_hooks() -> dict:
 
 def _check_exec_policy() -> dict:
     """execpolicy 策略文件健康：enabled 时必须是合法的 JSON 规则数组。
-
-    运行时 ExecPolicy.load 是 fail-open（坏文件静默置空规则），doctor 在这里
-    用严格校验把坑提前亮出来——用户显式启用的策略文件坏了必须被看见。
-    """
+    用严格校验把坑提前亮出来——用户显式启用的策略文件坏了必须被看见。"""
     try:
         if not APPROVAL_CONFIG.get("exec_policy_enabled"):
             return {"name": "execpolicy 策略", "ok": True, "message": "未启用", "hint": ""}

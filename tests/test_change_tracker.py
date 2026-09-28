@@ -116,8 +116,7 @@ def test_api_diff_endpoints(tmp_path, monkeypatch):
         paths = [c["path"].replace("\\", "/") for c in rc.json()["changes"]]
         assert any(p.endswith("tests/_diff_target_tmp.txt") for p in paths)
 
-        # 无 tracker 记录且无 git 改动（未跟踪新文件）→ 明确报错。
-        # 注意：tracked 且有改动的文件现在会走 git diff 回退（python/terminal 改的文件也能看 diff）
+        # 无 tracker 记录且无 git 改动（未跟踪新文件）→ 明确报错。注意：tracked 且有改动的文件现在会走 git diff 回退（python/terminal 改的文件也能看 diff）
         untracked = os.path.join(srv.WORKSPACE_ROOT, "tests", "_diff_untracked_tmp.txt")
         with open(untracked, "w", encoding="utf-8") as f:
             f.write("nope\n")

@@ -83,7 +83,7 @@
    main.py 等）常有另一个会话在实时编辑——只动自己任务授权的文件，
    全量测试出现 tests/test_dashboard.py 等失败先判断是否并行工作所致，
    不要去修。
-2. **裸跑 `pytest`（不带 tests 路径）**会收集到 xianyu_smart_reply 子项目，
+2. **裸跑 `pytest`（不带 tests 路径）**会收集到本地未入库的 xianyu_smart_reply 子项目，
    可能遇到其收集错误/慢测试——统一用 `pytest tests -q`。
 3. **沙箱内 stderr 中文乱码**：容器内 cmd 输出为 GBK，按 utf-8 replace 解码
    会出现乱码（与主终端行为一致的历史问题），不影响退出码判断。

@@ -1,17 +1,4 @@
-"""
-Rollout 事件追踪模块（借鉴同类实现的 rollout-trace 设计）。
-
-同类实现的 rollout 是完整的事件流：每次模型调用、工具调用、工具结果、
-审批决策等都被记录，用于：
-1. 调试回放 —— 一个 JSONL 文件还原整个执行过程
-2. 对话压缩（compaction）—— 上下文超过阈值时，把旧事件总结成摘要，
-   保留最近的消息，避免上下文爆炸
-
-本项目实现：
-- Rollout: 事件流 + JSONL 落盘（ROLLOUT_CONFIG["dir"]）
-- compact_messages(): 当消息列表估计 token 数超过阈值时，
-  调用 LLM 把较早的消息压缩为一条摘要（保留最近 N 条完整消息）
-"""
+"""Rollout 事件追踪模块（借鉴同类实现的 rollout-trace 设计）。"""
 import json
 import os
 import time
@@ -46,14 +33,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def clip_text(text: Any, limit: int = None) -> str:
-    """截断要落盘的**模型输出**（最终回答、每轮文本）。
-
-    追踪文件是事后诊断的唯一依据，**截得太狠等于没有记录**。实测踩坑（2026-09-18）：
-    agent 的最终自审报告被截到 300 字、断在半句，想复盘"它到底提了哪些问题"只能去
-    memory/sessions/*.json 里翻——而 prompt 里明确让人"看运行日志"。
-    上限由 ROLLOUT_TEXT_LIMIT 控制（0 = 不截断）；截断时附原文长度，避免把
-    "被截断"误读成"就这么多"。
-    """
+    """截断要落盘的**模型输出**（最终回答、每轮文本）。"""
     s = "" if text is None else str(text)
     n = int(limit if limit is not None else ROLLOUT_CONFIG.get("text_limit", 4000))
     if n <= 0 or len(s) <= n:
@@ -84,13 +64,7 @@ class RolloutEvent:
 
 
 class Rollout:
-    """
-    事件追踪器。用法:
-
-        rollout = Rollout("task-id")
-        rollout.emit("tool_call", {"tool": "terminal", "args": {...}})
-        rollout.emit("tool_result", {"success": True, "output": "..."})
-    """
+    """事件追踪器。用法:"""
 
     def __init__(
         self,
@@ -99,13 +73,7 @@ class Rollout:
         config: dict = None,
         summarizer: Optional[Callable[[str], str]] = None,
     ):
-        """
-        Args:
-            run_id: 本次运行的标识（默认自动生成）
-            enabled: 是否启用（默认取 ROLLOUT_CONFIG）
-            config: 配置覆盖
-            summarizer: 压缩摘要回调（通常传 LLM.chat 的封装），为 None 时不做压缩
-        """
+        """Args:"""
         self.config = config or ROLLOUT_CONFIG
         self.enabled = enabled if enabled is not None else self.config.get("enabled", True)
         self.run_id = run_id or f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 100000}"
@@ -192,20 +160,8 @@ class Rollout:
         max_tokens: int = None,
         keep_recent: int = None,
     ) -> List[dict]:
-        """
-        当消息列表超过 token 阈值时，压缩较早的消息。
-
-        Args:
-            messages: 当前消息列表（会被复制，不会原地修改）
-            goal: 当前目标（写入摘要）
-            max_tokens: 触发阈值（默认取配置 compact_tokens）
-            keep_recent: 保留最近 N 条完整消息（默认取配置）
-
-        Returns:
-            压缩后的消息列表；未触发压缩时返回原列表（副本）。
-        """
-        # 阈值单一来源：调用方（executor）传入窗口比例制阈值；
-        # 未传时仅当配置显式给出 compact_tokens > 0 才触发——不再有 24K 死默认
+        """当消息列表超过 token 阈值时，压缩较早的消息。"""
+        # 阈值单一来源：调用方（executor）传入窗口比例制阈值；未传时仅当配置显式给出 compact_tokens > 0 才触发——不再有 24K 死默认
         threshold = max_tokens or 0
         if threshold <= 0:
             threshold = int(self.config.get("compact_tokens") or 0)
@@ -220,10 +176,7 @@ class Rollout:
         if len(messages) <= keep + 4:
             return list(messages)
 
-        # 开头的 system 消息（执行器系统提示：一次只调一个工具、参数必须来自 schema、
-        # 收尾用自然语言…）必须**原样保留**，不能被压进摘要。旧实现把它们一起算进
-        # old_part，压缩后第 0 条变成「## 之前的执行摘要」—— 之后所有 LLM 调用都不再
-        # 带执行器规则（2026-09-22 审计）。
+        # 开头的 system 消息（执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）必须**原样保留**，不能被压进摘要。
         head_msgs = []
         for _m in messages:
             if _m.get('role') == 'system':
@@ -263,10 +216,7 @@ class Rollout:
             {"role": "system",
              "content": "## 之前的执行摘要" + chr(10) + summary.strip()[:3000]},
         ]
-        # 截断点必须在完整工具闭环之后：从尾部向前扫描，确保保留部分里
-        # 不存在"孤立的 tool 消息"（其 tool_calls 被截断线切走）。
-        # 若保留区开头是 tool 消息，则把截断线前移，连同它的 assistant
-        # tool_calls 一起保留（或整组裁掉），保证协议对仗。
+        # 截断点必须在完整工具闭环之后：从尾部向前扫描，确保保留部分里不存在"孤立的 tool 消息"（其 tool_calls 被截断线切走）。
         keep_msgs = list(messages[-keep:])
         while keep_msgs and keep_msgs[0].get("role") == "tool":
             # 保留区以 tool 消息开头 → 向前补它的 assistant(tool_calls)

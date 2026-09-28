@@ -155,21 +155,14 @@ def test_recall_experiences():
 
 def test_recall_keeps_same_category_when_others_dominate(monkeypatch):
     """回归：候选池不能把同类别经验整段切掉。
-
-    原实现是 `(same_category + other)[-30:]`——先拼接再取末尾 30 条，而同类别
-    条目排在拼接串开头，于是被整段丢弃。用户实际库里 3 条 coding + 97 条其它，
-    复现结果是候选池里 coding 剩 0 条：名为"相关经验"、实际全是不相干的类别，
-    与 docstring 的"同类别经验优先"和 _score 的同类加权都相反。
-    """
+    与 docstring 的"同类别经验优先"和 _score 的同类加权都相反。"""
     m, tmp = _make_memory()
 
     def fake_classify(goal):
         return "target" if str(goal).startswith("目标") else "other"
 
     monkeypatch.setattr(m, "_classify_task", fake_classify)
-    # 注意：save_experience 有质量门槛——"无工具、无错误、且成功"视为纯问答不入库，
-    # 所以这里必须带上 tool_usage，否则一条都存不进去（本测试第一版就踩了这个）。
-    # 目标类别写在最前（旧实现下正好是被切掉的位置），随后灌入大量其它类别
+    # 注意：save_experience 有质量门槛——"无工具、无错误、且成功"视为纯问答不入库，所以这里必须带上 tool_usage，否则一条都存不进去（本测试第一版就踩了这个）。
     for i in range(3):
         m.save_experience(goal=f"目标{i}", plan_steps=["s1"], success=True,
                           summary=f"目标经验{i}", tool_usage={"terminal": 1})
@@ -186,12 +179,7 @@ def test_recall_keeps_same_category_when_others_dominate(monkeypatch):
 
 
 def test_experience_store_keeps_more_than_old_100_cap():
-    """回归：经验库不再被硬编码的 100 条滑动窗口截断。
-
-    早先 save_experience 里写死 `self.experiences[-100:]`，库永远是最近 100 条、
-    老经验被静默顶掉（用户看到的现象：状态行长期停在"100 条总经验"）。
-    现在容量由 LEARN_MAX_STORE 决定，默认 2000。
-    """
+    """回归：经验库不再被硬编码的 100 条滑动窗口截断。"""
     m, tmp = _make_memory()
     for i in range(150):
         m.save_experience(goal=f"任务{i}", plan_steps=["s1"], success=True,
@@ -225,7 +213,7 @@ def test_experience_store_zero_means_unlimited():
 
 
 def test_recall_count_comes_from_config(monkeypatch):
-    """注入条数由 LEARN_MAX_RECALL 决定（原先写死在调用点 n=3）。"""
+    """注入条数由 LEARN_MAX_RECALL 决定（之前写死在调用点 n=3）。"""
     m, tmp = _make_memory()
     monkeypatch.setattr(m, "_classify_task", lambda goal: "same")
     for i in range(6):
@@ -330,11 +318,7 @@ def test_recall_without_llm_uses_lightweight_rank():
 
 
 def test_recall_ranks_related_experience_first():
-    """轻量相似度排序：与目标关键词重叠多的经验应排最前；完全不相干的被门槛滤掉。
-
-    （"部署服务到服务器"那条以前会排在第 2 位一起注入——现在它与目标零重叠，
-    被相关性下限挡在门外，所以这里改成断言"它不在结果里"。）
-    """
+    """轻量相似度排序：与目标关键词重叠多的经验应排最前；完全不相干的被门槛滤掉。"""
     m, tmp = _make_memory()
     m.save_experience(goal="整理数据生成 Excel 表格", plan_steps=["s1"], success=True,
                       summary="openpyxl 生成", tool_usage={"python": 1, "file": 2})
@@ -367,14 +351,7 @@ def test_extract_keywords():
 
 class TestKeywordExtraction:
     """关键词提取：确定性 + 对中文有效（这两个都是修出来的真 bug）。
-
-    旧实现 `list(set(english + chinese))[:10]`：
-      · 中文按连续汉字段整切（「然后任务断了的情况啊」），两个不同任务几乎不可能
-        共享整段 → 用真实库 100 条经验实测，关键词重叠 **全部为 0**，相关性这个
-        主排序键等于失效；
-      · set 顺序受哈希随机化影响（每进程随机）→ 同一个长目标两次运行丢的词不同，
-        召回结果不可复现。
-    """
+    召回结果不可复现。"""
 
     def test_output_is_deterministic_across_calls(self):
         text = ("帮我重构记忆模块：经验库容量要可配置、候选池要限流、中文分词要修、"
@@ -409,11 +386,7 @@ class TestKeywordExtraction:
         assert Memory._extract_keywords(None) == []
 
     def test_content_words_survive_edge_filter(self):
-        """内容词不能被边界虚词表误伤。
-
-        回归：`_EDGE_STOPCHARS` 里一旦把「已经」拆成单字放进去，`经` 就成了虚词，
-        于是「经验」被整词丢掉——而「经验」恰恰是这个项目最高频的内容词。
-        """
+        """内容词不能被边界虚词表误伤。"""
         for word in ("经验", "用户", "数据", "测试", "配置", "记忆", "召回"):
             ks = Memory._extract_keywords("关于%s的处理" % word)
             assert word in ks, "%s 被边界虚词表误伤了：%s" % (word, ks)
@@ -490,12 +463,7 @@ class TestTaskClassifier:
 
 
 class TestWriteSideQualityGate:
-    """写入侧策略：一句话问答不该被当成"经验"存下来（实测库里 59/159 是这类）。
-
-    策略在 `Memory.should_record_experience()`（**由调用方在记录前问一句**），
-    `save_experience()` 保持"存储层：给什么存什么"——上一版把门槛塞进存储层，
-    直接打断了 12 个只关心容量/排序的既有测试（分层错了）。
-    """
+    """写入侧策略：一句话问答不该被当成"经验"存下来（库里 59/159 是这类）。"""
 
     def test_short_chat_goal_is_not_recorded(self):
         m, tmp = _make_memory()
@@ -638,9 +606,7 @@ def test_clear_all():
     assert len(m.experiences) == 0
     assert len(m.failure_patterns) == 0
     assert len(m.strategies) == 0
-    # 文件也应被删除 —— 断言必须落在 **chat 子目录**上：文件本来就写在
-    # `db_path/<chat_id>/`（见 Memory.__init__ 与 _save_json），旧断言查的是父目录
-    # `tmp/`，那里从来没有过这些文件，所以恒真（空断言，2026-09-22 审计）。
+    # 文件也应被删除 —— 断言必须落在 **chat 子目录**上：文件本来就写在 `db_path/<chat_id>/`（见 Memory.__init__ 与 _save_json），旧断言查的是父目录 `tmp/`
     for fname in ["memory.json", "experiences.json", "failure_patterns.json", "strategies.json"]:
         assert not os.path.exists(os.path.join(m.chat_db_path, fname))
     # 重新构造 Memory：数据不该"复活"

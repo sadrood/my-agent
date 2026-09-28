@@ -1,22 +1,5 @@
 # -*- coding: utf-8 -*-
-"""知乎数据开放平台客户端（https://developer.zhihu.com/docs）。
-
-契约（2026-09-18 逐个接口核实）：
-    鉴权: Authorization: Bearer <access_secret>
-          X-Request-Timestamp: <秒级 Unix 时间戳>（与服务端相差不得超过 10 分钟）
-    信封: {"Code": 0, "Message": "success", "Data": {...}}
-          Code != 0 时 Data 通常为 null，原因在 Message 里（错误码表见 ERROR_HINTS）
-    特例: 直答 /v1/chat/completions 是 **兼容协议**格式（没有 Code/Message/Data
-          信封，错误是 {"error": {...}}），并且路径**不带 /api 前缀**。
-
-两类容易踩的坑，本模块都已处理：
-  1. 时钟偏差：X-Request-Timestamp 必须是"服务端认的现在"。本机时钟漂移超过
-     10 分钟会直接 20001。这里会从响应的 Date 头学习偏差并自动重试一次。
-  2. 参数名是 PascalCase（Query/Count/Limit/QuestionUrl/...），而工具侧用
-     snake_case；映射统一放在本模块，工具层不拼 URL。
-
-额度是按能力独立计的（每项每日限免），可用 quota() 实时查询。
-"""
+"""知乎数据开放平台客户端（https://developer.zhihu.com/docs）。"""
 import json
 import mimetypes
 import os
@@ -158,12 +141,7 @@ class ZhihuClient:
                 json_body: Any = None, files: Dict[str, Any] = None,
                 data: Dict[str, Any] = None, timeout: float = None,
                 envelope: bool = True, _retry_auth: bool = True) -> Any:
-        """发一次请求并解信封，返回 Data 部分。
-
-        Args:
-            envelope: False 表示该端点不是 Code/Message/Data 信封（如直答）。
-            _retry_auth: 内部用；鉴权失败时用学到的时钟偏差重试一次。
-        """
+        """发一次请求并解信封，返回 Data 部分。"""
         import httpx
 
         if not self.configured:
@@ -459,12 +437,7 @@ class ZhihuClient:
     def wait_task(self, kind: str, task_id: str,
                   timeout: float = None) -> Dict[str, Any]:
         """轮询到终态；超时抛 ZhihuError（附最后一次进度）。
-
-        `timeout` 不传时用实例的 `task_timeout`。调用方**必须**约束它落在
-        executor 的工具硬超时之内（见 tools/zhihu.py 的 `_wait_budget`）——
-        否则工具被上层判超时、整个 ToolResult（含 task_id）被丢掉，而任务在知乎侧
-        还在跑、额度已经消耗（2026-09-22 审计实测：默认 600s > 工具硬超时 300s）。
-        """
+        还在跑、额度已经消耗（默认 600s > 工具硬超时 300s）。"""
         budget = float(timeout if timeout is not None else self.task_timeout)
         deadline = time.time() + budget
         last = {}

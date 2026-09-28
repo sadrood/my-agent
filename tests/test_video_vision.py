@@ -1,8 +1,4 @@
-"""视频理解链路测试（离线）：抽帧 → 多图一次请求 → 临时帧清理。
-
-上游没有模型支持 video 输入，视频只能抽帧后一次请求交给视觉模型；这里把 ffmpeg
-与视觉模型都桩掉，只验证接线与清理。
-"""
+"""视频理解链路测试（离线）：抽帧 → 多图一次请求 → 临时帧清理。"""
 import os
 import sys
 
@@ -44,10 +40,7 @@ class _FakeVision:
 
 
 class _RealVideoVision(_FakeVision):
-    """用**真实**的 analyze_video 实现（只有 analyze 被记录/桩掉）。
-
-    _FakeVision 把 analyze_video 也桩了，直接拿它测 analyze_video 等于测假货。
-    """
+    """用**真实**的 analyze_video 实现（只有 analyze 被记录/桩掉）。"""
     analyze_video = VisionModel.analyze_video
     _cleanup_frames = staticmethod(VisionModel._cleanup_frames)
 

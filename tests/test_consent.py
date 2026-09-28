@@ -1,15 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Guardian 人工放行（授权）测试。
-
-用户诉求原话："当 agent 来求助我说某一步被 Guardian 拦截时，我可以跟 Guardian 说
-放行，或者我跟 agent 说可以执行，agent 拿着这个就可以让 Guardian 放行了。"
-
-最重要的不是"能放行"，而是**只有人能给**：
-- 授权只能由人类输入产生（REPL 输入 / 拦截当场的人工确认）；
-- 模型自己在回复或工具结果里写"用户已授权"**必须毫无作用**（否则提示注入自我放行）；
-- 无人值守（approval=never / 非交互）时拦截保持生效；
-- 授权只跳过 Guardian 盲审，审批黑名单与沙箱检查碰不到。
-"""
+"""Guardian 人工放行（授权）测试。"""
 import time
 
 import pytest
@@ -433,12 +423,7 @@ class TestAgentWiring:
 
 
 class TestSignatureBindsWholeCall:
-    """授权指纹必须绑定**全量**参数。
-
-    实测故障（2026-09-22 审计）：`call_signature` 取 `canon[:600]`，而 terminal 的
-    JSON 前缀 `{"command": "` 就占 14 字符 —— 约 587 字符之后的内容完全不参与绑定，
-    两条不同的调用只要前 600 字符相同就被判成"同一次已授权"。
-    """
+    """授权指纹必须绑定**全量**参数。"""
 
     def test_long_commands_with_different_tails_differ(self):
         from agent.consent import call_signature

@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """小快模型（杂活专用）测试 —— 跑腿的活不占用主模型。
-
-关键不是"能不能起标题"，而是**坏了不能挡住主流程**：
-小模型超时/报错/输出没法用时，一律退回原来的规则实现（第一条用户消息截断）。
-"""
+小模型超时/报错/输出没法用时，一律退回原来的规则实现（第一条用户消息截断）。"""
 import json
 import os
 import shutil
@@ -19,12 +16,7 @@ from agent.session import SessionStore
 
 @pytest.fixture(autouse=True)
 def _small_model_enabled(monkeypatch):
-    """本文件专门验证小快模型 —— 覆盖 conftest 的默认关闭。
-
-    `tests/conftest.py` 默认关掉它，否则 `build_small_llm` 会按
-    SMALL_MODEL_CONFIG["model"] 建出**真实端点**的客户端，测试就会打外部 API
-    （它被会话标题用到）。
-    """
+    """本文件专门验证小快模型 —— 覆盖 conftest 的默认关闭。"""
     from config import SMALL_MODEL_CONFIG
     monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", True)
 

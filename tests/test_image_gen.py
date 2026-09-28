@@ -1,8 +1,4 @@
-"""
-models/image_gen.py 与 tools/image_gen.py 的离线单元测试。
-
-httpx.post 被 monkeypatch 拦截，不发起真实网络请求。
-"""
+"""models/image_gen.py 与 tools/image_gen.py 的离线单元测试。"""
 import base64
 
 import pytest
@@ -87,11 +83,7 @@ class TestImageGenModel:
         assert fake_post["payload"]["watermark"] is True
 
     def test_url_response_auto_downloaded(self, tmp_path, monkeypatch):
-        """URL 形式应**自动下载落盘**，而不是只回一个链接。
-
-        旧行为是原样返回 URL，导致换到 url 型提供方后图片不在本地
-        （与 b64 型提供方体验不一致）。
-        """
+        """URL 形式应**自动下载落盘**，而不是只回一个链接。"""
         import models.image_gen as ig
         monkeypatch.setattr(ig.httpx, "post", lambda url, json=None, headers=None,
                             timeout=None: FakeResponse(
@@ -133,12 +125,7 @@ class TestImageGenModel:
         assert r["images"] == ["https://cdn.example.com/a.png"]
 
     def test_b64_still_returned_when_save_false(self, tmp_path, monkeypatch):
-        """b64 形式的提供方在 save=False 时也得把图**交出去**。
-
-        实测故障（2026-09-22 审计）：`elif save:` 之后没有 else，b64 分支在
-        save=False 时什么都不做，函数返回 `{"images": []}` 却报成功 —— 调用方
-        拿不到任何图片数据（URL 形式的提供方两种模式都返回 URL，行为不对称）。
-        """
+        """b64 形式的提供方在 save=False 时也得把图**交出去**。"""
         import base64
 
         import models.image_gen as ig
@@ -161,11 +148,7 @@ class TestImageGenModel:
 
 
 class TestOptionalFieldDowngrade:
-    """提供方专有字段不认时自动剔除重试（换提供方不用改代码）。
-
-    实例：默认供应商认 `watermark`，备用供应商报 400
-    "watermark 不是文生图队列支持的字段"。
-    """
+    """提供方专有字段不认时自动剔除重试（换提供方不用改代码）。"""
 
     def test_watermark_rejected_then_retried_without_it(self, tmp_path, monkeypatch):
         import models.image_gen as ig
@@ -193,10 +176,7 @@ class TestOptionalFieldDowngrade:
 
     def test_unrelated_400_still_raises(self, tmp_path, monkeypatch):
         """不是字段问题（如 401 鉴权）时不应**对同一端点**吞掉错误反复重试。
-
-        注意：这里显式关掉备用端点——跨提供方兜底是另一回事（见
-        tests/test_model_fallback.py：主端点 401 时会去试配了别的 key 的备用端点）。
-        """
+        tests/test_model_fallback.py：主端点 401 时会去试配了别的 key 的备用端点）。"""
         import models.image_gen as ig
 
         class Err:

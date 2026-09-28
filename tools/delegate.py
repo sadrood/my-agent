@@ -1,14 +1,4 @@
-"""
-delegate 工具：让内置 Agent 主动把子任务委托给外部 CLI 引擎执行。
-
-设计意图（用户原始构想）：不是让用户手动挑引擎，而是内置 Agent 自己当编排者——
-遇到适合外部专业 CLI 的子任务（大型重构/独立评审/脚本工程等）时，
-用本工具把"自包含的子任务"委托出去，拿回完整输出后验收、汇总、继续主线。
-
-- 子任务必须自包含：外部引擎看不到本会话上下文，goal 要写清背景/约束/交付物。
-- 委托出去的引擎按它们自己的权限设置运行（独立权限，不经本会话审批门）。
-- 嵌套上限：delegate 里再 delegate（引擎调 my-agent 再委托）最多 2 层，防失控循环。
-"""
+"""delegate 工具：让内置 Agent 主动把子任务委托给外部 CLI 引擎执行。"""
 import json
 import os
 from typing import Any, Dict
@@ -164,10 +154,7 @@ class DelegateTool(BaseTool):
                                 pass
                 elif kind == "answer":
                     text = str(data.get("output") or "")
-                    # 流式已经逐段收过了就别再整段收一次：`runtime.run_external` 会先
-                    # 发一串 stream_delta、结束再发一次**完整** answer，两者都 append
-                    # 会让输出**翻倍**（2026-09-22 审计实测：
-                    # output == 'hello-XYZ\nhello-XYZ'，长输出直接双倍 token）。
+                    # 流式已经逐段收过了就别再整段收一次：`runtime.run_external` 会先发一串 stream_delta、结束再发一次**完整** answer，两者都 append会让输出**翻倍**。
                     if text and not saw_delta:
                         lines.append(text)
                 elif kind == "run_end":

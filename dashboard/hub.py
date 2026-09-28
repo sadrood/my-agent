@@ -1,14 +1,4 @@
-"""
-Dashboard Web 服务器。
-提供 FastAPI + WebSocket 实时监控 Agent 执行过程。
-
-功能：
-- 实时步骤流（WebSocket 推送）
-- 截图回放
-- 对话历史查看
-- 团队协作状态面板
-- 工具调用日志
-"""
+"""Dashboard Web 服务器。"""
 import json
 import threading
 import time
@@ -33,16 +23,7 @@ class DashboardEvent:
 
 
 class DashboardHub:
-    """
-    Dashboard 事件中心。
-    Agent 通过此 Hub 发布事件，Dashboard 前端通过 WebSocket 订阅。
-
-    用法（在 Agent 中）:
-        hub = DashboardHub()
-        hub.emit("step_start", {"step": 1, "description": "..."})
-        hub.emit("tool_call", {"tool": "browser", "input": "goto ..."})
-        hub.emit("tool_result", {"success": True, "output": "..."})
-    """
+    """Dashboard 事件中心。"""
 
     def __init__(self, max_history: int = 500):
         self._subscribers: Dict[str, asyncio.Queue] = {}
@@ -96,10 +77,8 @@ class DashboardHub:
         # 推送给订阅者
         event_dict = event.to_dict()
         for cid, queue in list(self._subscribers.items()):
-            # asyncio.Queue **不是线程安全的**：worker 线程直接 put_nowait，只有在事件
-            # 循环恰好被别的东西唤醒时才会被处理（uvicorn 有 0.1s 定时器兜底才没炸，
-            # 换宿主/自建循环就不保证了）。call_soon_threadsafe 才会真正唤醒循环
-            # （2026-09-22 审计）。
+            # asyncio.Queue **不是线程安全的**：worker 线程直接 put_nowait，只有在事件循环恰好被别的东西唤醒时才会被处理（uvicorn 有 0.1s 定时器兜底才没炸，换宿主/自建循环就不保证了）。
+
             loop = self._subscribe_loops.get(cid)
             try:
                 if loop is not None and loop.is_running():
@@ -111,11 +90,7 @@ class DashboardHub:
 
     @staticmethod
     def _safe_put(queue: "asyncio.Queue", item: dict) -> None:
-        """投递一条事件；队列满就丢（背压策略：宁可丢事件也不阻塞）。
-
-        必须单独成函数：`call_soon_threadsafe` 的回调在**事件循环线程**里
-        执行，那里的 QueueFull 没法被调用方的 try 接住。
-        """
+        """投递一条事件；队列满就丢（背压策略：宁可丢事件也不阻塞）。"""
         try:
             queue.put_nowait(item)
         except asyncio.QueueFull:

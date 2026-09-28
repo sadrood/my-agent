@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""知乎数据开放平台对接的离线测试（httpx 打桩，不联网）。
-
-契约来自官方文档逐接口核实（2026-09-18）：
-- 鉴权: Authorization: Bearer <secret> + X-Request-Timestamp(秒级 Unix 时间戳)
-- 信封: {"Code":0,"Message":"success","Data":{...}}；Code!=0 时原因在 Message
-- 特例: 直答 /v1/chat/completions 是兼容协议格式（无信封，且路径不带 /api）
-- 参数名是 PascalCase，工具侧 snake_case，映射在 models/zhihu.py
-"""
+"""知乎数据开放平台对接的离线测试（httpx 打桩，不联网）。"""
 import json
 import sys
 import types
@@ -864,13 +857,7 @@ class TestTaskCommands:
 
 
 class TestTaskWaitBudget:
-    """知乎轮询上限必须落在 executor 的工具硬超时之内。
-
-    实测故障（2026-09-22 审计）：`ZHIHU_TASK_TIMEOUT` 默认 600s，而
-    `agent/executor.py` 对非 browser 工具一律 300s 硬超时 —— 工具侧还在轮询，
-    上层已经判超时并把整个 ToolResult 丢掉（含 task_id），任务却在知乎侧继续跑、
-    小工具额度已经消耗，模型只能再建一个。
-    """
+    """知乎轮询上限必须落在 executor 的工具硬超时之内。"""
 
     def test_budget_within_tool_timeout(self):
         from config import TOOL_CONFIG

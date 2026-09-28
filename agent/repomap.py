@@ -1,13 +1,4 @@
-"""
-Repo Map：任务开始时生成仓库结构摘要并注入上下文。
-
-作用：让模型直接定位文件，而不是反复 file list / 乱读试探（省轮次、省 token）。
-
-v1 实现（确定性、零外部依赖）：
-- 目录树（跳过 .venv/.git/__pycache__/运行时目录）
-- 每个文件的源码行数
-- 总量截断保护（max_chars）
-"""
+"""Repo Map：任务开始时生成仓库结构摘要并注入上下文。"""
 import os
 from typing import Optional
 
@@ -17,8 +8,7 @@ SKIP_DIRS = {
 }
 SKIP_FILES = {".env", ".gitignore"}
 
-# 代码相关任务关键词：命中才注入 repo map（避免琐碎任务白白烧 token）
-# 注意：不用"写/改/python/agent"这类宽泛词（会误命中"写一首诗""用python计算"）
+# 代码相关任务关键词：命中才注入 repo map（避免琐碎任务白白烧 token）注意：不用"写/改/python/agent"这类宽泛词（会误命中"写一首诗""用python计算"）
 CODE_KEYWORDS = [
     "代码", "项目", "文件", "修复", "升级", "测试", "优化", "bug",
     "函数", "模块", "自己", "仓库", "重构", "修改", "报错",
@@ -38,12 +28,7 @@ def build_repo_map(
     max_chars: int = 3000,
     max_depth: int = 3,
 ) -> str:
-    """
-    生成仓库结构摘要。
-
-    Returns:
-        "项目结构（Repo Map）" 风格文本；目录为空/无权限时返回空串。
-    """
+    """生成仓库结构摘要。"""
     project_dir = os.path.abspath(project_dir)
     if not os.path.isdir(project_dir):
         return ""

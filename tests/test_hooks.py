@@ -1,12 +1,4 @@
-"""
-Hooks 机制测试（最小可用实现，不依赖网络）。
-
-覆盖：
-1. 钩子文件正常加载并生效（HookManager 与 Executor 集成两层）
-2. 文件不存在时静默（不抛异常、不加载）
-3. 回调抛异常时 fail-open 不阻断主流程
-4. enabled=false 时不加载（即使文件存在）
-"""
+"""Hooks 机制测试（最小可用实现，不依赖网络）。"""
 import json
 import textwrap
 

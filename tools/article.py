@@ -1,17 +1,4 @@
-"""文章工坊工具（article）：多模型互审写文章。
-
-与 research / team 的区别：
-- research 是"查资料写报告"，只有一个模型；
-- team 是通用任务拆解，各角色共用同一个模型，审校意见不回炉；
-- article 是**以文章为中心**的流水线：初稿 → 另一个模型审阅 → 事实核查 →
-  作者逐条回应并改稿（有界循环）→ 另一个模型校对 → 定稿，全程留痕。
-
-用法（文本协议）：
-    article write <主题>                    直接写
-    article write <主题> | <写作要求>        带要求（受众/字数/风格）
-    article models                          查看各阶段用哪个模型
-    article help                            帮助
-"""
+"""文章工坊工具（article）：多模型互审写文章。"""
 import os
 from typing import Any, Dict, Optional
 

@@ -1,17 +1,4 @@
-"""
-AGENTS.md 分层指令模块（借鉴同类实现的 AGENTS.md 约定）。
-
-约定：
-- 项目根目录的 AGENTS.md 是项目规则，自动注入系统提示
-- 用户级 ~/.my_agent/AGENTS.md 是全局规则
-- 目录分层：从当前目录向上查找，最近的优先（本项目实现为向上合并）
-
-本项目实现（简化但同源）：
-- 用户级指令文件：~/.my_agent/AGENTS.md（全局偏好）
-- 项目级指令文件：工作目录及其父目录中的 AGENTS.md（向上查找至多 3 层）
-- 内容截断到 INSTRUCTIONS_CONFIG["max_chars"]，避免撑爆上下文
-- 按 mtime 缓存，文件变化后自动重新加载
-"""
+"""AGENTS.md 分层指令模块（借鉴同类实现的 AGENTS.md 约定）。"""
 import os
 from typing import List, Optional
 
@@ -30,15 +17,7 @@ class InstructionsLoader:
     # ================================================================
 
     def load(self, project_dir: Optional[str] = None) -> str:
-        """
-        加载全部指令文本（用户级 + 项目级）。
-
-        Args:
-            project_dir: 项目目录（默认当前工作目录）
-
-        Returns:
-            合并后的指令文本；无任何 AGENTS.md 时返回空字符串。
-        """
+        """加载全部指令文本（用户级 + 项目级）。"""
         if not self.config.get("enabled", True):
             return ""
 
@@ -85,13 +64,7 @@ class InstructionsLoader:
         return "\n\n".join(texts)
 
     def _read_cached(self, path: str) -> str:
-        """带 (mtime_ns, size) 缓存的文件读取。
-
-        缓存失效判定同时看纳秒级 mtime 与文件大小：
-        - 只用 float mtime 在 Windows 上不可靠（os.utime 可能 no-op、
-          高负载下时间戳粒度变粗），同时间槽内改写内容不会触发失效；
-        - size 变化能兜底绝大多数内容修改（测试/编辑几乎必然改变长度）。
-        """
+        """带 (mtime_ns, size) 缓存的文件读取。"""
         try:
             st = os.stat(path)
             mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))

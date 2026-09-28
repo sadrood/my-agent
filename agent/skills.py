@@ -1,36 +1,4 @@
-"""
-Skills 技能包机制（技能包式能力扩展，最小可用实现）。
-
-技能 = 一个包含 SKILL.md 的子目录。SKILL.md 头部可选 frontmatter：
-    ---
-    name: excel
-    description: 生成 Excel 报表
-    triggers: excel, 报表, 表格
-    ---
-    正文……
-
-frontmatter 使用极简自写解析器（禁止 yaml 依赖）：
-- 缺失 / 未闭合 / 解析失败时降级：name 用目录名、description 置空，正文从
-  第一个非 frontmatter 行开始；
-- frontmatter 内损坏行（无冒号）静默跳过，不影响其余字段解析。
-
-用法：
-    from agent.skills import SkillManager
-
-    mgr = SkillManager(project_dir="./skills",
-                       user_dir="~/.my_agent/skills",
-                       max_chars=6000)
-    skills = mgr.discover()                 # 按技能名排序的技能列表
-    hits = mgr.match("帮我生成 excel 报表")   # 关键词命中
-    text = mgr.render_for_prompt(goal)      # 注入系统提示的渲染文本
-
-安全（重要，v2 脚本发现）：脚本发现只做「告知」——扫描技能目录第一层普通
-文件并登记相对路径，渲染时列出绝对路径，**绝不自动放行 / 自动执行**。任何
-脚本执行仍走终端工具 → 审批门（execpolicy 白名单 / 黑名单）原样生效；用户
-希望特定脚本免询问执行，需在 execpolicy.json 显式添加规则。Skills 层绝不绕过
-审批。其余：仅读取目录文件，无任何写操作；技能名（目录名）含路径分隔符
-或 ".." 时跳过。
-"""
+"""Skills 技能包机制（技能包式能力扩展，最小可用实现）。"""
 
 import hashlib
 import os
@@ -47,11 +15,7 @@ _WORD_SPLIT_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
 
 @dataclass
 class Skill:
-    """一个已加载的技能。
-
-    scripts: 相对技能目录的脚本路径列表（仅第一层普通文件、按文件名排序；
-              SKILL.md 与隐藏文件不计入）。仅用于「告知」渲染，绝不自动放行执行。
-    """
+    """一个已加载的技能。"""
 
     name: str
     description: str = ""
@@ -76,14 +40,7 @@ class SkillManager:
     # 发现
     # ------------------------------------------------------------------
     def discover(self) -> List[Skill]:
-        """扫描项目级与用户级技能目录，返回按技能名排序的技能列表（稳定）。
-
-        - 每个含 SKILL.md 的子目录即一个技能；
-        - 目录不存在 / 不可读时静默跳过；
-        - 同名技能（跨目录）去重，项目级优先于用户级；
-        - 技能名含路径分隔符或 ".." 时跳过；
-        - 每个技能目录还会扫描第一层普通文件登记进 scripts（仅告知，不执行）。
-        """
+        """扫描项目级与用户级技能目录，返回按技能名排序的技能列表（稳定）。"""
         if self._skills is not None:
             return self._skills
         skills: Dict[str, Skill] = {}
@@ -143,19 +100,7 @@ class SkillManager:
 
     @staticmethod
     def _scan_scripts(skill_dir: str) -> List[str]:
-        """扫描技能目录第一层的普通文件，登记相对路径（按文件名排序）。
-
-        规则：
-        - 仅第一层，不递归子目录；
-        - 跳过隐藏文件（点开头）；
-        - SKILL.md 自身不登记；
-        - 目录不可读等异常静默降级为空列表。
-
-        安全边界（重要）：此处只做「告知」——扫描结果仅用于渲染提示（绝对路径
-        清单 / 计数），**绝不自动放行或执行**。任何脚本执行仍走终端工具 →
-        审批门（execpolicy 白名单 / 黑名单）原样生效；用户希望特定脚本免询问
-        执行，需在 execpolicy.json 显式添加规则。Skills 层绝不绕过审批。
-        """
+        """扫描技能目录第一层的普通文件，登记相对路径（按文件名排序）。"""
         scripts: List[str] = []
         try:
             names = sorted(os.listdir(skill_dir))
@@ -172,15 +117,7 @@ class SkillManager:
 
     @staticmethod
     def _parse_frontmatter(text: str):
-        """极简 frontmatter 解析（支持 YAML folded/literal 块与多行缩进续行）。
-
-        返回 (meta_dict, body_start)：
-        - 无 frontmatter（首行不是 '---'）：({}, 0)，正文从第 1 行开始；
-        - 有闭合 frontmatter：解析内部 key: value 行（损坏行跳过），
-          description/name 支持多行缩进续行与 '>'/'|' 块指示符；
-          正文从闭合行之后开始；
-        - 首行是 '---' 但未闭合：解析失败，降级为 ({}, 0)。
-        """
+        """极简 frontmatter 解析（支持 YAML folded/literal 块与多行缩进续行）。"""
         lines = text.split("\n")
         if not lines or lines[0].strip() != "---":
             return {}, 0
@@ -223,11 +160,7 @@ class SkillManager:
         return {}, 0
 
     def match(self, goal: str) -> List[Skill]:
-        """对 goal 做关键词命中判断（name / description / triggers）。
-
-        大小写不敏感：triggers 任一关键词包含命中，或 name / description
-        分词（整段也算一个词）包含命中。
-        """
+        """对 goal 做关键词命中判断（name / description / triggers）。"""
         if not goal:
             return []
         goal_lower = goal.lower()
@@ -263,12 +196,7 @@ class SkillManager:
                 if word in goal_lower:
                     return True
                 continue
-            # 1~2 字母的英文词（to/in/is/or/it/on/as…）只认**词边界**。技能描述里
-            # 必然出现这些词，而旧实现是裸子串 `in` 匹配 ——"用 terminal 跑一下
-            # pytest，修掉 memory.py 的召回 bug"里 "in" 落在 terminal、"to" 落在
-            # tool，于是本仓库 20 个技能命中 18 个，命中技能的**全文**随即被注入
-            # 系统提示（2026-09-22 审计实测）。3 字母以上保留词内包含，这样
-            # `githelper` 仍能命中 `git-helper`（词表里它是 git/helper 两段）。
+            # 1~2 字母的英文词（to/in/is/or/it/on/as…）只认**词边界**。
             if len(word) >= 3:
                 if word in goal_lower:
                     return True
@@ -280,16 +208,7 @@ class SkillManager:
     # 渲染
     # ------------------------------------------------------------------
     def render_for_prompt(self, goal: str) -> str:
-        """渲染注入文本：全部技能一句话索引 + 命中技能的完整正文。
-
-        - 无技能（目录不存在 / 目录内无技能）时返回空串；
-        - 技能索引行对含脚本的技能标注「（含 N 个脚本）」计数提示；
-        - 命中技能正文之后追加「附带脚本」清单（每行一条绝对路径，仅告知），
-          无脚本的技能不加这段；
-        - 总长超过 max_chars 时截断并注明（skill 截断）。
-
-        安全：脚本清单只做「告知」，不自动放行执行（见模块 docstring）。
-        """
+        """渲染注入文本：全部技能一句话索引 + 命中技能的完整正文。"""
         skills = self.discover()
         if not skills:
             return ""
@@ -307,11 +226,7 @@ class SkillManager:
                 line += f"（含 {len(s.scripts)} 个脚本）"
             index_lines.append(line)
         index_text = "技能索引：\n" + "\n".join(index_lines)
-        # 命中正文优先：先把正文的预算留出来，索引按剩余空间截断。旧实现是
-        # "索引 + 正文拼完再统一尾部截断"，而索引用的是**完整 description**，
-        # 它自己就可能超过 SKILLS_MAX_CHARS（本仓库实测索引 9849 字 > 6000），
-        # 于是被命中的技能正文 100% 被截掉，只剩一截索引 + "已截断"提示 ——
-        # 命中等于没命中（2026-09-22 审计实测）。
+        # 命中正文优先：先把正文的预算留出来，索引按剩余空间截断。旧实现是"索引 + 正文拼完再统一尾部截断"，而索引用的是**完整 description**。
         if matched and self.max_chars:
             body_budget = sum(len(s.body or "") for s in matched)
             head_room = max(200, self.max_chars - body_budget - 64)
@@ -344,14 +259,7 @@ class SkillManager:
 # ======================================================================
 @dataclass
 class PackVerifyResult:
-    """verify_pack 的结果。
-
-    - ok:      校验是否通过（signed 包全部文件 hash 匹配、无多余/缺失条目）
-    - unsigned: 无 MANIFEST.sha256 的未签名包（verify 本身不判失败，
-                是否放行由 install_pack 的 allow_unsigned 决定）
-    - reasons: 具体失败原因列表（通过时为空）
-    - skills:  包内技能名列表（含 SKILL.md 的子目录名，排序）
-    """
+    """verify_pack 的结果。"""
 
     ok: bool
     unsigned: bool = False
@@ -370,15 +278,7 @@ class PackSkillResult:
 
 @dataclass
 class PackInstallResult:
-    """install_pack 的整体结果（区分成功 / 部分失败 / 整体失败）。
-
-    - ok:      是否整体成功（全部技能安装完成）
-    - status:  success（全成功）/ partial（部分失败）/ failed（整体失败）
-    - results: 每个技能的结果明细
-    - conflict: 因同名冲突被拒绝的技能名列表
-    - reasons:  整体失败原因（目标目录不允许 / 未签名被拒 / 校验失败等）
-    - unsigned: 该包是否未签名
-    """
+    """install_pack 的整体结果（区分成功 / 部分失败 / 整体失败）。"""
 
     ok: bool
     status: str
@@ -390,28 +290,8 @@ class PackInstallResult:
 
 class SkillPackManager:
     """技能包安装 / 更新管理（独立于 SkillManager，纯逻辑，无全局状态）。
-
-    一个「技能包」= source_dir 目录，其中每个含 SKILL.md 的子目录是一个技能。
-
-    完整性校验（verify_pack）：
-    - 若存在 MANIFEST.sha256（行格式 '<sha256>  <相对路径>'，两空格分隔），
-      逐文件校验 SHA-256；manifest 未覆盖的文件、清单里多余但磁盘缺失的
-      文件、hash 不匹配，任一情况都校验失败并返回具体原因列表；
-    - 无 manifest 的包视为未签名（unsigned），verify 结果标注 unsigned，
-      安装时由 allow_unsigned 参数决定是否放行（默认 False 拒绝）。
-
-    安全边界：
-    - target_dir 必须是 SKILLS_CONFIG 配置的技能目录之一（project / user），
-      否则拒绝，防止任意路径写入；
-    - 复制时跳过符号链接，拒绝相对路径中包含 '..' 或绝对路径的条目（防路径穿越）；
-    - 同名技能冲突默认拒绝，overwrite=True 时才覆盖更新。
-
-    用法：
-        from agent.skills import SkillPackManager
-        mgr = SkillPackManager()   # 目标目录白名单取自 SKILLS_CONFIG
-        result = mgr.install_pack("./my-pack", "./skills",
-                                  overwrite=False, allow_unsigned=False)
-    """
+    文件、hash 不匹配，任一情况都校验失败并返回具体原因列表；
+    否则拒绝，防止任意路径写入；"""
 
     MANIFEST_NAME = "MANIFEST.sha256"
 
@@ -423,11 +303,7 @@ class SkillPackManager:
     # 校验
     # ------------------------------------------------------------------
     def verify_pack(self, source_dir: str) -> PackVerifyResult:
-        """校验技能包完整性，返回 PackVerifyResult。
-
-        - 无 MANIFEST.sha256 → ok=True, unsigned=True（未签名，不判失败）；
-        - 有 manifest → 逐文件 SHA-256 校验，任何不一致给出具体原因列表。
-        """
+        """校验技能包完整性，返回 PackVerifyResult。"""
         source_dir = os.path.abspath(source_dir)
         skills = self._list_skills(source_dir)
         manifest = os.path.join(source_dir, self.MANIFEST_NAME)
@@ -494,11 +370,7 @@ class SkillPackManager:
     def install_pack(self, source_dir: str, target_dir: str,
                      overwrite: bool = False,
                      allow_unsigned: bool = False) -> PackInstallResult:
-        """安装 / 更新技能包到 target_dir。
-
-        流程：先 verify → 校验通过且（signed 或 allow_unsigned）→ 逐技能复制。
-        目标已存在同名技能且 overwrite=False → 该技能拒绝（冲突清单）。
-        """
+        """安装 / 更新技能包到 target_dir。"""
         source_dir = os.path.abspath(source_dir)
 
         # 1. 目标目录必须是 SKILLS_CONFIG 配置的技能目录之一（防任意路径写入）
@@ -606,10 +478,7 @@ class SkillPackManager:
 
     @staticmethod
     def _parse_manifest_line(line: str) -> Tuple[Optional[str], Optional[str]]:
-        """解析 '<sha256>  <相对路径>'（两空格分隔）。
-
-        返回 (sha, rel)；格式非法返回 (None, None)。
-        """
+        """解析 '<sha256>  <相对路径>'（两空格分隔）。"""
         if len(line) < 64:
             return None, None
         sha = line[:64]
@@ -643,12 +512,7 @@ class SkillPackManager:
         return ".." in parts
 
     def _copy_skill(self, src: str, dst: str, overwrite: bool):
-        """复制单个技能目录 src → dst。
-
-        - 先收集并检查所有条目（跳过符号链接；拒绝 '..'/绝对路径）；
-        - 存在被拒条目时整体拒绝复制（不半途而废）；
-        - 返回 (copied_files, skipped_links, blocked_entries)。
-        """
+        """复制单个技能目录 src → dst。"""
         # 收集条目（目录 + 文件），统一检查
         dirs_to_make: List[str] = []
         files_to_copy: List[Tuple[str, str]] = []

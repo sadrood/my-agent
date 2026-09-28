@@ -1,14 +1,5 @@
 """`main` 上的 LoopBudget 没有 `stagnation_alarm` —— 执行循环必须能照跑。
-
-发现经过（2026-09-23，审计收尾提交时）：
-`agent/executor.py` 里无条件调用 `budget.stagnation_alarm()` 并读
-`budget.stagnation_turns`，但 `agent/loop_budget.py` **没有任何一次提交**包含它们
-（`git log -S "def stagnation_alarm" -- agent/loop_budget.py` 返回空）—— 整个特性只
-存在于某个会话尚未提交的工作区里。
-
-后果：checkout 干净的 main，跑第一个目标就 `AttributeError` 崩在循环体第一行。
-executor 侧已改成 `getattr` 兜底；本测试把"这个兜底不能被人顺手'清理'掉"钉住。
-"""
+executor 侧已改成 `getattr` 兜底；本测试把"这个兜底不能被人顺手'清理'掉"钉住。"""
 from agent.approval import ApprovalPolicy
 from agent.executor import Executor
 from models.llm import LLMToolResponse

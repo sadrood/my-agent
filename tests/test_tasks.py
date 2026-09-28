@@ -61,15 +61,8 @@ def test_thought_add(isolate):
 
 
 class TestTextInterface:
-    """字符串入口（legacy 决策协议 / `ToolManager.execute`）此前完全没被覆盖。
-
-    实测故障（2026-09-22 审计）：`execute()` 里对 `parts[1]`（本身就是 id）又
-    split 了一次，`rest` 恒为空串 —— 于是工具描述里承诺的
-        task status <id> <状态>
-        task log <id> <内容>
-    永远失败（"非法状态: " / "log 需要 content。"），模型会反复重试直到耗尽预算。
-    上面的 `test_status_and_log` 走的是 `execute_json`，所以一直没暴露。
-    """
+    """字符串入口（legacy 决策协议 / `ToolManager.execute`）之前完全没被覆盖。
+    永远失败（"非法状态: " / "log 需要 content。"），模型会反复重试直到耗尽预算。"""
 
     def test_status_via_text(self, isolate):
         t, _ = _mk(isolate)

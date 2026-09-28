@@ -1,18 +1,4 @@
-"""legacy 字符串入口与 team worker 的审批门回归。
-
-实测漏洞（2026-09-22 审计）：`Executor.call_tool_guarded()` 只做超时兜底、
-**没有** `self.approval.decide`，而 `execute_step_legacy`（供应商不支持 function
-calling 时的回退、`--plan` 模式）与 `agent/team.py` 的 worker 都走这条字符串入口
-（team worker 更是裸调 `tool_manager.execute()`）。结果是黑名单、沙箱等级、
-审批策略、Guardian 在 legacy / team 模式下**全部不生效**：
-
-    {"tool": "terminal", "tool_input": "del /f /s /q D:\\data"}
-
-直接执行。这条路径此前没有任何测试覆盖，所以一直没被发现。
-
-现在两条路径都走 `Executor.gate_tool_call` / `check_tool_execution`，与 function
-calling 主循环共用同一道门。
-"""
+"""legacy 字符串入口与 team worker 的审批门回归。"""
 import pytest
 
 from agent.approval import ApprovalPolicy, check_tool_execution
@@ -64,7 +50,7 @@ class TestLegacyStringEntryGate:
         assert "hello_legacy_gate" in result.output
 
     def test_sandbox_level_insufficient_blocks(self):
-        """沙箱等级不足：legacy 入口同样要拒（此前直接执行）。"""
+        """沙箱等级不足：legacy 入口同样要拒（之前直接执行）。"""
         result = _executor(sandbox_mode="read-only").call_tool_guarded(
             "terminal", "echo should_not_run")
         assert result.success is False

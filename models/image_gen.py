@@ -1,20 +1,4 @@
-"""
-图像生成模块（/images/generations 兼容协议，文生图）。
-
-支持任意兼容协议的提供方，例如：
-    POST {base_url}/images/generations
-    {"model": "...", "prompt": "...", "n": 1,
-     "size": "1024x1024", "response_format": "b64_json"}
-响应:
-    {"created": ..., "data": [{"b64_json": "..."} | {"url": "..."}]}
-    - b64_json（默认供应商的生图模型）→ 解码保存为本地 PNG/JPEG
-    - url（备用供应商的生图模型）→ **自动下载**后保存（失败回退 URL）
-
-配置：config.IMAGE_GEN_CONFIG（环境变量 IMAGE_GEN_*）。
-
-直接用 httpx 而不依赖 SDK 的 images 接口：契约简单、对
-对兼容协议的提供方兼容性最好。
-"""
+"""图像生成模块（/images/generations 兼容协议，文生图）。"""
 import base64
 import os
 from datetime import datetime
@@ -27,8 +11,7 @@ from config import IMAGE_GEN_CONFIG
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff"
 
-# 提供方专有 / 可能不被支持的可选字段：报 400 提到该字段名时自动剔除重试
-# （部分上游认 watermark，部分不认，会回 "watermark 不是文生图队列支持的字段"）
+# 提供方专有 / 可能不被支持的可选字段：报 400 提到该字段名时自动剔除重试（部分上游认 watermark，部分不认，会回 "watermark 不是文生图队列支持的字段"）
 _OPTIONAL_FIELDS = ("watermark", "response_format")
 
 
@@ -66,12 +49,7 @@ class ImageGenModel:
     def _post(self, payload: dict, base_url: str = None, api_key: str = None,
               timeout: float = None) -> dict:
         """发送生成请求；提供方不认的可选字段自动剔除后重试一次。
-
-        各家专有字段不同：默认供应商认 `watermark`，备用供应商会以
-        "watermark 不是文生图队列支持的字段" 报 400。这里按错误文本识别
-        并剔除该字段重试（与 models/llm.py 的 400 参数降级同一思路），
-        避免换提供方就要改代码。
-        """
+        避免换提供方就要改代码。"""
         try:
             return self._post_raw(payload, base_url=base_url, api_key=api_key,
                                   timeout=timeout)
@@ -108,11 +86,7 @@ class ImageGenModel:
     def generate_b64(self, prompt: str, size: str = None, n: int = 1,
                      model: str = None) -> List[str]:
         """生成图片，返回 b64_json 列表（若提供方返回 url 则原样返回 url）。
-
-        主端点失败（超时/报错/额度）时按配置换**备用端点**接着试——实测默认供应商
-        生图模型 / u1-fast / u1.5-fast 都能出图（b64_json），
-        而备用供应商偶发超时；跨提供方兜底比"原地重试同一个挂掉的端点"有用得多。
-        """
+        而备用供应商偶发超时；跨提供方兜底比"原地重试同一个挂掉的端点"有用得多。"""
         errors = []
         for cfg in self._endpoint_chain(model):
             payload = {
@@ -166,18 +140,7 @@ class ImageGenModel:
     def generate(self, prompt: str, size: str = None, n: int = 1,
                  save: bool = True, save_dir: str = None,
                  model: str = None) -> dict:
-        """
-        生成图片并保存到本地。
-
-        提供方有两大类返回：
-        - b64_json 返回 → 解码落盘
-        - url 返回 → **自动下载**后落盘（下载失败则回退返回 URL，
-          不因网络问题丢掉整次生成结果）
-
-        Returns:
-            {"images": [本地路径（优先）或 url], "model": ..., "size": ...,
-             "saved": bool, "prompt": prompt}
-        """
+        """生成图片并保存到本地。"""
         items = self.generate_b64(prompt, size=size, n=n, model=model)
         images = []
         for i, item in enumerate(items):
@@ -192,11 +155,7 @@ class ImageGenModel:
             elif save:
                 images.append(self._save_image(item, i, save_dir))
             else:
-                # b64 形式的提供方：save=False 时不能什么都不做 ——
-                # 旧实现在这里直接跳过，函数返回 `{"images": []}` 却报成功，调用方
-                # 拿不到任何图片数据；而 URL 形式的提供方两种都一样返回 URL，
-                # 行为不对称（2026-09-22 审计，现有测试只覆盖了 URL 那一半）。
-                # 给回一个可直接使用的 data URI。
+                # b64 形式的提供方：save=False 时不能什么都不做 ——旧实现在这里直接跳过，函数返回 `{"images": []}` 却报成功，调用方拿不到任何图片数据。
                 images.append(item if item.startswith("data:")
                               else f"data:image/png;base64,{item}")
         return {
@@ -212,11 +171,7 @@ class ImageGenModel:
     def _download_image(self, url: str, index: int,
                         save_dir: str = None) -> str:
         """下载 URL 形式的图片，按魔数保存为 .png/.jpg，返回本地路径。
-
-        为什么需要：不同提供方返回形式不同（默认供应商给 b64、备用供应商给 url）。
-        若 url 形式不落盘，用户/agent 只能拿到一个链接，体验与 b64 不一致
-        （生成的图不在本地、无法直接当文件用）。
-        """
+        （生成的图不在本地、无法直接当文件用）。"""
         resp = httpx.get(url, timeout=self.timeout, follow_redirects=True)
         if resp.status_code >= 400:
             raise RuntimeError(f"图片下载失败 HTTP {resp.status_code}")

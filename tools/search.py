@@ -1,10 +1,4 @@
-"""
-本地全文搜索（借鉴同类实现：检索会话历史 + 工作区文件）。
-
-- 会话：遍历 SessionStore 的历史消息，子串匹配（对中文友好，无需分词器）。
-- 文件：遍历工作目录，按文件名 + 内容（读前 N KB）匹配。
-- 用法：search_sessions(q) / search_files(root, q)，返回带摘要的命中列表。
-"""
+"""本地全文搜索（借鉴同类实现：检索会话历史 + 工作区文件）。"""
 import os
 from typing import List
 

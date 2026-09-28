@@ -1,18 +1,5 @@
-"""
-Git 快照模块：Agent 自我修改代码前的安全网。
-
-- ensure_repo(): 项目不是 git 仓库时自动 git init + 首次提交（基线）
-- snapshot(): 每次运行开始前形成回滚点（full=True 全量 add -A；
-  full=False 选择性模式，只提交暂存区——逐工具 checkpoint 已覆盖
-  Agent 自身修改时用，避免把用户并行未提交工作卷进 Agent 提交）
-- checkpoint(): 逐操作检查点，提供 changed_file 时只快照该文件（归因提交）。
-  快照挂 refs/snapshots/<时间戳>，不进任何分支历史；rollback_to 接受快照提交。
-
-设计原则：
-- 静默失败：任何 git 问题都不影响 Agent 正常运行（只打警告）
-- 归因提交：Agent 的提交只包含 Agent 改动的文件，并行工作不卷入
-- 身份兜底：git 未配置 user.name 时使用 my-agent 身份提交
-"""
+"""Git 快照模块：Agent 自我修改代码前的安全网。
+Agent 自身修改时用，避免把用户并行未提交工作卷进 Agent 提交）"""
 import os
 import subprocess
 from datetime import datetime
@@ -51,12 +38,7 @@ def is_git_repo(path: str) -> bool:
 
 
 def ensure_repo(path: str) -> bool:
-    """
-    确保 path 是 git 仓库；不是则 init 并做首次提交（基线快照）。
-
-    Returns:
-        True = 已就绪（原本就是仓库 / 或初始化成功）
-    """
+    """确保 path 是 git 仓库；不是则 init 并做首次提交（基线快照）。"""
     if is_git_repo(path):
         return True
     try:
@@ -75,13 +57,7 @@ def ensure_repo(path: str) -> bool:
 
 def _commit(path: str, message: str, allow_empty: bool = False,
             add_paths=None) -> bool:
-    """commit（身份缺失时用 my-agent 兜底）。
-
-    Args:
-        add_paths: None = git add -A 全量快照（旧行为）；
-                   非空 list = 只 add 指定路径（Agent 归因提交，不卷入并行工作）；
-                   空 list = 不执行 add，只提交当前暂存区。
-    """
+    """commit（身份缺失时用 my-agent 兜底）。"""
     pathspec = [str(p) for p in add_paths] if add_paths else []
     if add_paths is None:
         add = _git(["add", "-A"], path)
@@ -91,23 +67,16 @@ def _commit(path: str, message: str, allow_empty: bool = False,
         # -A：路径被删除时也要把"删除"暂存下来（回滚会删掉快照之后新增的文件）
         add = _git(["add", "-A", "--"] + pathspec, path)
         if add.returncode != 0:
-            # 已删除且从未进过索引的路径会让 pathspec 匹配失败（快照走临时索引，
-            # 不碰真实索引）：存在的照常 add，不存在的用 update-index 确保移除
+            # 已删除且从未进过索引的路径会让 pathspec 匹配失败（快照走临时索引，不碰真实索引）：存在的照常 add，不存在的用 update-index 确保移除
             existing = [p for p in pathspec if os.path.exists(os.path.join(path, p))]
             if existing:
                 _git(["add", "-A", "--"] + existing, path)
             for miss in [p for p in pathspec if p not in existing]:
                 _git(["update-index", "--force-remove", "--", miss], path)
-    # commit 必须带同样的 pathspec：否则提交的是整个索引，会把用户自己 add 过、
-    # 还没提交的文件卷进 agent 的归因提交。
+    # commit 必须带同样的 pathspec：否则提交的是整个索引，会把用户自己 add 过、还没提交的文件卷进 agent 的归因提交。
     suffix = (["--allow-empty"] if allow_empty else []) + ["-m", message]
     if pathspec:
-        # 归因模式：只提交本次触碰的路径。两道过滤都关键：
-        #   · 带一个不在索引里的路径（刚删掉、且从未进过索引）会让
-        #     `git commit -- <path>` 直接报 pathspec 错误，把整次提交带崩 ——
-        #     回滚会因此"文件恢复了却没落库"（2026-09-22 验证时踩到）；
-        #   · 过滤后为空时**绝不能**退化成"不带 pathspec 的 commit" —— 那提交的是
-        #     整个真实索引，会把用户自己 `git add` 的文件卷进 agent 的提交。
+        # 归因模式：只提交本次触碰的路径。两道过滤都关键：；  · 带一个不在索引里的路径（刚删掉、且从未进过索引）会让
         staged = set((_git(["diff", "--cached", "--name-only"], path).stdout or "").splitlines())
         only = [p for p in pathspec if p in staged]
         if not only:
@@ -130,16 +99,7 @@ def _commit(path: str, message: str, allow_empty: bool = False,
 
 
 def snapshot(path: str, goal: str = "", full: bool = True) -> bool:
-    """
-    运行前快照：形成回滚点（挂 refs/snapshots/run-*，不进分支历史）。
-
-    Args:
-        goal: 目标摘要（写入快照信息）
-        full: True = 全量快照（等价 git add -A）；False = 只快照已暂存内容。
-
-    Returns:
-        True = 快照成功（或无需快照）
-    """
+    """运行前快照：形成回滚点（挂 refs/snapshots/run-*，不进分支历史）。"""
     if not is_git_repo(path):
         return False
 
@@ -160,25 +120,18 @@ SNAPSHOT_REF_PREFIX = "refs/snapshots"
 
 def snapshot_ref(ts: str = None) -> str:
     """本次快照的 ref 名：refs/snapshots/<YYYYmmdd-HHMMSS-ffffff>。
-
-    必须带微秒：同一秒内两次 checkpoint 同名会互相覆盖，旧快照再也回滚不了。
-    """
+    必须带微秒：同一秒内两次 checkpoint 同名会互相覆盖，旧快照再也回滚不了。"""
     stamp = ts or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return f"{SNAPSHOT_REF_PREFIX}/{stamp}"
 
 
 def _commit_to_ref(path: str, ref: str, message: str, add_paths=None) -> str:
-    """把改动做成提交并挂到 ref 上，**不动 HEAD / 暂存区 / 工作区**。
-
-    用临时索引（GIT_INDEX_FILE）+ commit-tree 实现，所以主分支历史保持干净，
-    但快照对象仍在（可 diff、可回滚）。无改动（树与 HEAD 相同）时返回 ""。
-    """
+    """把改动做成提交并挂到 ref 上，**不动 HEAD / 暂存区 / 工作区**。"""
     import tempfile
     staged_only = add_paths is not None and len(add_paths) == 0
     fd, index_file = tempfile.mkstemp(prefix="my-agent-index-")
     os.close(fd)
-    # 只快照"已暂存内容"时必须读**真实索引**：临时索引是从 HEAD 建的，
-    # 看不到用户新 add 的未跟踪文件。
+    # 只快照"已暂存内容"时必须读**真实索引**：临时索引是从 HEAD 建的，看不到用户新 add 的未跟踪文件。
     env = None if staged_only else {"GIT_INDEX_FILE": index_file}
     try:
         head = _git(["rev-parse", "--verify", "HEAD"], path, env=env)
@@ -266,21 +219,7 @@ def _is_snapshot_commit(path: str, commit: str) -> bool:
 
 
 def checkpoint(path: str, label: str = "", changed_file: str = "") -> str:
-    """
-    工具级检查点（逐操作 checkpoint）：
-    在修改文件的操作（edit / file write）执行前提交当前状态，
-    使每次自我修改都可逐操作回滚。
-
-    Args:
-        label: 提交信息（工具名 + 文件）
-        changed_file: 本次修改的文件路径。提供时只提交该文件（Agent 归因
-                      提交），仓库里其他未提交改动（如用户并行工作）保持
-                      不动；留空时退回全量 add -A（向后兼容）。
-
-    Returns:
-        成功返回该检查点的 commit hash（无实际提交——改动为空——时返回
-        HEAD hash，状态与检查点一致）；失败返回 ""。
-    """
+    """工具级检查点（逐操作 checkpoint）："""
     if not is_git_repo(path):
         return ""
     ts = datetime.now().strftime("%H:%M:%S")
@@ -296,22 +235,7 @@ def checkpoint(path: str, label: str = "", changed_file: str = "") -> str:
 
 
 def rollback_to(path: str, commit: str) -> str:
-    """
-    回滚工作区到某个历史提交或**逐操作快照**的树状态。不重写历史：
-    把目标与"当前状态"之间的差异按类型恢复/移除（新增的删除、修改/删除的
-    恢复内容），再作为新提交落库——旧提交与旧快照全部保留。
-
-    "当前状态"的选择很关键：分支提交（HEAD 祖先）用 HEAD；逐操作快照用
-    **最新快照**——因为快照不再推进 HEAD（见 _commit_to_ref），HEAD 停在
-    最后一次真实提交上，拿它当基准会算错差异。
-
-    Args:
-        path: 仓库路径
-        commit: 目标提交 hash（HEAD 祖先，或 refs/snapshots/* 上的快照）
-
-    Returns:
-        成功返回回滚提交后的 HEAD hash（无差异时返回原 HEAD）；失败返回 ""。
-    """
+    """回滚工作区到某个历史提交或**逐操作快照**的树状态。不重写历史："""
     if not is_git_repo(path):
         return ""
     commit = str(commit or "").strip()
@@ -322,15 +246,12 @@ def rollback_to(path: str, commit: str) -> str:
                        path).returncode == 0
     if not is_ancestor and not _is_snapshot_commit(path, commit):
         return ""
-    # 与**当前工作区**比较（`git diff <commit>` 不带第二个 ref 就是这个语义）：
-    # 比"当前状态"而不是比树：改动都在工作区（checkpoint 不推进 HEAD），
-    # 比树会 diff 为空却返回成功；目标快照之后新增的文件据此判成 "A" 并删除。
+    # 与**当前工作区**比较（`git diff <commit>` 不带第二个 ref 就是这个语义）：比"当前状态"而不是比树：改动都在工作区（checkpoint 不推进 HEAD），比树会 diff 为空却返回成功。
     diff = _git(["diff", "--name-status", "--no-renames", commit], path)
     if diff.returncode != 0:
         return ""
     entries: list = []
-    # "A" 要区别对待：diff 会把"已暂存未提交"的新文件也报成新增，那些是用户的
-    # 在制品，回滚不该替他删。判据：已进 HEAD 历史的才删，只在索引里的别动。
+    # "A" 要区别对待：diff 会把"已暂存未提交"的新文件也报成新增，那些是用户的在制品，回滚不该替他删。判据：已进 HEAD 历史的才删，只在索引里的别动。
     head_files = set((_git(["ls-tree", "-r", "--name-only", "HEAD"], path).stdout or "").splitlines())
     for line in diff.stdout.splitlines():
         parts = line.split("\t", 1)
@@ -340,9 +261,7 @@ def rollback_to(path: str, commit: str) -> str:
         if status == "A" and rel not in head_files:
             continue
         entries.append((status, rel))
-    # 再并上"与最新快照比较"这一路：目标快照之后**被 checkpoint 过**的新文件只会
-    # 出现在后续快照的树里（它们不在 HEAD 历史里，正好被上面的规则放过）——
-    # 这一类是 agent 自己造的，可以放心移除；不并这一路，回滚就会把它们残留下来。
+    # 再并上"与最新快照比较"这一路：目标快照之后**被 checkpoint 过**的新文件只会出现在后续快照的树里（它们不在 HEAD 历史里，正好被上面的规则放过）——这一类是 agent 自己造的，可以放心移除。
     seen = {rel for _, rel in entries}
     newest = _newest_snapshot(path)
     if newest and newest != commit:
@@ -376,10 +295,7 @@ def rollback_to(path: str, commit: str) -> str:
     # 只提交本次触碰的路径（归因提交，不卷入用户并行未提交工作）
     if _commit(path, f"rollback: 回滚到检查点 {commit[:10]}（my-agent）", add_paths=touched):
         return _head(path)
-    # 恢复后的内容恰好与 HEAD 一致时，`git commit` 会以 "nothing to commit" 失败 ——
-    # 那不是回滚失败：文件已经回到目标状态了，而调用方（dashboard 的
-    # `POST /api/rollback`）按"返回非空即成功"判定，返回 "" 会把成功显示成失败。
-    # 所以再确认一次"工作区是否真的已与目标提交一致"，一致就算成功。
+    # 恢复后的内容恰好与 HEAD 一致时，`git commit` 会以 "nothing to commit" 失败 ——那不是回滚失败：文件已经回到目标状态了。
     verify = _git(["diff", "--quiet", commit, "--"] + touched, path)
     return _head(path) if verify.returncode == 0 else ""
 
@@ -391,11 +307,7 @@ def _head(path: str) -> str:
 
 
 def _commit_or_clean(path: str, message: str, add_paths=None) -> bool:
-    """提交；"nothing to commit"（无待提交内容）同样视为成功。
-
-    选择性模式（add_paths=[]）下暂存区为空 = 没有 Agent 改动需要保护，
-    工作区里的并行未提交改动不属于 Agent，直接跳过视为成功。
-    """
+    """提交；"nothing to commit"（无待提交内容）同样视为成功。"""
     if _commit(path, message, add_paths=add_paths):
         return True
     try:

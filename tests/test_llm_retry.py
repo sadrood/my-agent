@@ -288,11 +288,7 @@ class TestQuota429Variants:
 
 class TestMinuteQuotaAlignment:
     """TPM/RPM 是**每分钟**窗口重置的配额：供应商不给 retry-after 时，
-    单纯指数退避（几秒）会一直在同一分钟窗口内硬怼。
-
-    实测日志：6s/12s 退避的两次重试全部撞在同一分钟内失败、任务中断。
-    修复：识别分钟级配额错误 → 等待对齐到下一个分钟边界。
-    """
+    日志：6s/12s 退避的两次重试全部撞在同一分钟内失败、任务中断。"""
 
     def _tpm_err(self):
         return BadRequestError(
@@ -360,12 +356,7 @@ class TestMinuteQuotaAlignment:
 
 class TestRateLimitVisibility:
     """限流等待必须"看得见 + 留得下记录"。
-
-    实测问题（分析 run-20260918-163309 时踩到）：client 层的限流提示只写 stderr，
-    桌面端/内嵌 UI/dashboard 渲染的是富文本 stdout，那行没人看得到；而且**等待时长
-    没进 rollout**——事后只知道"发生过 5 次 429"，不知道一共等了 10 秒还是 2 分钟。
-    配额等待单次上限 65s、默认重试 2 次，最长可达约 2 分钟静默。
-    """
+    配额等待单次上限 65s、默认重试 2 次，最长可达约 2 分钟静默。"""
 
     def test_notifier_defaults_to_none(self):
         assert LLM().retry_notifier is None, "默认必须是 None：models 层不依赖 UI 层"
@@ -411,14 +402,7 @@ class TestRateLimitVisibility:
 
 
 class TestEmptyChoicesGuard:
-    """非流式响应对 choices / message 的防御。
-
-    实测故障（2026-09-22 审计）：网关把上游错误包成 **HTTP 200 + {"choices": []}**
-    是常见形态（内容被安全策略拦截时也这样），而 `chat()` / `chat_with_tools()`
-    直接 `response.choices[0].message` —— 抛 `IndexError` / `AttributeError`，
-    文章流水线会把它包成"阶段「outline」调用失败：list index out of range"，
-    排查方向被带偏。`models/vision.py` 对同一问题专门加了保护，主 LLM 反而没有。
-    """
+    """非流式响应对 choices / message 的防御。"""
 
     class _Msg:
         def __init__(self):

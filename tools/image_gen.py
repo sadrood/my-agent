@@ -1,17 +1,10 @@
-"""
-文生图工具（ImageGenTool）。
-
-调用默认供应商的生图模型（生图模型）的兼容协议
-/images/generations 端点生成图片，解码保存到本地目录，返回文件路径。
-
-依赖：models.image_gen.ImageGenModel。
-配置：IMAGE_GEN_*（.env），默认端点 https://token.sensenova.cn/v1。
-"""
+"""文生图工具（ImageGenTool）。
+依赖：models.image_gen.ImageGenModel。"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 
-# 实测端点支持的标准尺寸
+# 端点支持的标准尺寸
 SIZE_CHOICES = ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280"]
 
 
@@ -24,10 +17,7 @@ class ImageGenTool(BaseTool):
     parallel_safe: bool = True                  # 输出文件唯一命名，互不冲突，可并行
 
     def __init__(self, image_model=None):
-        """
-        Args:
-            image_model: ImageGenModel 实例（None 时延迟创建；测试注入用）
-        """
+        """Args:"""
         self._model = image_model
 
     @property

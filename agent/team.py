@@ -1,18 +1,4 @@
-"""
-Team 多Agent协作模块（Manager-Worker 模式）。
-
-Manager Agent 负责：
-1. 分析用户任务
-2. 拆解为子任务
-3. 分派给合适的 Worker Agent
-4. 汇总各 Worker 的产出
-5. 必要时让 Reviewer 审查
-
-Worker Agent 是带特定角色的 Agent 实例，专注执行子任务。
-
-协作流程:
-    User Task → Manager 拆解 → 分派子任务 → Worker 执行 → 结果汇总 → (可选) Reviewer 审查 → 最终交付
-"""
+"""Team 多Agent协作模块（Manager-Worker 模式）。"""
 import json
 import threading
 import time
@@ -57,9 +43,7 @@ class SubTask:
     worker_name: str = ""
     independent: bool = False   # True=不依赖其他子任务结果，可并行执行（旧格式标记，兼容保留）
     depends_on: List[str] = field(default_factory=list)  # 依赖的子任务 id 列表（DAG 细粒度调度）
-    #: 已被上层放弃（并发波次超时）：worker 线程是 daemon、超时不会取消它，晚到的
-    #: 结果会把 failed 覆写成 completed，同一个子任务上 status 与 error 自相矛盾。
-    #: 见到这个标记就不要再改状态了。
+    # : 已被上层放弃（并发波次超时）：worker 线程是 daemon、超时不会取消它，晚到的: 结果会把 failed 覆写成 completed，同一个子任务上 status 与 error 自相矛盾。: 见到这个标记就不要再改状态了。
     abandoned: bool = False
 
     def to_dict(self) -> dict:
@@ -86,10 +70,7 @@ class TeamResult:
 
 
 class WorkerAgent:
-    """
-    Worker Agent：带特定角色的执行单元。
-    与主 Agent 共享工具管理器，但有独立的角色系统提示。
-    """
+    """Worker Agent：带特定角色的执行单元。"""
 
     def __init__(self, name: str, role: AgentRole, llm: LLM, tool_manager,
                  approval=None):
@@ -97,24 +78,12 @@ class WorkerAgent:
         self.role = role
         self.llm = llm
         self.tool_manager = tool_manager
-        #: 审批策略（ApprovalPolicy | None）。团队模式此前**完全没有**审批门，
-        #: worker 的工具调用是裸调 tool_manager.execute()（2026-09-22 审计）。
+        # : 审批策略（ApprovalPolicy | None）。团队模式之前**完全没有**审批门，: worker 的工具调用是裸调 tool_manager.execute()。
         self.approval = approval
 
     def execute(self, task: str, context: str = "", max_rounds: int = 10,
                 emit: Optional[callable] = None) -> str:
-        """
-        执行一个子任务。
-
-        Args:
-            task: 子任务描述
-            context: 上下文（之前的任务结果等）
-            max_rounds: 最大交互轮数
-            emit: 可选事件回调 emit(event_type, data)，用于 Dashboard 实时推送
-
-        Returns:
-            执行结果文本
-        """
+        """执行一个子任务。"""
         messages = [
             {"role": "system", "content": self.role.system_prompt},
             {"role": "user", "content": (
@@ -147,10 +116,7 @@ class WorkerAgent:
                         "input": str(tool_input)[:200] if not isinstance(tool_input, str) else tool_input[:200],
                         "worker": self.name,
                     })
-                # 审批门：team worker 此前是裸调 tool_manager.execute()，黑名单 /
-                # 沙箱等级 / 审批策略在团队模式下**全部不生效** —— worker 一句
-                # `{"tool":"terminal","tool_input":"del /f /s /q D:\\data"}`
-                # 就直接执行了（2026-09-22 审计）。与主循环共用一个门。
+                # 审批门：team worker 之前是裸调 tool_manager.execute()，黑名单 /沙箱等级 / 审批策略在团队模式下**全部不生效** —— worker 一句 `{"tool":"terminal"。
                 from agent.approval import arguments_from_string, check_tool_execution
                 deny_reason = check_tool_execution(
                     self.approval, self.tool_manager, tool_name,
@@ -162,8 +128,7 @@ class WorkerAgent:
                     if self.tool_manager.is_parallel_safe(tool_name, {}):
                         tool_result = self.tool_manager.execute(tool_name, tool_input)
                     else:
-                        # 非并行安全工具（共享 Playwright/子进程等有状态实例）：
-                        # 并行波次中按工具名互斥串行化，LLM 推理阶段仍然并发
+                        # 非并行安全工具（共享 Playwright/子进程等有状态实例）：并行波次中按工具名互斥串行化，LLM 推理阶段仍然并发
                         with _get_tool_lock(tool_name):
                             tool_result = self.tool_manager.execute(tool_name, tool_input)
                     output = tool_result.output if tool_result.success else f"错误: {tool_result.error}"
@@ -216,20 +181,12 @@ class WorkerAgent:
 
 
 class Team:
-    """
-    Agent 团队（Manager-Worker 模式）。
-
-    用法:
-        team = Team(llm, tool_manager)
-        result = team.run("调研2024年AI Agent发展趋势，写一份报告")
-        print(result.final_answer)
-    """
+    """Agent 团队（Manager-Worker 模式）。"""
 
     def __init__(self, llm: LLM = None, tool_manager=None, approval=None):
         self.llm = llm or LLM()
         self.tool_manager = tool_manager
-        # 审批策略：显式传参优先，否则按 APPROVAL_CONFIG 构造（与 Agent 同源）。
-        # 团队模式是无人值守的，所以 interactive 固定 False。
+        # 审批策略：显式传参优先，否则按 APPROVAL_CONFIG 构造（与 Agent 同源）。团队模式是无人值守的，所以 interactive 固定 False。
         if approval is None:
             try:
                 from agent.approval import ApprovalPolicy
@@ -277,17 +234,7 @@ class Team:
         parallel: bool = False,
         enable_review: bool = True,
     ) -> TeamResult:
-        """
-        运行团队协作任务。
-
-        Args:
-            task: 用户任务
-            parallel: 是否并行执行独立子任务
-            enable_review: 是否启用 Reviewer 审查
-
-        Returns:
-            TeamResult
-        """
+        """运行团队协作任务。"""
         start_time = time.time()
 
         from agent.ui_theme import print_info, print_warning
@@ -331,13 +278,6 @@ class Team:
         })
 
         # 2. 执行子任务（DAG 细粒度依赖调度）
-        #    每轮收集「依赖的子任务全部已完成」的子任务为一批：
-        #    - 批内 >=2 个且 parallel=True -> 用 _run_parallel_wave 并发执行
-        #    - 否则按序 _execute_subtask
-        #    上一批结果按子任务顺序累进 context（保持有序回喂），循环直到调度完。
-        #    若某轮找不到任何可调度子任务但仍有未完成子任务（依赖环，或依赖了
-        #    失败的子任务），把这些子任务标记 failed（error 写明依赖无法满足），
-        #    继续调度其余任务，绝不死循环。
         context = ""
         id_to_task = {st.id: st for st in subtasks}
 
@@ -420,10 +360,7 @@ class Team:
     # ================================================================
 
     def _execute_subtask(self, st: SubTask, context: str) -> str:
-        """
-        执行单个子任务，返回追加到后续子任务上下文的片段（失败返回空串）。
-        Dashboard 事件与状态更新与旧串行实现保持一致。
-        """
+        """执行单个子任务，返回追加到后续子任务上下文的片段（失败返回空串）。"""
         from agent.ui_theme import print_info, print_warning
 
         worker = self.workers.get(st.assigned_role)
@@ -450,10 +387,7 @@ class Team:
                 context=context,
                 emit=lambda t, d, _s=st: self._emit(t, {**d, "mode": "team", "subtask": _s.id}),
             )
-            # 已经判过失败的（并发波次超时）不再改写：worker 线程是 daemon，超时不会
-            # 取消它，晚到的结果会把 failed 覆写成 completed，同一个 SubTask 上
-            # status="completed" 与 error="Worker 执行超时" 并存，而调用方其实拿到的是
-            # 空结果（2026-09-22 审计实测）。事件也已经推过 failed，别自相矛盾。
+            # 已经判过失败的（并发波次超时）不再改写：worker 线程是 daemon，超时不会取消它，晚到的结果会把 failed 覆写成 completed。
             if st.abandoned:
                 return ""
             st.result = _out
@@ -483,14 +417,7 @@ class Team:
             return ""
 
     def _run_parallel_wave(self, subtasks: List[SubTask], context: str) -> str:
-        """
-        并发执行一批独立子任务，返回按子任务原顺序拼接的上下文片段
-        （有序回喂，保证汇总阶段结果顺序确定）。
-
-        用 daemon 线程并行（与 executor._run_tool_calls_parallel 同思路：
-        ThreadPoolExecutor 的 with 退出会等待卡死的 worker 导致冻结）。
-        join 带硬超时：超时的子任务标记失败，不拖死整个团队。
-        """
+        """并发执行一批独立子任务，返回按子任务原顺序拼接的上下文片段"""
         results: dict = {}
 
         def _run(st: SubTask):
@@ -511,12 +438,9 @@ class Team:
             t.join(max(0.0, deadline - time.time()))
 
         for st, t in zip(subtasks, threads):
-            # "pending" 也要算：worker 线程是先 start 再在函数体里置 "running" 的，
-            # 只判 "running" 会漏掉"线程已起但还没跑到置状态"那一小段窗口。
+            # "pending" 也要算：worker 线程是先 start 再在函数体里置 "running" 的，只判 "running" 会漏掉"线程已起但还没跑到置状态"那一小段窗口。
             if t.is_alive() and st.status in ("pending", "running"):
-                # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃，并让
-                # _execute_subtask 见到 abandoned 后不再改写状态（否则晚到的结果会把
-                # failed 覆写回 completed，同一个子任务上 status 与 error 互相矛盾）。
+                # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃，并让 _execute_subtask 见到 abandoned 后不再改写状态
                 st.abandoned = True
                 st.status = "failed"
                 st.result = ""
@@ -555,9 +479,6 @@ class Team:
 
             primary = data.get("primary", "generalist")
             # `secondary` 在提示词里标着"可选"，LLM 返回 null / 字符串都很自然。
-            # 旧实现在下面直接 len(secondary)，null 会抛 TypeError 并被外层
-            # except 兜成 _fallback_decompose —— 好好的多子任务 DAG 静默退化成
-            # "一个 generalist 干全部"（2026-09-22 审计）。
             secondary = data.get("secondary") or []
             if isinstance(secondary, str):
                 secondary = [secondary]
@@ -569,18 +490,13 @@ class Team:
                 role = primary if not subtasks else (
                     secondary[len(subtasks) - 1] if len(subtasks) - 1 < len(secondary) else "generalist"
                 )
-                # 兼容三种格式：
-                #   1) dict 含 depends_on（DAG 显式依赖，depends_on 缺省为 []）
-                #   2) dict 含 independent 标记（旧格式，无 depends_on）
-                #   3) 纯字符串（旧格式，等价于 conservative 依赖型）
+                # 兼容三种格式：；  1) dict 含 depends_on（DAG 显式依赖，depends_on 缺省为 []）
                 if isinstance(item, dict):
                     desc = str(item.get("description", "")).strip()
                     independent = bool(item.get("independent", False))
                     raw_depends = item.get("depends_on")
                     if raw_depends is not None:
-                        # 字符串是可迭代对象：LLM 把 depends_on 写成 "task_1"（常见笔误）
-                        # 时，旧实现会逐**字符**拆成 ['t','a','s','k','_','1']，子任务随即
-                        # 被判"依赖无法满足（存在依赖环）"、一次都没执行（2026-09-22 审计）。
+                        # 字符串是可迭代对象：LLM 把 depends_on 写成 "task_1"（常见笔误）时，旧实现会逐**字符**拆成 ['t','a','s','k','_','1']，子任务随即被判"依赖无法满足（存在依赖环）"、一次都没执行。
                         if isinstance(raw_depends, str):
                             raw_depends = [raw_depends]
                         depends = [str(d).strip() for d in raw_depends if str(d).strip()]
@@ -606,11 +522,7 @@ class Team:
                 subtasks.append(st)
                 explicit_depends[st.id] = has_explicit
 
-            # 旧格式（无显式 depends_on）向后兼容：按旧两阶段语义合成依赖，
-            # 保证「独立子任务先行、依赖型随后按序」的旧行为完全不变。
-            #   independent=True  -> 无依赖（首批执行）
-            #   independent=False -> 依赖全部独立子任务 + 列表中更靠前的旧格式依赖型
-            #                        子任务，从而在 DAG 调度下等价于旧的两阶段顺序。
+            # 旧格式（无显式 depends_on）向后兼容：按旧两阶段语义合成依赖，保证「独立子任务先行、依赖型随后按序」的旧行为完全不变。
             independent_ids = [st.id for st in subtasks if st.independent]
             for i, st in enumerate(subtasks):
                 if explicit_depends.get(st.id, False) or st.independent:

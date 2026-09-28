@@ -1,16 +1,4 @@
-"""
-短剧工厂服务工具（短剧工具类）：让 agent 通过 REST API 驱动外部短剧工厂。
-
-为什么是 API 而不是点界面：短剧工厂服务的后端是独立 Express 服务
-（默认 127.0.0.1:10588），169 个 /api 路由覆盖
-原文 → 事件图谱 → 剧本 → 分镜 → 出图 → 出片 全流程，
-登录一次拿 JWT 即可无人值守编排；用 computer 工具点 GUI 既慢又脆。
-
-⚠️ 它的 API 无公开文档、路由是代码生成的，版本间字段可能变。所以：
-- 主干步骤给了具名命令（字段已按上游源码核实）；
-- 其余一切走 `call` 命令直连任意路径（method/path/query/body）；
-- 参数不全时上游 zod 校验会返回 400 + 具体字段，错误原样回传，照它补即可。
-"""
+"""短剧工厂服务工具（短剧工具类）：让 agent 通过 REST API 驱动外部短剧工厂。"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
@@ -151,8 +139,7 @@ class ToonflowTool(BaseTool):
                     "type": "string", "description": "gen_videos 用：分辨率，如 720P",
                 },
                 "duration": {
-                    # 只有 add_track 读它；描述写错会让模型给 gen_videos 传 duration
-                    # 而被静默忽略，按错误时长出片并计费。
+                    # 只有 add_track 读它；描述写错会让模型给 gen_videos 传 duration而被静默忽略，按错误时长出片并计费。
                     "type": "number", "description": "add_track 用：单镜时长（秒，4-12）",
                 },
                 "audio": {
@@ -192,8 +179,7 @@ class ToonflowTool(BaseTool):
         from models.toonflow import ToonflowError
 
         try:
-            # 该服务的读接口几乎全是 POST + JSON body（GET 会 404），
-            # 且 Storyboard 用 scriptId、VideoList 要 projectId+scriptId。
+            # 该服务的读接口几乎全是 POST + JSON body（GET 会 404），且 Storyboard 用 scriptId、VideoList 要 projectId+scriptId。
             handler = {
                 "health": self._health,
                 "models": lambda c, a: self._read(c, "/api/modelSelect/getModelList",
@@ -490,17 +476,11 @@ def _mask_secrets(obj, _depth: int = 0):
 
 
 def _split_chapters(text: str, max_chars: int = 4000) -> list:
-    """把原文切成章节：[{title, body}]。
-
-    优先按"第N章/第N节/Chapter N"这类标题行切；没有标题就按空行聚合，
-    再按 max_chars 硬切，保证每章都能过上游（它的 cleanNovel 要逐章处理事件）。
-    """
+    """把原文切成章节：[{title, body}]。"""
     import re
 
     lines = text.splitlines()
-    # 标题行：第N章/节/回（后面可跟短标题）、Chapter N、Markdown 标题。
-    # 注意"第N章"后面**允许跟标题文字**（"第一章 雨夜"），否则真实文本切不开；
-    # 同时把尾部长度限住，避免把以"第X章"开头的正文句子误判成标题。
+    # 标题行：第N章/节/回（后面可跟短标题）、Chapter N、Markdown 标题。注意"第N章"后面**允许跟标题文字**（"第一章 雨夜"），否则真实文本切不开；同时把尾部长度限住，避免把以"第X章"开头的正文句子误判成标题。
     title_pat = re.compile(
         r"^\s*(?:"
         r"第\s*[0-9一二三四五六七八九十百零]+\s*[章节回](?:\s*[：:、.\-—]?\s*\S.{0,38})?"

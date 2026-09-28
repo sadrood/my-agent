@@ -1,15 +1,4 @@
-"""
-Agent 角色定义模块。
-预定义多种专业 Agent 角色，每种角色有不同的系统提示、工具集和能力边界。
-
-角色体系：
-- Researcher  → 研究员：搜索、爬虫、信息提取、综合
-- Coder       → 程序员：写代码、调试、运行测试
-- Writer      → 写手：内容创作、编辑、润色、翻译
-- Reviewer    → 审校：质量检查、逻辑审查、错误修正
-- Browser     → 浏览器操作员：网页交互、表单填写、数据采集
-- Generalist  → 通用助手：可处理各类任务，作为默认回退
-"""
+"""Agent 角色定义模块。"""
 from dataclasses import dataclass, field
 from typing import List, Optional
 

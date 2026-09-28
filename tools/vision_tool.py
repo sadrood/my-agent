@@ -1,14 +1,6 @@
-"""
-视觉分析工具（SeeTool）。
-把原来 Executor 里的 "see" 动作升级为标准工具：模型可以主动请求
-"截取当前页面 → 视觉模型分析 → 返回分析文本"，用于 Computer Use 场景。
-
-给 `path` 时改为分析本地图片/视频；视频走"等间隔抽帧 → 多图一次请求"
-（上游没有模型支持 video 输入）。
-
+"""视觉分析工具（SeeTool）。
 依赖：tools.browser.BrowserTool（截图）+ models.vision.VisionModel（分析）。
-视觉模型不可用时返回错误，模型会自行改用 text/html 等方式。
-"""
+视觉模型不可用时返回错误，模型会自行改用 text/html 等方式。"""
 import base64
 import os
 from typing import Any, Dict
@@ -36,11 +28,7 @@ class SeeTool(BaseTool):
     min_sandbox_mode: str = "read-only"
 
     def __init__(self, browser_tool=None, vision_model=None):
-        """
-        Args:
-            browser_tool: BrowserTool 实例（延迟获取：从 ToolManager 查找）
-            vision_model: VisionModel 实例（None 时延迟创建）
-        """
+        """Args:"""
         self._browser_tool = browser_tool
         self._vision_model = vision_model
 
@@ -132,9 +120,7 @@ class SeeTool(BaseTool):
 
         base64_data = match.group(1)
 
-        # 2. 文字类请求优先本地 OCR：识字是本地引擎的强项（离线、免费、不超时），
-        #    没必要为了"读出图里有什么字"去赌一次多模态调用（用户痛点：视觉模型
-        #    无响应就整个废掉）。
+        # 2. 文字类请求优先本地 OCR：识字是本地引擎的强项（离线、免费、不超时），没必要为了"读出图里有什么字"去赌一次多模态调用（用户痛点：视觉模型无响应就整个废掉）。
         if self._wants_text(question):
             ocr_text = self._ocr_fallback(base64_data)
             if ocr_text:

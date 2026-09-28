@@ -1,26 +1,22 @@
-"""
-粘贴感知的多行输入读取器（借鉴主流 CLI 的输入体验）。
-
-主流 agent CLI 都是全屏文本框：
-- 粘贴经终端 bracketed-paste 协议整块进入输入缓冲区，回车一次提交整块；
-- 手工换行用 Shift+Enter（部分 CLI 也支持行尾 ``\\`` + Enter）；
-- Web GUI 用 textarea，粘贴天然保留换行。
-
-my_agent 是行式 stdio CLI（rich Prompt 单行读取），没有全屏 TUI。
-等价近似方案（本模块）：
-1. 主行读取结束后立即检查 stdin 是否还有待读内容——粘贴是一整块突发到达，
-   人工逐行输入则行与行之间隔着按键延迟——有待读内容则全部收下合并成一条。
-   Windows 用无回显宽字符 _getwch 逐字符直取控制台队列（绕过 TextIOWrapper，
-   否则残余行会卡在 Python 的输入缓冲区里被吞掉）；POSIX 用 select + readline。
-2. 行尾 ``\\`` 表示续行（主流 CLI 同款约定），续行提示符 ``…``。
-3. 非 TTY（管道/CI）不做排干，保持"逐行一条消息"的脚本行为。
-"""
+"""粘贴感知的多行输入读取器（借鉴主流 CLI 的输入体验）。
+否则残余行会卡在 Python 的输入缓冲区里被吞掉）；POSIX 用 select + readline。"""
+import codecs
+import os
 import sys
 import time
 
 # 排干上限（防异常输入导致失控）
 MAX_DRAIN_LINES = 400
 MAX_DRAIN_CHARS = 20000
+
+
+def _write_prompt(text: str) -> None:
+    """只显示提示符（不读取输入）——读取由 _StdinReader 独占。"""
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def _split_lines(text: str) -> list:
@@ -44,43 +40,102 @@ def _pending_posix(stdin, timeout: float = 0.05) -> bool:
 
 def _drain_posix(stdin) -> list:
     """POSIX：逐行排干（canonical 模式下 read 一次最多一行，不会过度读取）。"""
-    # 必须用 os.read 取「当前可读的字节」，不能用 readline()：管道输入
-    # （`echo x | my-agent`）的半行数据会让 select 报可读、而 readline() 一直等到
-    # 换行或 EOF —— CLI 看起来像卡死（2026-09-22 审计）。
-    # 注意：这条只在 POSIX 生效，本机（Windows）无法实测。
-    import os as _os
+    # 必须用 os.read 取「当前可读的字节」，不能用 readline()：管道输入（`echo x | my-agent`）的半行数据会让 select 报可读、而 readline() 一直等到换行或 EOF —— CLI 看起来像卡死。
     lines, total = [], 0
     fd = stdin.fileno()
+    # ↑ 跨块增量解码：以前对每个 chunk 单独 decode，汉字/emoji 被 4096 字节边界切断就会解出半截字节
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     while _pending_posix(stdin, 0.02):
         try:
-            chunk = _os.read(fd, 4096)
+            chunk = os.read(fd, 4096)
         except OSError:
             break
         if not chunk:
             break
-        text = chunk.decode("utf-8", "replace")
-        lines.extend(text.splitlines() or [""])
-        total += len(text)
+        text = decoder.decode(chunk)               # ↑ 未完成的多字节序列留到下一块继续
+        if text:
+            lines.extend(text.splitlines() or [""])
+            total += len(text)
         if len(lines) >= MAX_DRAIN_LINES or total >= MAX_DRAIN_CHARS:
             break
+    tail = decoder.decode(b"", True)               # ↑ 收尾：冲出解码器里残留的半截序列
+    if tail:
+        lines.append(tail)
     return lines
 
 
-def _drain_windows() -> list:
-    """Windows：逐字符从控制台输入队列取剩余粘贴内容。
+class _StdinReader:
+    """POSIX 唯一的 stdin 读取者：共享缓冲 + 跨块增量解码。
 
-    必须绕过 TextIOWrapper：input() 走 C 运行时 ReadConsoleW，而
-    sys.stdin.readline() 走 FileIO/TextIOWrapper，两者缓冲相互独立——
-    若后者一次性把队列读空，残余行会卡在它的缓冲区里"消失"。
-    这里用无回显宽字符 _getwch 直取队列，再手工回显（CR 转成换行）。
+    ↑ 一个 fd 只能有一个读取者：以前「readline 式 input()」（rich → sys.stdin 文本层）
+      与「os.read 字节排干」同时读同一个 stdin，谁先取走字节，另一个的解码器就会撞上
+      残缺的多字节序列（UnicodeDecodeError: invalid continuation byte），异常从 rich 里
+      冒出来把整个进程打挂，残留粘贴内容随后被 shell 逐行执行。
     """
+
+    def __init__(self, stdin=None):
+        self.stdin = stdin if stdin is not None else sys.stdin
+        self.fd = self.stdin.fileno()
+        # ↑ 解码器与缓冲都是这一份：提示符行与粘贴排干共用，不再有第二个读取者
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.buffer = ""
+
+    def pending(self, timeout: float = 0.05) -> bool:
+        """缓冲里已有整行，或 fd 上还有待读字节。"""
+        if "\n" in self.buffer:
+            return True
+        return _pending_posix(self.stdin, timeout)
+
+    def _fill(self, timeout=None) -> bool:
+        """读一块字节并增量解码进缓冲。timeout=None 表示阻塞读（等用户回车）。"""
+        if timeout is not None and not self.pending(timeout):
+            return False
+        try:
+            chunk = os.read(self.fd, 4096)
+        except OSError:
+            return False
+        if not chunk:
+            self.buffer += self.decoder.decode(b"", True)   # ↑ EOF：补 final，冲出未完成序列
+            return False
+        self.buffer += self.decoder.decode(chunk)           # ↑ 增量解码，绝不逐块独立 decode
+        return True
+
+    def read_line(self, timeout=None):
+        """读一行；EOF 返回 None。阻塞读时 Ctrl+C 直接抛 KeyboardInterrupt（保持可中断）。"""
+        while "\n" not in self.buffer:
+            if not self._fill(timeout):
+                if self.buffer:
+                    line, self.buffer = self.buffer, ""
+                    return line
+                return None
+        line, self.buffer = self.buffer.split("\n", 1)
+        return line.rstrip("\r")
+
+    def drain_lines(self, max_lines: int = MAX_DRAIN_LINES,
+                    max_chars: int = MAX_DRAIN_CHARS) -> list:
+        """把当前可读的剩余内容按行收齐（粘贴的后继行）；半行留在缓冲里等下一轮。"""
+        lines, total = [], 0
+        while "\n" in self.buffer or self.pending(0.02):
+            if "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                lines.append(line)
+                total += len(line)
+            elif not self._fill(0.02):
+                break
+            if len(lines) >= max_lines or total >= max_chars:
+                break
+        return lines
+
+
+def _drain_windows() -> list:
+    """Windows：逐字符从控制台输入队列取剩余粘贴内容。"""
     try:
         import ctypes
         libc = ctypes.CDLL("msvcrt")
 
         def getch() -> str:
-            # 不设 restype：_getwch 返回 wint_t，按 int 取回再转字符。
-            # （曾设 restype=c_wchar → ctypes 已返回 str，再 chr(str) 崩溃）
+            # 不设 restype：_getwch 返回 wint_t，按 int 取回再转字符。（曾设 restype=c_wchar → ctypes 已返回 str，再 chr(str) 崩溃）
             value = libc._getwch()
             if value in (-1, 0xFFFF):      # WEOF / 读取错误 → 视为 EOF
                 return "\x1a"
@@ -110,7 +165,7 @@ def _drain_windows() -> list:
             if ch == "\x1a":      # Ctrl+Z：视为 EOF
                 break
             chars.append(ch)
-            # 行数上限：POSIX 路径一直有这个保护，Windows 侧此前漏了
+            # 行数上限：POSIX 路径一直有这个保护，Windows 侧之前漏了
             if chars.count("\n") + chars.count("\r") >= MAX_DRAIN_LINES:
                 break
             # 手工回显：把回车换成换行，粘贴内容在屏幕上按行呈现
@@ -133,18 +188,7 @@ def _drain_windows() -> list:
 def _drain_with_settle(drain_once, pending_fn, settle_delay: float = 0.05,
                        max_rounds: int = 6) -> list:
     """排干 + 短等待复检：粘贴可能分多个突发写入，等一小会儿确认收完。
-
-    正常单行输入（无待读内容）时第一次检查即返回，不引入额外延迟。
-
-    实测坑（2026-09-17 审计）：轮数上限 × 单轮字符上限 = 实际上限
-    （旧值 3×20000=6 万字符）。超过的部分会**留在控制台队列里**，被下一次
-    input() 当成新的一条消息读走——用户看到的就是"粘贴被截成两半、后半段
-    变成了下一条指令"。这里把轮数放宽到 6，并在真正触顶时明确告警，
-    而不是静默把尾巴留给下一轮。
-
-    已知限制：若粘贴在**一行中间**被拆成两个突发，仍可能插入一个多余换行
-    （需要按原始字符流累积才能彻底消除，属低频场景）。
-    """
+    （需要按原始字符流累积才能彻底消除，属低频场景）。"""
     out = []
     for _ in range(max_rounds):
         if pending_fn():
@@ -169,13 +213,7 @@ def _drain_with_settle(drain_once, pending_fn, settle_delay: float = 0.05,
 # ============================================================
 
 def resolve_continuation(raw_lines: list) -> list:
-    """把以 ``\\`` 结尾的行与其后续行合并（``\\``+Enter 续行约定）。
-
-    规则：
-    - 行尾是 ``\\`` 且不是 ``\\\\``（转义）→ 去掉续行符，与下一行合并；
-    - 其余行原样保留。
-    返回合并后的段落列表。
-    """
+    r"""把以 ``\`` 结尾的行与其后续行合并（``\``+Enter 续行约定）。"""
     blocks, buf = [], []
     for line in raw_lines:
         stripped = line.rstrip()
@@ -194,23 +232,60 @@ def resolve_continuation(raw_lines: list) -> list:
 # 主入口：读取一条目标输入
 # ============================================================
 
+def _read_goal_posix(stdin, prompt_primary, prompt_continuation) -> str:
+    """POSIX 默认路径：提示符只负责**显示**，读取全部走同一个字节读取者（_StdinReader）。"""
+    reader = _StdinReader(stdin)
+    blocks = []
+    while True:
+        try:
+            (prompt_primary if not blocks else prompt_continuation)()
+            line = reader.read_line()          # ↑ 唯一的读取入口；Ctrl+C 直接抛 KeyboardInterrupt
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if line is None:
+            return None
+
+        if line == "" and not blocks:
+            # 空行：若此刻粘贴剩余内容刚到（粘贴以空行开头），先收下再定
+            if reader.pending():
+                extra = reader.drain_lines()
+                if extra:
+                    blocks.append(line)
+                    blocks.extend(extra)
+                    break
+            return ""
+
+        if line.rstrip().endswith("\\") and not line.rstrip().endswith("\\\\"):
+            blocks.append(line.rstrip()[:-1].rstrip())
+            continue
+        blocks.append(line)
+        break
+
+    # 主行已结束：把粘贴突发的剩余行一次性收齐（人工打字不会在几十毫秒内完成下一行）
+    try:
+        is_tty = stdin.isatty()
+    except Exception:
+        is_tty = True
+    if is_tty and reader.pending():
+        blocks.extend(reader.drain_lines())
+
+    return "\n".join(blocks).strip()
+
+
 def read_goal(prompt_primary=None, prompt_continuation=None,
               stdin=None, pending_fn=None, drain_fn=None) -> str:
-    """
-    读取一条目标输入（交互模式）。
-
-    Args:
-        prompt_primary: 无参数可调用 → 主提示符下输入的一行 str
-        prompt_continuation: 无参数可调用 → 续行提示符下输入的一行 str
-        stdin: 输入流（默认 sys.stdin；测试注入用）
-        pending_fn: 无参数可调用 → bool（stdin 是否还有待读内容；测试注入用）
-        drain_fn: 无参数可调用 → list[str]（排干剩余输入；测试注入用）
-
-    Returns:
-        合并后的输入文本（两端空白已去除，内部换行保留）；
-        EOF / Ctrl+C 时返回 None。
-    """
+    """读取一条目标输入（交互模式）。"""
     stdin = stdin if stdin is not None else sys.stdin
+
+    # ↑ POSIX 默认路径统一成单一字节读取者；显式注入 pending_fn/drain_fn（测试、嵌入方）
+    #   时保持原有流程，避免破坏既有调用约定。
+    if sys.platform != "win32" and pending_fn is None and drain_fn is None:
+        if prompt_primary is None:
+            prompt_primary = lambda: _write_prompt("> ")
+        if prompt_continuation is None:
+            prompt_continuation = lambda: _write_prompt("… ")
+        return _read_goal_posix(stdin, prompt_primary, prompt_continuation)
+
     if prompt_primary is None:
         prompt_primary = lambda: input("> ")
     if prompt_continuation is None:
@@ -239,6 +314,9 @@ def read_goal(prompt_primary=None, prompt_continuation=None,
         try:
             line = prompt_primary() if not blocks else prompt_continuation()
         except (EOFError, KeyboardInterrupt):
+            return None
+        # ↑ 提示符回调可能只负责"显示"（返回 None）：这时当成本次没有输入，别拿 None 去 rstrip
+        if line is None:
             return None
 
         if line == "" and not blocks:

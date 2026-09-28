@@ -1,24 +1,5 @@
 """任务监管者（Supervisor）：在 agent 想收尾时，由一个**独立的模型**审"目标到底做完没有"，
-没做完就给出**下一步指令**，让循环继续。
-
-为什么需要它（实测数据）：单循环唯一的停止条件是"模型给出最终回答"；而唯一能拦住
-提前收尾的机制（完成度闸门）依赖 agent 自己的清单——**实测最近 8 次运行里
-`todo_write`/`task` 调用数全是 0**，闸门因此从未触发。于是"写小说写一章就回来问一次"
-成了常态：模型认为交付了一章 = 交付了任务，而没有任何角色去对照目标检查。
-
-与既有角色的区别：
-- Guardian 只管**安全**（这个操作危不危险），不看目标完成度；
-- Team 的 Reviewer 只在 `--team` 模式里跑，且它的意见只流向汇总、不回炉；
-- 本模块是**质量/完成度**的把关：对照目标审"还差什么"，并把指令发回循环。
-
-设计要点：
-- **跨厂商**：监管者默认用另一家的模型，与执行任务的模型不同源——
-  同源模型的自评容易自我确认。
-- **fail-open**：监管者超时/报错/输出无法解析时**放行**（判为完成）并记警告。
-  一个坏掉的裁判不该把正常任务卡死；宁可漏放，不可误卡。
-- **有界**：最多 SUPERVISOR_MAX_ROUNDS 轮，避免与模型无限拉锯。
-- **只给指令，不动手**：它返回的是"下一步做什么"，执行仍由主循环负责。
-"""
+一个坏掉的裁判不该把正常任务卡死；宁可漏放，不可误卡。"""
 import json
 import re
 import threading
@@ -105,9 +86,7 @@ class Supervisor:
                 {"role": "user", "content": prompt},
             ])
         except Exception as e:                  # noqa: BLE001
-            # 读 SUPERVISOR_FAIL_OPEN：这个配置项此前**定义了却从没被读过**
-            # （guardian.py 的同名开关是生效的），于是用户设 false 想让「坏掉的裁判
-            # 不放行」也毫无变化 —— 超时/报错仍然静默判完成（2026-09-22 审计）。
+            # 读 SUPERVISOR_FAIL_OPEN：这个配置项之前**定义了却从没被读过**（guardian.py 的同名开关是生效的），于是用户设 false 想让「坏掉的裁判不放行」也毫无变化 —— 超时/报错仍然静默判完成。
             if not self.config.get("fail_open", True):
                 return SupervisorVerdict(
                     verdict="continue", used=True,
@@ -173,10 +152,7 @@ class Supervisor:
 
 def build_supervisor_llm(main_llm=None):
     """构造监管者用的 LLM：默认**另一个厂商**的端点。
-
-    跨厂商是刻意的：同源模型审自己的活容易自我确认（"看起来挺完整"）。
-    配置留空 api_key/base_url 时回退主 LLM 端点（至少还能用），并在调用方警告。
-    """
+    配置留空 api_key/base_url 时回退主 LLM 端点（至少还能用），并在调用方警告。"""
     model = str(SUPERVISOR_CONFIG.get("model") or "").strip()
     if not model:
         return main_llm

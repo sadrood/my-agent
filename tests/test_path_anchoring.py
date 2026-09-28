@@ -1,16 +1,5 @@
 # -*- coding: utf-8 -*-
-"""存储路径锚定项目根的回归测试。
-
-同一个坑在这个仓库里被踩了三次（browser profile、memory/session 存储、经验库缓存
-与各 save_dir），所以把所有相对路径收敛到 config.resolve_under_root 一处，
-并在这里钉住行为。
-
-实测过的后果：
-- 从 C:\\Users\\Administrator 启动时 `./memory/browser_profile` → 该目录下的空 profile，
-  表现为"自动化浏览器每次打开都没有记录"；
-- `./memory/experience_lib` → 另一个不存在的目录，**云经验库看起来凭空变空**；
-- `./rollouts` → 运行日志找不到；`./generated_*` → 产物落到启动目录。
-"""
+"""存储路径锚定项目根的回归测试。"""
 import os
 import subprocess
 import sys
@@ -47,11 +36,7 @@ class TestResolveUnderRoot:
         assert resolve_under_root(target) == target
 
     def test_drive_relative_path_gets_current_drive(self):
-        r"""Windows 的 "驱动器相对" 路径（\foo，无盘符）按 abspath 语义补当前盘符。
-
-        钉住这条语义，免得以后有人以为 isabs(r"\foo") 是 True——
-        它在 Windows 上是 False，会被当成相对路径处理。
-        """
+        """Windows 的 "驱动器相对" 路径（\foo，无盘符）按 abspath 语义补当前盘符。"""
         out = resolve_under_root(os.path.join(os.sep, "custom", "place"))
         assert os.path.isabs(out), "结果必须是可用的绝对路径"
         assert out.endswith(os.path.join("custom", "place"))
@@ -95,9 +80,7 @@ class TestConfigPathsAreAnchored:
 
 class TestDriftedLaunchInSubprocess:
     """真正模拟"从别的目录启动"：新进程 + 不同 cwd 下读配置。
-
-    只 monkeypatch.chdir 是测不到的——配置在 import 时就解析完了，必须换进程。
-    """
+    只 monkeypatch.chdir 是测不到的——配置在 import 时就解析完了，必须换进程。"""
 
     CODE = (
         "import os, sys\n"
@@ -128,14 +111,7 @@ class TestDriftedLaunchInSubprocess:
 
 
 class TestSchedulerAndGoalAnchoring:
-    """定时任务与持久目标的存储路径必须锚定项目根。
-
-    实测故障（2026-09-22 审计）：`agent/scheduler.py` 的 `_SCHED_FILE` 与
-    `agent/goal.py` 的 `_GOAL_DIR` 用的是裸相对路径（按 **cwd** 解析），而同仓库
-    `tasks.py` / `session.py` / `todo.py` 都已用 `resolve_under_root` 收敛过这个坑
-    —— 它们正是漏网的第四、第五份。表现为从别的目录启动后，定时任务与 /goal 目标
-    "凭空消失"（其实被写到了启动目录）。
-    """
+    """定时任务与持久目标的存储路径必须锚定项目根。"""
 
     def test_scheduler_file_is_anchored(self):
         import os

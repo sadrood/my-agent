@@ -1,21 +1,6 @@
-"""
-视频生成模块（异步任务：创建 → 轮询 → 下载）。
-
-实测契约（备用供应商的视频模型）：
-    创建: POST {base_url}/videos
-          {"model": "...", "prompt": "...", "seconds": "5",
-           "mode": "text", "size": "720P", "aspect_ratio": "16:9"}
-          → {"id": "task_xxx", "video_id": "task_xxx", "status": "queued", ...}
-    查询: GET  {query_base}/<查询路径>?video_id=<ID>&model_name=<模型>
-          → {"status": "queued|in_progress|completed|failed",
-             "progress": 0-100, "url": "<mp4 url | null>", "error": null}
-          ⚠️ 查询端点在 **HOST 根路径**（不在 /v1 下），故单独配 query_base。
-
-与图像生成的最大差异：**异步任务**——创建后要轮询；5 秒/720P 实测约 41 秒
-完成，更长视频更久，因此等待有上限，超时后把 task_id 交回调用方稍后查询。
-
-配置：config.VIDEO_GEN_CONFIG（环境变量 VIDEO_GEN_*）。
-"""
+"""视频生成模块（异步任务：创建 → 轮询 → 下载）。
+⚠️ 查询端点在 **HOST 根路径**（不在 /v1 下），故单独配 query_base。
+完成，更长视频更久，因此等待有上限，超时后把 task_id 交回调用方稍后查询。"""
 import json
 import os
 from datetime import datetime
@@ -28,8 +13,7 @@ from config import VIDEO_GEN_CONFIG
 _STATUS_DONE = ("completed", "succeeded", "success")
 _STATUS_FAILED = ("failed", "error", "canceled", "cancelled")
 
-# 轮询期可重试的上游错误（限流/网关抖动/网络闪断）。
-# 这些**不代表任务失败**——任务还在服务端跑，重试即可，别让模型重做。
+# 轮询期可重试的上游错误（限流/网关抖动/网络闪断）。这些**不代表任务失败**——任务还在服务端跑，重试即可，别让模型重做。
 _TRANSIENT_MARKERS = (
     "429", "500", "502", "503", "504",
     "查询过于频繁", "too many requests", "rate limit",
@@ -44,27 +28,20 @@ def _is_transient_query_error(err: Exception) -> bool:
 
 
 def _query_base_from(base_url: str) -> str:
-    """由 base_url 推导查询端点主机（去掉结尾的 /v1）。
-
-    查询端点在 HOST 根路径：https://api.agnes-ai.cn/agnesapi?...
-    而生成端点在 .env 里配置的端点/videos
-    """
+    """由 base_url 推导查询端点主机（去掉结尾的 /v1）。"""
     base = (base_url or "").rstrip("/")
     if base.endswith("/v1"):
         return base[:-3]
     return base
 
 
-# 供应商合法时长区间（上游实测：3s 会被拒；上限 12s）
+# 供应商合法时长区间（上游3s 会被拒；上限 12s）
 _SECONDS_MIN = 4.0
 _SECONDS_MAX = 12.0
 
 
 def _normalize_seconds(value, lo: float = None, hi: float = None) -> str:
-    """把任意时长输入归一化到供应商合法区间，返回字符串（如 '5' / '4.5'）。
-
-    越界不再原样发出（那会换来一次无效请求 + 一轮模型试错），而是就近 clamp。
-    """
+    """把任意时长输入归一化到供应商合法区间，返回字符串（如 '5' / '4.5'）。"""
     try:
         num = float(str(value).strip())
     except (TypeError, ValueError):
@@ -177,19 +154,7 @@ class VideoGenModel:
 
     def wait(self, video_id: str, max_wait: float = None,
              on_progress=None) -> dict:
-        """轮询直到完成/失败/超时。
-
-        Returns:
-            {"status": ..., "url": ..., "progress": ..., "timed_out": bool,
-             "error": ...}
-            超时时 status 为最后一次观测值、timed_out=True（任务仍在跑，
-            调用方可用 video_id 稍后再查）。
-
-        轮询期的**瞬时错误不计为任务失败**：实测 6 秒一次的查询会被上游
-        拒绝（HTTP 429 "查询过于频繁"），旧实现直接抛错，模型只好重做一遍，
-        白烧一次视频配额（Token Plan 仅 500 秒/天）外加两分钟等待。
-        这类错误只降速重试，直到 deadline 或任务真正完成。
-        """
+        """轮询直到完成/失败/超时。"""
         import time
         deadline = time.time() + (max_wait if max_wait is not None else self.max_wait)
         last: dict = {"status": "unknown", "progress": 0, "url": None, "error": None}
@@ -255,14 +220,7 @@ class VideoGenModel:
                  aspect_ratio: str = None, wait: bool = True,
                  model: str = None, save: bool = True,
                  max_wait: float = None, on_progress=None) -> dict:
-        """创建任务并在需要时等待完成。
-
-        Returns:
-            {"video_id", "status", "url", "local_path", "timed_out",
-             "model", "seconds", "size", "prompt"}
-            - wait=False：只创建，立即返回 video_id（适合超长视频）
-            - 超时：timed_out=True，video_id 可稍后查询，不丢任务
-        """
+        """创建任务并在需要时等待完成。"""
         created = self.create(prompt, seconds=seconds, size=size,
                               aspect_ratio=aspect_ratio, model=model)
         vid = created["video_id"]
@@ -273,9 +231,7 @@ class VideoGenModel:
             "local_path": None,
             "timed_out": False,
             "model": model or self.model,
-            # 报**实际生效**的时长：`create()` 会把越界值 clamp 到 [4,12]，而旧实现
-            # 这里写的是原始请求值 —— 请求 3s 实际出 4s，工具却报"3s"，后续按 3s
-            # 对齐配音/字幕就会错位（2026-09-22 审计）。
+            # 报**实际生效**的时长：`create()` 会把越界值 clamp 到 [4,12]，而旧实现这里写的是原始请求值 —— 请求 3s 实际出 4s，工具却报"3s"，后续按 3s对齐配音/字幕就会错位。
             "seconds": str(created.get("seconds") or _normalize_seconds(seconds or self.seconds)),
             "size": size or self.size,
             "prompt": prompt,

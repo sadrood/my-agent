@@ -1,16 +1,4 @@
-"""
-云经验库工具（experience）：跨 Agent 的经验学习与沉淀。
-
-- search <query>：在私有学习库 + 公共分享库（已配置时）的本地克隆里检索
-  相关经验条目，返回有限预算的注入文本（防提示注入：条目仅作参考资料）。
-- save {domain, topic, body, tags}：把一次复盘/经验写成结构化 md 条目，
-  经密钥扫描与长度校验后 commit + push 到【私有经验仓】；
-  公共分享库不直推（经 PR 人工合并，防投毒）。
-
-仓库协议（约定）：
-  库根可选 experiences/ 目录，条目为 Markdown，frontmatter 含
-  title / domain / tags / date。缺目录时扫描库根 *.md（跳过 README/index）。
-"""
+"""云经验库工具（experience）：跨 Agent 的经验学习与沉淀。"""
 import datetime as _dt
 import os
 import re
@@ -24,8 +12,7 @@ from config import EXPERIENCE_CONFIG, resolve_under_root
 from tools.base import BaseTool, ToolResult
 
 _SECRET_PATTERNS = [
-    # 允许 key 体内出现 `-` / `_`：`sk-ant-api03-…`、`sk-proj-…` 这类带连字符的
-    # 形态此前完全匹配不到（2026-09-22 审计实测）。
+    # 允许 key 体内出现 `-` / `_`：`sk-ant-api03-…`、`sk-proj-…` 这类带连字符的形态之前完全匹配不到。
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{14,}"),
     re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b"),
@@ -39,22 +26,12 @@ _SECRET_PATTERNS = [
 
 def _safe_domain_dir(repo_path: str, domain: str) -> str:
     """把 domain 映射成经验仓**之内**的安全子目录。
-
-    旧实现只把 `/` 换成平台分隔符就 join —— 既不挡 `..`，也不挡绝对路径
-    （`os.path.join` 遇绝对路径会丢弃前面的部分）。于是
-    `domain: "C:/Windows/Temp/pwn"` 能把文件写到仓外，而随后的 `git add` 因为
-    relpath 指向仓外而失败，工具报"保存失败"**却把文件留在了磁盘上**
-    （2026-09-22 审计，实测可复现）。
-
-    逐段净化：丢掉空段 / `.` / `..`，把分隔符、盘符、非法字符统一换成 `_`；
-    最后再兜一次"必须落在 experiences/ 之内"，防平台差异（大小写、短名）漏网。
-    """
+    最后再兜一次"必须落在 experiences/ 之内"，防平台差异（大小写、短名）漏网。"""
     base = os.path.join(repo_path, "experiences")
     segments: List[str] = []
     for raw in str(domain or "").replace("\\", "/").split("/"):
         seg = raw.strip().strip(".")
-        # `\w` 在 Python 3 里是 Unicode 语义，已覆盖中日韩字符；保留 `-` 便于
-        # 目录名可读。其余（分隔符、`:`、`*`、盘符…）统一换成 `_`。
+        # `\w` 在 Python 3 里是 Unicode 语义，已覆盖中日韩字符；保留 `-` 便于目录名可读。其余（分隔符、`:`、`*`、盘符…）统一换成 `_`。
         seg = re.sub(r"[^\w-]+", "_", seg).strip("_")
         if seg:
             segments.append(seg[:60])
@@ -78,12 +55,7 @@ def _clear_stale_lock(repo_dir: str) -> None:
 
 def _git(args: List[str], cwd: str, check: bool = True) -> Tuple[int, str]:
     """执行 git（禁交互提示；继承项目仓库 http.proxy 以便走本机代理）。
-
-    对 `index.lock` 冲突做重试：本机常同时跑多个 Agent 会话（AGENTS.md 第 12 条），
-    它们共用同一份经验仓缓存克隆，`add`/`commit`/`push` 会撞锁。旧实现直接失败，
-    表现为"保存失败"且工作区留下未提交的 md；更糟的是 git 被 180s 超时杀掉时会
-    **残留 index.lock**，之后所有 save 一直失败、只能人工删（2026-09-22 审计）。
-    """
+    **残留 index.lock**，之后所有 save 一直失败、只能人工删。"""
     cmd = ["git"]
     try:
         proxy = subprocess.run(["git", "config", "--get", "http.proxy"],
@@ -332,9 +304,8 @@ class ExperienceTool(BaseTool):
         if len(body) > int(cfg.get("entry_max_chars", 8000)):
             return ToolResult(success=False, output="",
                               error=f"body 过长（>{cfg.get('entry_max_chars')} 字），请精简。")
-        # topic / domain 也要扫：它们会写进 frontmatter（见下面的 entry）和 git
-        # commit message，只扫 body+tags 时把 key 写进 topic 就能明文推上远端仓
-        # （2026-09-22 审计）。
+        # topic / domain 也要扫：它们会写进 frontmatter（见下面的 entry）和 gitcommit message，只扫 body+tags 时把 key 写进 topic 就能明文推上远端仓
+
         scan = "\n".join([body, topic, domain, " ".join(tags)])
         for pat in _SECRET_PATTERNS:
             if pat.search(scan):

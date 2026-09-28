@@ -222,8 +222,7 @@ class TestSnapshot:
         second_hash = checkpoint(str(tmp_path), "edit a.py b.py")
         assert second_hash
 
-        # 回滚到第一次检查点（它挂在 refs/snapshots 上，不是 HEAD 祖先）：
-        # a.py 恢复 v1，b.py 应被移除
+        # 回滚到第一次检查点（它挂在 refs/snapshots 上，不是 HEAD 祖先）：a.py 恢复 v1，b.py 应被移除
         new_head = rollback_to(str(tmp_path), base_hash)
         assert new_head and new_head != second_hash
         assert (tmp_path / "a.py").read_text(encoding="utf-8") == "v1"
@@ -246,14 +245,7 @@ class TestSnapshot:
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_rollback_restores_uncommitted_worktree_drift(self, tmp_path):
-        """回滚基准必须是**工作区**，不是 HEAD 的树。
-
-        实测故障（2026-09-22 审计）：checkpoint 只挂 refs/snapshots/*、从不推进
-        HEAD（本模块自己的设计），所以被改坏的文件全在工作区、不在任何一棵树里。
-        旧实现拿"最新快照 / HEAD 的树"当基准做 `diff`，得到**空 diff** → 一个文件都
-        不恢复，函数却返回非空 HEAD，`dashboard/server.py` 按"返回非空即成功"判定 →
-        用户看到"已回滚"，文件纹丝不动。
-        """
+        """回滚基准必须是**工作区**，不是 HEAD 的树。"""
         import subprocess
         from agent.snapshot import ensure_repo, snapshot, rollback_to, _head
 
@@ -273,13 +265,7 @@ class TestSnapshot:
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_rollback_does_not_sweep_user_staged_work(self, tmp_path):
-        """回滚的归因提交不能把用户**已暂存**的改动一起提交。
-
-        实测故障（2026-09-22 审计）：`_commit` 只做 `git add -A -- <touched>`，
-        随后却执行**不带 pathspec** 的 `git commit` —— 提交的是整个真实索引。
-        用户 `git add user_wip.txt` 之后回滚一次，那个文件就跟着 agent 的
-        "rollback: …（my-agent）" 一起进了历史。
-        """
+        """回滚的归因提交不能把用户**已暂存**的改动一起提交。"""
         import subprocess
         from agent.snapshot import ensure_repo, checkpoint, rollback_to
 
@@ -307,12 +293,7 @@ class TestSnapshot:
 
     @pytest.mark.skipif(not _git_available(), reason="git 不可用")
     def test_rollback_removes_checkpointed_new_file(self, tmp_path):
-        """快照之后**被 checkpoint 过**的新文件要删掉（changed_file 生产路径）。
-
-        实测故障（2026-09-22 审计）：`git diff` 看不见未跟踪文件，而通过
-        `checkpoint(changed_file=...)` 新建的文件只出现在**后续快照的树**里 ——
-        不并上"与最新快照比较"这一路，回滚就会把它们残留下来。
-        """
+        """快照之后**被 checkpoint 过**的新文件要删掉（changed_file 生产路径）。"""
         import subprocess
         from agent.snapshot import ensure_repo, checkpoint, rollback_to
 
@@ -342,13 +323,7 @@ class TestSnapshot:
 
 
 class TestEditEmptyOldString:
-    """空 `old_string` 不能当"通配"用。
-
-    实测故障（2026-09-22 审计）：`str.count("")` 返回 len+1（每个字符间隙都算一次
-    匹配），所以空 old_string + `replace_all=true` 会让 `str.replace("", "X")` 把
-    `abc\\ndef\\n` 打成 `XaXbXcX\\nXdXeXfX\\nX`，返回值却还是
-    `success=True 已修改 … 替换 9 处` —— 静默毁文件，模型收到的是成功回执。
-    """
+    """空 `old_string` 不能当"通配"用。"""
 
     def test_replace_all_with_empty_is_refused(self, tmp_path, monkeypatch):
         from config import TOOL_CONFIG
@@ -425,13 +400,8 @@ class TestEditPreflight:
 
     def test_preflight_timeout_bounds_wall_clock(self, tmp_path, monkeypatch):
         """超时必须**真的按墙钟返回**，而不是被孙进程拖着。
-
-        实测故障（2026-09-22 审计）：`subprocess.run(shell=True, timeout=)` 在被改
-        模块的相关测试留下常驻子进程时约束不了墙钟 —— 被 kill 的只是 shell，孙进程
-        （真正的 pytest）仍持有继承来的管道写端，TimeoutExpired 分支里那句
-        `communicate()` 会一直等它（实测 timeout=1 的命令拖了 5.09s 才返回）。
-        现在输出落临时文件、只看直接子进程，超时即返回并杀进程树。
-        """
+        `communicate()` 会一直等它（timeout=1 的命令拖了 5.09s 才返回）。
+        现在输出落临时文件、只看直接子进程，超时即返回并杀进程树。"""
         import sys as _sys
         import time as _time
         from config import TOOL_CONFIG, TEST_CONFIG
@@ -690,16 +660,7 @@ class TestDiffMetadataFallback:
 
 
 class TestLineEndingsPreserved:
-    """编辑不能把整个文件的换行风格翻掉。
-
-    实测故障（2026-09-22 审计）：`edit` 用 universal newlines 读文件（CRLF 已变 LF），
-    写回时又用 `newline=""` —— 于是「只改一行」会把整个文件的 CRLF 变成 LF；
-    `.bak` 是文本模式写的（LF 又被翻成 CRLF），回滚也还原不回去。
-    在 Windows 仓库里的表现是 git 里出现整文件 diff，还会破坏 snapshot 的逐操作提交。
-
-    注意：检测必须看**原始字节** —— `content` 里的 CRLF 已经被 universal newlines
-    吃掉了，在它里面找换行符恒为 False（我第一版修复就踩了这个）。
-    """
+    """编辑不能把整个文件的换行风格翻掉。"""
 
     CRLF = "\r\n"
 

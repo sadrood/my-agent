@@ -1,11 +1,4 @@
-"""
-短剧工厂服务对接的离线测试（httpx 打桩，不联网、不需要真的装短剧工厂服务）。
-
-契约来自上游源码核实（2026-09-17）：
-- 登录: POST /api/login/login {username,password} → {"data":{"token":"Bearer <jwt>"}}
-- 其余: Authorization: <token>（token 本身已含 "Bearer " 前缀）
-- 路径: 就是 router.ts 里 app.use 的原样路径
-"""
+"""短剧工厂服务对接的离线测试（httpx 打桩，不联网、不需要真的装短剧工厂服务）。"""
 import json
 import sys
 import types
@@ -128,10 +121,7 @@ class TestAuth:
 
     def test_loopback_bypasses_env_proxy(self, fake_http):
         """回归：本机服务不得走环境代理。
-
-        实测：短剧工厂服务没启动时，httpx 读环境代理配置会返回**莫名其妙的 HTTP 502**
-        （本该是"连接被拒绝"），把排查方向带偏。回环地址必须 trust_env=False。
-        """
+        （本该是"连接被拒绝"），把排查方向带偏。回环地址必须 trust_env=False。"""
         from models.toonflow import _is_loopback
 
         fake = fake_http(lambda *a, **kw: FakeResponse({"data": {"token": "Bearer T"}}))

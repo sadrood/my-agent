@@ -160,9 +160,7 @@ class TestGoalLoop:
                 return ToolResult(success=True, output="不该到达")
 
             def execute_json(self, arguments):
-                # 2s（远超 0.4s 超时）：若超时失效会等满并返回"不该到达"，
-                # 由**行为判据**检出，无需依赖时间阈值（挂起线程会拖慢同文件
-                # 后续测试，纯耗时断言在高负载下不可靠）
+                # 2s（远超 0.4s 超时）：若超时失效会等满并返回"不该到达"，由**行为判据**检出，无需依赖时间阈值（挂起线程会拖慢同文件后续测试，纯耗时断言在高负载下不可靠）
                 time.sleep(2)
                 return ToolResult(success=True, output="不该到达")
 
@@ -187,10 +185,7 @@ class TestGoalLoop:
         assert "超时" in result["output"]
         failed = [d for t, d in events if t == "tool_result" and not d.get("success")]
         assert failed and "超时" in failed[-1].get("output", "")
-        # 2) 诚实记账：本回合没有任何工具成功，任务不应被记成成功。
-        #    此前超时被当成"被安全策略拦截"返回（blocked_reason 非空），调用方
-        #    因此不计入 errors、不推进 last_failure_idx，最终照样 success=True
-        #    —— 一次卡死的工具被记成"任务成功"并写进经验库（审计发现的假成功）。
+        # 2) 诚实记账：本回合没有任何工具成功，任务不应被记成成功。之前超时被当成"被安全策略拦截"返回（blocked_reason 非空），调用方因此不计入 errors、不推进 last_failure_idx。
         assert result["success"] is False, (
             "工具超时后无任何成功调用，success 必须为 False（否则经验库学到错误教训）")
         # 3) 极宽松兜底：只拦"整体卡死"
@@ -237,13 +232,9 @@ class TestGoalLoop:
         result = ex.execute_goal_loop(**_loop_args())
         elapsed = time.time() - t0
         assert "超时" in result["output"]
-        # 诚实记账（同 test_hung_tool_times_out_and_loop_continues）：
-        # 批内工具全部超时 → 不得报成成功
+        # 诚实记账（同 test_hung_tool_times_out_and_loop_continues）：批内工具全部超时 → 不得报成成功
         assert result["success"] is False
-        # 核心保证：并行批里出现超时判定，且循环继续收尾（不冻结）。
-        # 注：不用"每个调用都超时"这种过强断言——第一个调用超时后会
-        # reset_tool 重建工具实例，第二个调用的时序在整套测试高负载下
-        # 存在竞态（实测偶发它恰好跑完），而生产行为本身是正确的。
+        # 核心保证：并行批里出现超时判定，且循环继续收尾（不冻结）。注：不用"每个调用都超时"这种过强断言——第一个调用超时后会 reset_tool 重建工具实例，第二个调用的时序在整套测试高负载下存在竞态（偶发它恰好跑完）
         assert any("超时" in (c.get("output") or "") for c in result["tool_calls"]), \
             [c.get("output") for c in result["tool_calls"]]
         # 兜底时间上限：只拦整体卡死
@@ -508,10 +499,7 @@ from tools.base import BaseTool, ToolResult
 
 class _SlowSafeTool(BaseTool):
     """并行安全测试工具：sleep 后返回固定输出，并记录**并发峰值**。
-
-    用并发计数而不是耗时阈值判断"是否真并行"：时间阈值在整套测试的
-    高负载下会假失败，而峰值并发只反映真实重叠情况。
-    """
+    高负载下会假失败，而峰值并发只反映真实重叠情况。"""
 
     risk_level: str = "low"
     approval: str = "auto"
@@ -652,8 +640,7 @@ class TestUnparseableArgumentGuard:
         )
         result = ex.execute_goal_loop(**_loop_args(), event_sink=lambda t, d: events.append((t, d)))
 
-        # 截断参数不真正下发给 file 工具：事件里应出现可行动的失败结果。
-        # tool_result 事件把错误文案放在 output 字段（成功时才是正文）
+        # 截断参数不真正下发给 file 工具：事件里应出现可行动的失败结果。tool_result 事件把错误文案放在 output 字段（成功时才是正文）
         errors = [d.get("output", "") for t, d in events
                   if t == "tool_result" and not d.get("success")]
         assert any("截断" in e or "length" in e for e in errors), errors
@@ -686,13 +673,7 @@ class TestUnparseableArgumentGuard:
 
 
 class TestCompletionGate:
-    """完成度闸门：模型想收尾，但它自己列的清单里还有没做完的活 → 推回去继续。
-
-    用户诉求原话："那就让agent做完任务再结束"。
-
-    两个清单来源必须都算数：全局任务板（task，带时间戳）和会话待办
-    （todo_write，模型实际在用的那个——实测 21 份 rollout 里任务板 0 次调用）。
-    """
+    """完成度闸门：模型想收尾，但它自己列的清单里还有没做完的活 → 推回去继续。"""
 
     def _env(self, monkeypatch, tmp_path, todos=None, tasks=None, **knobs):
         """隔离两个清单的落盘位置，避免测试写到真实 memory/ 里去。"""
@@ -806,11 +787,7 @@ class TestCompletionGate:
 
 
 class TestDynamicBudget:
-    """动态轮数预算：有进展就续期，原地打转才提前停。
-
-    用户痛点原话："总是任务没完成轮数耗尽，导致任务中断"——固定上限对简单任务浪费、
-    对复杂任务必然半途被砍。这里钉住新语义（细节见 agent/loop_budget.py）。
-    """
+    """动态轮数预算：有进展就续期，原地打转才提前停。"""
 
     def _exec(self, script, monkeypatch, **knobs):
         from config import TOOL_CONFIG
@@ -851,11 +828,7 @@ class TestDynamicBudget:
         assert result["budget"]["used"] <= 4
 
     def test_new_approaches_that_fail_are_not_treated_as_spinning(self, monkeypatch):
-        """换了新做法但失败 → 不算打转（调试任务里连续失败是正常推进）。
-
-        预算不续期，所以最终以 "exhausted" 结束——理由是"任务比预期复杂"，
-        而不是错判成"原地打转"。
-        """
+        """换了新做法但失败 → 不算打转（调试任务里连续失败是正常推进）。"""
         script = [
             LLMToolResponse(content="",
                             tool_calls=[ToolCall(str(i), "terminal",
@@ -949,3 +922,134 @@ class TestDynamicBudget:
                                       event_sink=lambda t, d: events.append((t, d)))
         assert not [t for t, _ in events if t == "stagnation_warning"]
         assert result["success"] is True
+
+
+class TestUpstreamFailureIsNotRoundCap:
+    """上游连续 429 导致收尾：stop_reason=interrupted，文案不得提"轮数上限"。"""
+
+    def test_llm_failure_marks_interrupted(self):
+        class AlwaysFailLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_with_tools(self, messages, tools, **kwargs):
+                self.calls += 1
+                raise RuntimeError(
+                    "Error code: 429 - {'error': {'message': 'tpm exhausted'}}")
+
+        ex = _make_executor(AlwaysFailLLM())
+        result = ex.execute_goal_loop(**_loop_args(), event_sink=lambda t, d: None)
+
+        assert result["success"] is False
+        assert result["stop_reason"] == "interrupted"
+        assert result["budget"]["stop_reason"] == "interrupted"
+        assert result["budget"]["used"] < result["budget"]["limit"]   # 预算并未耗尽
+        assert "达到任务最大操作轮数" not in result["output"]
+        assert "429" in result["output"]
+        assert "轮数预算并未耗尽" in result["output"]
+
+
+class TestQuotaRetryBudget:
+    """429 限流用独立预算：配额按分钟窗口重置，等得起才熬得过去。"""
+
+    class _AlwaysFail:
+        def __init__(self, message, delay: float = 0.0):
+            self.message = message
+            self.delay = delay
+            self.calls = 0
+
+        def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            if self.delay:
+                time.sleep(self.delay)
+            raise RuntimeError(self.message)
+
+    def _loop(self, monkeypatch, llm, **budgets):
+        from config import TOOL_CONFIG
+        for key, value in budgets.items():
+            monkeypatch.setitem(TOOL_CONFIG, key, value)
+        # 真实退避会拖慢测试：直接跳过睡眠（返回 False = 没有停止请求）
+        monkeypatch.setattr(Executor, "_sleep_interruptible",
+                            lambda self, delay, stop_event: False, raising=True)
+        ex = _make_executor(llm)
+        return ex.execute_goal_loop(**_loop_args(), event_sink=lambda t, d: None)
+
+    def test_quota_keeps_retrying_past_the_normal_budget(self, monkeypatch):
+        llm = self._AlwaysFail("Error code: 429 - {'error': {'message': 'tpm exhausted'}}")
+        result = self._loop(monkeypatch, llm,
+                            llm_turn_retry_budget=0.01, llm_quota_retry_budget=600,
+                            llm_quota_min_attempts=4)
+
+        assert llm.calls >= 4, "普通预算早已耗尽，限流预算必须让它继续试"
+        assert result["stop_reason"] == "interrupted"
+
+    def test_normal_error_still_gives_up_at_its_own_budget(self, monkeypatch):
+        # 每次调用耗时 20ms、预算 10ms：第一次重试就会判定超预算
+        llm = self._AlwaysFail("connection reset by peer", delay=0.02)
+        self._loop(monkeypatch, llm,
+                   llm_turn_retry_budget=0.01, llm_quota_retry_budget=600,
+                   llm_quota_min_attempts=4)
+
+        assert llm.calls == 1, "非限流错误超预算即放弃，不该硬怼"
+
+    def test_quota_min_attempts_is_the_floor(self, monkeypatch):
+        llm = self._AlwaysFail("Error code: 429 - rate limit exceeded")
+        self._loop(monkeypatch, llm,
+                   llm_turn_retry_budget=0.01, llm_quota_retry_budget=0.01,
+                   llm_quota_min_attempts=3)
+
+        assert llm.calls >= 3, "预算再小，限流也保底试满 quota_min_attempts 次"
+
+
+class TestEndlessQuotaRetry:
+    """限流不该被"试几次/等多久"提前判死：两个 0 表示不限，直到成功或用户停止。"""
+
+    class _FailThenOk:
+        def __init__(self, failures):
+            self.failures = failures
+            self.calls = 0
+
+        def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise RuntimeError("Error code: 429 - {'message': 'tpm exhausted'}")
+            return LLMToolResponse(content="最终答案：做完了")
+
+    def _run(self, monkeypatch, llm, **cfg):
+        from config import TOOL_CONFIG
+        for key, value in cfg.items():
+            monkeypatch.setitem(TOOL_CONFIG, key, value)
+        monkeypatch.setattr(Executor, "_sleep_interruptible",
+                            lambda self, delay, stop_event: False, raising=True)
+        return _make_executor(llm).execute_goal_loop(**_loop_args(),
+                                                     event_sink=lambda t, d: None)
+
+    def test_zero_means_unlimited(self, monkeypatch):
+        llm = self._FailThenOk(failures=8)          # 旧实现上限 6 次 → 必然判死
+        result = self._run(monkeypatch, llm, llm_max_attempts=0,
+                           llm_quota_retry_budget=0, llm_quota_min_attempts=4)
+
+        assert llm.calls == 9, "0 = 不限，必须一直试到成功"
+        assert result["success"] is True
+
+    def test_max_attempts_still_bounds(self, monkeypatch):
+        llm = self._FailThenOk(failures=99)
+        result = self._run(monkeypatch, llm, llm_max_attempts=3, llm_quota_retry_budget=0)
+
+        assert llm.calls == 3, "给了有限次数就该停下，不能无限怼"
+        assert result["stop_reason"] == "interrupted"
+
+    def test_quota_budget_still_bounds_when_finite(self, monkeypatch):
+        # 每次调用耗时 30ms、预算 50ms：第 2 次重试时判定超预算（保底次数已满足）
+        class _SlowFail(self._FailThenOk):
+            def chat_with_tools(self, messages, tools, **kwargs):
+                self.calls += 1
+                time.sleep(0.03)
+                raise RuntimeError("Error code: 429 - {'message': 'tpm exhausted'}")
+
+        llm = _SlowFail(failures=0)
+        result = self._run(monkeypatch, llm, llm_max_attempts=0,
+                           llm_quota_retry_budget=0.05, llm_quota_min_attempts=2)
+
+        assert 2 <= llm.calls <= 4, "预算有限时按预算停；保底次数仍要满足"
+        assert result["stop_reason"] == "interrupted"

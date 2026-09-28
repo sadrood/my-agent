@@ -1,14 +1,4 @@
-"""意图识别回归（此前**没有任何测试文件**）。
-
-实测故障（2026-09-22 审计）：
-- `detect` 对站点名做裸子串匹配，`"帮我算一下 3600 元是多少美金"` 因为 "3600" 里
-  含 "360" 被判成命中 360、`"分析一下 ayy 这个缩写"` 命中 yy；
-- `_has_nav_command` 同样裸子串，`back` 命中 `backup`、`close` 命中 `closed`，
-  于是"打开淘宝，顺便看下 backup 目录"被判成含导航命令；
-- `resolve_url` 允许反向包含（查询是站名的一部分），`goto 微信` 解析成
-  work.weixin.qq.com（因为有个键叫"企业微信"）、`goto 书` 解析成小红书
-  —— 这些结果会**直接进 browser goto**，用户被带到完全不相干的站点。
-"""
+"""意图识别回归（之前**没有任何测试文件**）。"""
 import pytest
 
 from tools.intent_detector import get_intent_detector

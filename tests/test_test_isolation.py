@@ -1,19 +1,6 @@
 """测试套件自身的隔离：不许偷偷打真实外部 API。
-
-实测（2026-09-23 定位）：`build_supervisor_llm` 在 `SUPERVISOR_MODEL` 留空时回退到
 硬编码的 `"agnes-3.0-flash"`，key/base 再回退 `GUARDIAN_API_KEY` / `GUARDIAN_BASE_URL`。
-于是**任何建 Agent 的测试**都会真去请求外部端点（12 个测试文件都没关它），后果：
-
-- 违反 AGENTS.md「不依赖网络的测试优先（FakeLLM 脚本化）」；
-- 烧用户的真实 API 额度（每次全量跑都在打）；
-- 监管者的 verdict 会决定主循环要不要多跑一轮 —— 真模型回
-  `{"verdict": "continue"}` 时循环继续，而 FakeLLM 的脚本已被前面耗尽，
-  `test_agent_loop::test_simple_task_end_to_end` 因此拿到「（脚本耗尽）」当最终
-  答案而间歇失败（~25%）。
-
-由 `tests/conftest.py` 的 `_isolate_heavy_runtime_switches` 统一关闭；
-`tests/test_supervisor.py` 自行覆盖打开（那是它的测试对象）。
-"""
+答案而间歇失败（~25%）。"""
 
 
 class TestNoAccidentalNetworkCalls:

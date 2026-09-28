@@ -1,12 +1,5 @@
-"""配置中心的解析健壮性回归（此前没有测试文件）。
-
-实测故障（2026-09-22 审计）：`.env` 里把数字项**留空**（`LLM_DEFAULT_TEMPERATURE=`）
-会让 `import config` 直接崩 —— `os.getenv(key, "默认")` 在变量被设成空串时返回 `""`
-而不是默认值，`float("")` 抛 `ValueError`。而 `.env.example` 自己就用
-`VISION_API_KEY=` 这种留空写法引导用户按需填值，照抄给数字项留空太自然了。
-
-表现是 `python main.py` 连欢迎界面都出不来，只有一行裸 traceback。
-"""
+"""配置中心的解析健壮性回归（之前没有测试文件）。
+表现是 `python main.py` 连欢迎界面都出不来，只有一行裸 traceback。"""
 import os
 import subprocess
 import sys
@@ -68,12 +61,7 @@ def test_zero_value_is_not_treated_as_empty():
 
 
 class TestCursorOverlaySwitch:
-    """`COMPUTER_CURSOR_OVERLAY` 的取值形式：文档与该键的 docstring 一直写的是 `=1`。
-
-    回归背景：开关从 `os.getenv(...) in ("1","true","on","yes")` 挪进 config.py 时
-    只写成 `== "true"`，于是文档里写的 `=1` 静默失效（实测：os.getenv 读到 1，
-    config 里却是 False，浮层不显示）。
-    """
+    """`COMPUTER_CURSOR_OVERLAY` 的取值形式：文档与该键的 docstring 一直写的是 `=1`。"""
 
     def _value_with(self, raw: str) -> str:
         p = subprocess.run(
@@ -96,11 +84,7 @@ class TestCursorOverlaySwitch:
 
 
 class TestTestCommandPerPlatform:
-    """测试命令的默认值跟着平台选 venv 路径（Windows 是 Scripts、POSIX 是 bin）。
-
-    写死 Windows 那份时，Linux 上会照着一个不存在的解释器跑测试：一路失败，
-    且 EDIT_PREFLIGHT 打开时每次 edit 都会被回滚。
-    """
+    """测试命令的默认值跟着平台选 venv 路径（Windows 是 Scripts、POSIX 是 bin）。"""
 
     def test_default_follows_platform(self):
         from config import resolve_test_command
@@ -131,11 +115,7 @@ class TestTestCommandPerPlatform:
 
 
 class TestLlmConfigProvenance:
-    """`.env` 的 LLM_* 被 ANTHROPIC_* 静默顶掉时要能查得出来。
-
-    取值顺序 MY_AGENT_* → ANTHROPIC_* → LLM_*：环境里带着 ANTHROPIC_* 时，
-    `.env` 的端点/模型会被忽略 —— 看配置是一个端点、实际打的是另一个。
-    """
+    """`.env` 的 LLM_* 被 ANTHROPIC_* 静默顶掉时要能查得出来。"""
 
     def test_no_shadowing_when_only_llm_vars(self):
         from config import llm_config_provenance

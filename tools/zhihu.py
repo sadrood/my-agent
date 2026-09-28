@@ -1,22 +1,5 @@
 # -*- coding: utf-8 -*-
-"""知乎数据开放平台工具（ZhihuTool）。
-
-把开放平台的 9 类能力包成一条命令式工具，让 agent 直接用知乎的真实语料：
-    搜索知乎 / 全网搜索 / 热榜 / 直答 / 问题推荐 / 问题回答摘要
-    本人创作（全文、评论、账号与单篇数据）
-    我的内容 / 关注 / 收藏 / 收藏夹
-    知识库（列表、内容、上传、检索）
-    小工具（PDF 解析、PPT 生成）
-    额度查询
-
-设计取舍：
-- 参数用 snake_case（模型更好写），上游要的 PascalCase 由 models/zhihu 统一映射，
-  工具层不拼 URL；
-- 高频列表类命令（搜索/热榜/回答/知识库检索）**格式化成可读列表**再回给模型，
-  比丢一大坨 JSON 省 token 也更好用；结构化数据用 call 命令直取原始信封；
-- pdf_parse / ppt 是异步任务，默认轮询到终态并把产物下载到 output/zhihu/；
-- 额度按能力独立计数且有限（如热榜 100/日、小工具 10/日），description 里已标注。
-"""
+"""知乎数据开放平台工具（ZhihuTool）。"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
@@ -634,13 +617,7 @@ def _missing(cmd: str, field: str) -> ToolResult:
 
 
 def _wait_budget() -> float:
-    """轮询上限必须落在**执行器工具硬超时之内**。
-
-    `ZHIHU_TASK_TIMEOUT` 默认 600s，而 `agent/executor.py` 对非 browser 工具一律
-    300s 硬超时 —— 工具侧还在轮询、上层已经判超时并把整个 ToolResult 丢掉（含
-    task_id），任务却在知乎侧继续跑、小工具额度已消耗，模型只能再建一个
-    （2026-09-22 审计）。留 20s 余量让轮询自己收尾并把 task_id 交回给模型。
-    """
+    """轮询上限必须落在**执行器工具硬超时之内**。"""
     try:
         from config import TOOL_CONFIG
         tool_timeout = float(TOOL_CONFIG.get("tool_timeout", 300))
@@ -655,12 +632,7 @@ def _wait_budget() -> float:
 
 
 def _wait_task_or_pending(client, kind: str, task_id: str):
-    """轮询到终态；到点还没结果就把 task_id 交回给模型。
-
-    返回 `(final, early)`：`early` 非 None 时调用方直接把它当工具结果返回。
-    这里集中 `ZhihuError` 的导入与捕获 —— 调用点在别的方法里，拿不到
-    `execute_json` 那次局部 import。
-    """
+    """轮询到终态；到点还没结果就把 task_id 交回给模型。"""
     from models.zhihu import ZhihuError
     try:
         return client.wait_task(kind, task_id, timeout=_wait_budget()), None
@@ -669,11 +641,7 @@ def _wait_task_or_pending(client, kind: str, task_id: str):
 
 
 def _still_running(kind: str, task_id: str, err) -> ToolResult:
-    """轮询到点还没出终态：**按成功返回 task_id**，让模型用 task 命令继续查。
-
-    这里若报失败（或让异常往上抛成"工具异常"），task_id 就丢了 —— 而任务在知乎侧
-    还在跑、额度已经花掉（2026-09-22 审计）。与 video_gen 的 timed_out 分支同款处理。
-    """
+    """轮询到点还没出终态：**按成功返回 task_id**，让模型用 task 命令继续查。"""
     return ToolResult(
         success=True,
         output=(f"⏳ {kind} 任务 {task_id} 仍在进行中，已到工具等待上限提前返回。\n"

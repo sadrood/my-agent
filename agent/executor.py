@@ -1,20 +1,4 @@
-"""
-执行器模块（v3：原生 function calling + 审批门 + Guardian + Rollout）。
-
-v3 核心变化（对齐主流 agent 执行协议）：
-1. 主路径使用原生 function calling（LLM.chat_with_tools），
-   模型以 JSON Schema 参数调用工具，不再正则解析自由文本 JSON。
-2. 每个计划步骤内部自动多轮工具调用（模型收到工具结果后继续决策），
-   直到模型输出文字总结 → 该步骤完成。
-3. 每次工具调用经过三层把关（参考同类开源实现）：
-   - ApprovalPolicy 审批策略（沙箱等级 + 风险分级 + 人工确认）
-   - Guardian 安全审校（中/高风险调用由审校模型二次把关）
-   - 工具自身黑名单（如终端危险命令）
-4. Rollout 事件流：所有模型/工具/审批事件写入 JSONL 追踪文件，
-   步骤内消息超过 token 阈值时自动压缩（compaction）。
-5. 向后兼容：若供应商不支持 function calling，自动回退到旧文本 JSON 协议
-   （execute_step_legacy），返回结构保持兼容。
-"""
+"""执行器模块：原生 function calling + 审批门 + Guardian + Rollout。"""
 import json
 import logging
 import os
@@ -68,7 +52,7 @@ THINK_TOOL_SCHEMA = {
 
 
 class Executor:
-    """任务执行器（v3：function calling + 安全把关）。"""
+    """任务执行器：function calling + 安全把关。"""
 
     BROWSER_KEYWORDS = [
         "浏览器", "网页", "打开", "访问", "搜索", "点击",
@@ -104,8 +88,7 @@ class Executor:
         )
         self.approval = approval_policy          # ApprovalPolicy | None（None=全部放行）
         self.guardian = guardian                 # Guardian | None
-        # 人工放行：consents 记录被拦调用与人类授权；consent_ask 只在交互式会话里注入
-        # （无人值守时为 None → 拦截仍然是拦截，不会因为"没人可问"就放行）
+        # 人工放行：consents 记录被拦调用与人类授权；consent_ask 只在交互式会话里注入（无人值守时为 None → 拦截仍然是拦截，不会因为"没人可问"就放行）
         self.consents = consents
         self.consent_ask = consent_ask
         # 任务监管者（独立模型复核完成度）：None = 不启用
@@ -153,16 +136,8 @@ class Executor:
         vision_feedback: str = "",
         failure_warnings: str = "",
     ) -> dict:
-        """
-        执行单个计划步骤。
-
-        优先使用 function calling 协议；若供应商不支持（或首次调用报错），
-        自动回退到旧文本 JSON 协议。
-
-        Returns:
-            结果字典，兼容旧字段（step/action/tool/tool_input/success/output/error/status）
-            新增字段: tools_used(list), tool_calls(list[dict])
-        """
+        """执行单个计划步骤。
+        自动回退到旧文本 JSON 协议。"""
         if self._fc_supported is not False:
             try:
                 result = self._execute_step_fc(
@@ -208,13 +183,8 @@ class Executor:
         )
 
     def _looks_like_unsupported(self, error: Exception) -> bool:
-        """
-        判断异常是否为供应商不支持 tools 所致。
-
-        注意（教训）：不要匹配宽泛的 "tools"/"function"/"invalid_request_error"——
-        思考模式的 reasoning 回传 400 也带 invalid_request_error，误判会
-        把"上游协议错误"当成"不支持 function calling"而错误回退计划模式。
-        """
+        """判断异常是否为供应商不支持 tools 所致。
+        把"上游协议错误"当成"不支持 function calling"而错误回退计划模式。"""
         msg = str(error).lower()
         return any(k in msg for k in (
             "not supported", "unsupported", "does not support",
@@ -311,12 +281,7 @@ class Executor:
             elif thinking_mode_seen:
                 # 本回合跳过思考（无推理增量）也要带空字段：thinking 服务仍要求回传
                 assistant_msg[response.reasoning_field or "reasoning_content"] = ""
-            # 本轮 id 的兜底编号：必须以"本轮第几个"为准，不能全用
-            # `len(tool_calls_log)`（那是**整轮开始时**的值）—— 一轮里 N 个调用会拿到
-            # 同一个 id，而回喂的 tool 消息用的是逐条递增的编号，于是 assistant 里
-            # 根本不存在 `call_1`，下一次请求被上游以 "Messages with role 'tool' must
-            # be a response to a preceding message with 'tool_calls'" 400 掉，
-            # 轮级重试全败、整轮已完成的工具成果白做（2026-09-22 审计）。
+            # 本轮 id 的兜底编号：必须以"本轮第几个"为准，不能全用 `len(tool_calls_log)`（那是**整轮开始时**的值）—— 一轮里 N 个调用会拿到同一个 id，而回喂的 tool 消息用的是逐条递增的编号。
             _base = len(tool_calls_log)
             assistant_msg["tool_calls"] = [
                 {
@@ -408,37 +373,7 @@ class Executor:
         on_text_delta: Optional[Callable[[str, str], None]] = None,
         stop_event=None,   # threading.Event | None：置位后在下个检查点优雅停止
     ) -> dict:
-        """
-        单循环执行：一轮持续对话完成整个目标。
-
-        模型可以自由地"思考 → 调用工具 → 看结果 → 继续"，直到输出
-        纯文本最终回答为止。不再有独立规划/逐步执行/总结三层调用。
-
-        Args:
-            goal: 用户目标
-            system_prompt: 系统提示（含人格、规则、审批提示、AGENTS.md）
-            context_text: 附加上下文（对话历史、经验、失败模式警告等）
-            max_ops: **固定**轮数上限（旧语义，显式传入时生效，如 CLI --max-ops）。
-                     不传时走动态预算：起步 loop_base_turns 轮，每有一轮有进展就按
-                     loop_extend_per_progress 续期，连续 loop_stall_limit 轮无进展则
-                     提前停；loop_hard_cap 是安全网（0 = 不设上限）。见 agent/loop_budget.py
-            event_sink: 事件回调 (event_type, data) → dashboard/打印
-            temperature: 覆盖默认温度
-            top_p: 覆盖默认核采样（None=不显式设置）
-            max_tokens: 覆盖默认最大输出 token
-            stream: 是否流式输出（逐字渲染）
-            on_turn_start: 每轮模型调用开始前的回调（显示思考中状态）
-            on_text_delta: 流式增量回调 (kind, text)，kind ∈ {"reasoning", "text"}
-
-        Returns:
-            {
-              "success": bool,
-              "output": 最终回答文本,
-              "tool_calls": [{"name","arguments","success","output","blocked_reason"}],
-              "errors": [str],
-              "ops": 实际模型轮数,
-            }
-        """
+        """单循环执行：一轮持续对话完成整个目标。"""
         tools = self.tool_manager.list_openai_schemas()
         tools.append(THINK_TOOL_SCHEMA)
 
@@ -450,8 +385,7 @@ class Executor:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
-        # 人工放行提示（宿主生成，模型无法伪造）：系统提示里写着"被 Guardian 拒绝的
-        # 操作不要反复重试"，不明确告诉它"这个已经被授权了"，人授权了它也不会去重试。
+        # 人工放行提示（宿主生成，模型无法伪造）：系统提示里写着"被 Guardian 拒绝的操作不要反复重试"，不明确告诉它"这个已经被授权了"，人授权了它也不会去重试。
         if self._consents_enabled():
             try:
                 consent_note = self.consents.hint_for_agent()
@@ -468,33 +402,22 @@ class Executor:
         consecutive_empty = 0   # 连续空回复次数（上游偶发只回 reasoning 就 stop）
         no_tools_fallback_used = False   # 本轮是否已尝试过纯文本回退
         thinking_mode_seen = False   # 本对话是否出现过推理字段（thinking 服务需逐条回传）
-        # 轮数预算：默认**动态**——起步 loop_base_turns 轮，每有一轮有进展就续期，
-        # 连续无进展则提前停；max_ops/loop_hard_cap 只是安全网（0 = 不设上限）。
-        # 显式传 max_ops（CLI --max-ops / 测试）时退回固定语义：那个参数的含义就是
-        # "最多跑这么多轮"，可预测性优先（见 agent/loop_budget.py）。
-        # 注意：这里不能用 `max_ops or 默认值` 之后再判断真假——那样默认值也会让
-        # 分支恒为真。所以先记录"调用方有没有显式传"。
+        # 轮数预算：默认**动态**——起步 loop_base_turns 轮，每有一轮有进展就续期，连续无进展则提前停；max_ops/loop_hard_cap 只是安全网（0 = 不设上限）。
         configured_cap = int(TOOL_CONFIG.get("max_loop_ops", 80))
         budget = (LoopBudget.fixed(int(max_ops)) if max_ops
                   else LoopBudget.from_config(configured_cap))
 
         self._emit("run_loop_start", {"goal": goal})
 
-        # 监管者配额按**每个目标**计。`_supervisor_rounds` 是 Executor 实例级状态，
-        # 而交互式 CLI 整场会话只建一个 Agent/Executor（`main.py` 的 while 里反复调
-        # `agent.run()`），它此前既不在这里重置、也不随 metrics 归零 —— 于是第一个
-        # 目标用满 3 次复核后，**后续每个目标都不再复核**，"让 agent 做完任务再结束"
-        # 这道闸门在会话后半段静默消失，且没有任何提示（2026-09-22 审计）。
+        # 监管者配额按**每个目标**计。`_supervisor_rounds` 是 Executor 实例级状态。
         self._supervisor_rounds = 0
 
-        # 停止信号注入工具层：terminal 等工具在执行期间轮询该信号，
-        # 用户点"停止"时正在运行的子进程能被立即终止，而不是干等到命令结束
+        # 停止信号注入工具层：terminal 等工具在执行期间轮询该信号，用户点"停止"时正在运行的子进程能被立即终止，而不是干等到命令结束
         if stop_event is not None:
             try:
                 self.tool_manager.bind_stop_event(stop_event)
             except Exception as e:
-                # 不能静默：绑定失败意味着"停止"按钮对正在跑的子进程无效，
-                # 而用户仍会看到"已按要求停止执行"。至少要说清楚。
+                # 不能静默：绑定失败意味着"停止"按钮对正在跑的子进程无效，而用户仍会看到"已按要求停止执行"。至少要说清楚。
                 print(f"[Stop] 警告: 停止信号未能注入工具层（{str(e)[:120]}），"
                       "正在运行的子进程可能不会被立即终止。")
 
@@ -505,15 +428,11 @@ class Executor:
         completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
         completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
         completion_nudges = 0
-        #: 只统计**本次循环开始之后**创建/更新的任务：任务清单是全局跨会话的
-        #: （memory/tasks.json），历史遗留的 todo 会造成无关的"还没做完"误判。
+        # : 只统计**本次循环开始之后**创建/更新的任务：任务清单是全局跨会话的: （memory/tasks.json），历史遗留的 todo 会造成无关的"还没做完"误判。
         loop_started_at = time.strftime("%Y-%m-%d %H:%M")
-        #: 会话待办清单（todo_write）的**起始快照**：清单项没有时间戳，没法像任务板
-        #: 那样按时间过滤，所以记下循环开始时就已经挂着的 id——只有本次循环期间新增、
-        #: 且结束时仍未完成的待办才触发闸门，历史遗留清单不会让每次收尾都被拦。
+        # : 会话待办清单（todo_write）的**起始快照**：清单项没有时间戳，没法像任务板: 那样按时间过滤，所以记下循环开始时就已经挂着的 id——只有本次循环期间新增、: 且结束时仍未完成的待办才触发闸门。
         pending_todos_at_start = self._pending_todo_ids()
-        # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），
-        # for 循环会自动推进 turn，while 则会漏自增导致死循环。
+        # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），for 循环会自动推进 turn，while 则会漏自增导致死循环。
         for turn in itertools.count():
             # 结算上一轮：放在迭代开头，这样体内任何 continue 都不会漏结算
             if turn > 0:
@@ -521,7 +440,7 @@ class Executor:
                 pending = TurnOutcome()
             # 预警必须先于「停」判断：预算恰好同时耗尽的那一轮（used 与
             # stagnation_turns 同时到位）旧顺序会先 break，把更准确的「已连续 N 轮
-            # 没有产出」吞掉、只剩「轮数耗尽」（2026-09-22 审计）。
+            # 没有产出」吞掉、只剩「轮数耗尽」。
             # ⚠️ 必须 getattr 兜底：loop_budget 的 stagnation_alarm / stagnation_turns
             # **只存在于某个会话尚未提交的工作区里**，仓库里没有任何一次提交包含它
             # （git log -S "def stagnation_alarm" -- agent/loop_budget.py 为空）。
@@ -559,8 +478,7 @@ class Executor:
                     "ops": turn,
                     "stopped": True,
                 }
-            # 接近预算预警：每次"续期后重新接近"都会提醒一次（动态预算下上限会变，
-            # 只提醒一次的旧写法在续期后就再也不提了）
+            # 接近预算预警：每次"续期后重新接近"都会提醒一次（动态预算下上限会变，只提醒一次的旧写法在续期后就再也不提了）
             if budget.near_limit() and warned_at_extension != budget.extensions:
                 warned_at_extension = budget.extensions
                 self._emit("ops_warning", {
@@ -573,42 +491,45 @@ class Executor:
             if self.metrics is not None:
                 self.metrics.turns += 1
 
-            # 常驻状态栏锚点：每轮模型调用前发 turn_start
-            # （event_sink 由 Agent 层渲染 token 计数/沙箱/策略并转发 rollout）
+            # 常驻状态栏锚点：每轮模型调用前发 turn_start（event_sink 由 Agent 层渲染 token 计数/沙箱/策略并转发 rollout）
             if event_sink is not None:
                 try:
                     event_sink("turn_start", {"turn": turn + 1, "max_ops": budget.limit})
                 except Exception:
                     pass
 
-            # 上下文压缩：token 压力超阈值时把旧历史总结成摘要
-            # （阈值 = 窗口比例制：_compact_threshold → llm.compact_threshold_tokens）
+            # 上下文压缩：token 压力超阈值时把旧历史总结成摘要（阈值 = 窗口比例制：_compact_threshold → llm.compact_threshold_tokens）
             if COMPACT_CONFIG.get("enabled", True):
                 messages = self._maybe_compact(messages)
 
-            # 流式优先；供应商不支持时回退一次性调用。
-            # 轮级重试：普通临时错误最多 3 次；429 限流最多 6 次（借鉴同类实现）。
-            #
-            # 但**必须给整轮封顶**：llm.py 内部还会各自重试 max_retries 次并按
-            # 分钟边界等待（单次上限 65s），两层叠乘下最坏 6×3×65s+退避 ≈ 13.5
-            # 分钟纯等待一个回合；按 max_loop_ops 上限可拖成十几小时。而且旧循环
-            # 里 `time.sleep(delay)` 是整段睡的，期间 stop_event 完全不响应——
-            # 用户按"停止"要等几分钟才生效。现在：总预算 + 分片睡眠（可中断）。
+            # 流式优先；供应商不支持时回退一次性调用。轮级重试：普通临时错误最多 3 次；429 限流最多 6 次（借鉴同类实现）。
             response = None
             llm_error = None
             rate_limited = False
             turn_budget = float(TOOL_CONFIG.get("llm_turn_retry_budget", 180))
-            turn_deadline = time.time() + turn_budget
-            for attempt in range(6):
-                # 非限流错误最多重试 3 次（0/1/2）即放弃；限流走满 6 次
+            quota_budget = float(TOOL_CONFIG.get("llm_quota_retry_budget", 900))
+            quota_min_attempts = int(TOOL_CONFIG.get("llm_quota_min_attempts", 4))
+            max_attempts = int(TOOL_CONFIG.get("llm_max_attempts", 6))
+            retry_started_at = time.time()
+            attempt = 0
+            while True:
+                # 非限流错误最多重试 3 次（0/1/2）即放弃；限流按 max_attempts 次（0 = 不限）
                 if llm_error is not None and not rate_limited and attempt >= 3:
                     break
+                if rate_limited and max_attempts > 0 and attempt >= max_attempts:
+                    break
                 if attempt > 0:
-                    if time.time() >= turn_deadline:
+                    # 限流用独立预算，且至少有 quota_min_attempts 次保底：单次等待可达 65s，
+                    # 普通预算（180s）扛不过两轮就把任务判死，而配额往往下个窗口就恢复了。
+                    # 两个 0 都表示"不限"——宁可一直等，也别把能续跑的任务判死。
+                    budget_now = quota_budget if rate_limited else turn_budget
+                    exhausted = budget_now > 0 and time.time() - retry_started_at >= budget_now
+                    if exhausted and not (rate_limited and attempt < quota_min_attempts):
                         self._emit("llm_retry", {
                             "turn": turn + 1, "attempt": attempt,
                             "reason": "budget_exhausted",
-                            "error": f"重试总时长超过 {turn_budget:.0f}s，放弃本轮重试",
+                            "error": (f"重试总时长超过 {budget_now:.0f}s，放弃本轮重试"
+                                      + ("（限流）" if rate_limited else "")),
                         })
                         break
                     if rate_limited:
@@ -622,13 +543,7 @@ class Executor:
                     })
                     # 分片睡眠：stop_event 置位立即退出，不再"睡满再响应"
                     if self._sleep_interruptible(delay, stop_event):
-                        # 优雅停止，与另外两个检查点同款。旧实现是
-                        # `raise KeyboardInterrupt("用户停止")` —— 它是 BaseException，
-                        # 同层的 `except Exception` 接不住，一路穿到 agent.py 的
-                        # Ctrl+C 分支：看板 worker 线程直接死、`run_end` 事件永不发出
-                        # （前端一直停在"运行中"），交接清单、记忆沉淀、
-                        # last_execution_summary 全部跳过 —— 同一个"停止"按钮，
-                        # 走到哪个检查点就有两种结局（2026-09-22 审计）。
+                        # 优雅停止，与另外两个检查点同款。旧实现是 `raise KeyboardInterrupt("用户停止")` —— 它是 BaseException，同层的 `except Exception` 接不住。
                         try:
                             self.tool_manager.cancel_active_tools()
                         except Exception:
@@ -665,10 +580,12 @@ class Executor:
                     if self._looks_like_unsupported(e):
                         raise   # 交由 Agent 回退经典计划模式
                     if self._is_rate_limit(e):
-                        rate_limited = True   # 429 限流：走满 6 次指数退避重试
+                        rate_limited = True   # 429 限流：按 llm_max_attempts 重试（0 = 不限）
+                attempt += 1
 
             if llm_error is not None:
-                # 三次尝试全部失败：记录并优雅收尾（保留已完成的工具成果）
+                # 重试全部失败：记录并优雅收尾（保留已完成的工具成果）。标成 interrupted —— 预算是好的，别让它冒充"轮数用尽"。
+                budget.mark_interrupted(str(llm_error))
                 self._emit("run_loop_end", {"success": False, "error": str(llm_error)[:200]})
                 partial = self._render_partial_progress(tool_calls_log, errors)
                 err_text = str(llm_error)
@@ -680,15 +597,18 @@ class Executor:
                         "可运行 my-agent --doctor 验证连通，/config 查看当前 key）"
                     )
                 elif "429" in err_text:
-                    hint = ("\n（429 = 限流：已按指数退避多次重试仍失败。"
-                            "目标已保存，稍后重发即可续跑——上下文已保留）")
+                    hint = ("\n（429 = 限流：已按指数退避重试仍失败。目标已保存，稍后重发即可续跑；"
+                            "想熬更久可调 .env 的 LLM_QUOTA_RETRY_BUDGET / LLM_MAX_RETRIES）")
                 return {
                     "success": False,
-                    "output": (partial or f"模型调用连续失败：{err_text}") + hint,
+                    "output": ((partial or f"模型调用连续失败：{err_text}") + hint
+                               + "\n\n" + budget.stop_message()),
                     "tool_calls": tool_calls_log,
                     "errors": errors + [err_text],
                     "ops": turn + 1,
                     "llm_error": err_text[:300],
+                    "stop_reason": budget.stop_reason,
+                    "budget": budget.summary(),
                 }
 
             # 思考模式会话：出现过推理字段后，后续每条 assistant 消息都要回传该字段
@@ -707,8 +627,7 @@ class Executor:
             if not response.tool_calls:
                 final = response.content.strip()
                 if not final and turn < budget.limit - 1 and consecutive_empty < 2:
-                    # 防御：上游偶发只输出 reasoning 就 stop（空回复），
-                    # 推一条提示让模型继续，最多重试 2 次
+                    # 防御：上游偶发只输出 reasoning 就 stop（空回复），推一条提示让模型继续，最多重试 2 次
                     consecutive_empty += 1
                     pending.empty_response = True   # 空回复计入"无进展"，但不立刻判停滞
                     self._emit("empty_turn", {"turn": turn + 1, "retry": consecutive_empty})
@@ -724,8 +643,7 @@ class Executor:
                     })
                     continue
                 if not final and consecutive_empty >= 2 and not no_tools_fallback_used:
-                    # 上游 tools 服务降级（带 tools 的请求只吐 reasoning 不吐正文）：
-                    # 回退纯文本问一次，至少给用户一个文字回答
+                    # 上游 tools 服务降级（带 tools 的请求只吐 reasoning 不吐正文）：回退纯文本问一次，至少给用户一个文字回答
                     no_tools_fallback_used = True
                     self._emit("no_tools_fallback", {"turn": turn + 1})
                     messages.append({
@@ -741,8 +659,7 @@ class Executor:
                                     "fallback": "no-tools",
                                 })
                                 return {
-                                    # 降级回退：保守记为未成功（无法验证任务是否真正达成），
-                                    # 避免"没搞成"被记成成功污染经验库
+                                    # 降级回退：保守记为未成功（无法验证任务是否真正达成），避免"没搞成"被记成成功污染经验库
                                     "success": False,
                                     "output": text.strip(),
                                     "tool_calls": tool_calls_log,
@@ -754,10 +671,7 @@ class Executor:
                         pass
                     final = ""
                 consecutive_empty = 0
-                # 完成度闸门：模型给出最终答案时，若它**自己的任务清单**里还有本次
-                # 工作产生的未完成项，就把它推回去继续——"让 agent 做完任务再结束"。
-                # 有界（最多 loop_completion_nudges 次），不会与模型僵持；模型也可以
-                # 明确说明"那些项已不需要做"来正常收尾。
+                # 完成度闸门：模型给出最终答案时，若它**自己的任务清单**里还有本次工作产生的未完成项，就把它推回去继续——"让 agent 做完任务再结束"。
                 if final and completion_gate and completion_nudges < completion_nudge_max:
                     pending_titles = self._unfinished_items(loop_started_at,
                                                             pending_todos_at_start)
@@ -769,8 +683,7 @@ class Executor:
                             "titles": pending_titles[:3],
                         }
                         self._emit("completion_nudge", nudge_data)
-                        # 也要走 event_sink：_emit 只进 rollout 日志，用户/前端看不到
-                        # "为什么还没结束"——闸门是用户可感知的决策，必须可见。
+                        # 也要走 event_sink：_emit 只进 rollout 日志，用户/前端看不到"为什么还没结束"——闸门是用户可感知的决策，必须可见。
                         if self._event_sink is not None:
                             try:
                                 self._event_sink("completion_nudge", nudge_data)
@@ -787,10 +700,7 @@ class Executor:
                             ),
                         })
                         continue
-                # 监管者复核：模型想收尾时，由**独立模型**对照原始目标审"到底做完没有"，
-                # 没做完就把它给的下一步指令发回循环继续做。
-                # 与上面的清单闸门互补：闸门依赖 agent 自己列清单（实测它根本不列，
-                # todo_write 调用数长期为 0），监管者不依赖它，直接看目标与交付。
+                # 监管者复核：模型想收尾时，由**独立模型**对照原始目标审"到底做完没有"，没做完就把它给的下一步指令发回循环继续做。与上面的清单闸门互补：闸门依赖 agent 自己列清单，监管者不依赖它，直接看目标与交付。
                 if final:
                     sup_data = self._supervisor_check(goal, final, tool_calls_log, turn)
                     if sup_data:
@@ -806,8 +716,7 @@ class Executor:
                             ),
                         })
                         continue
-                # 成功 = 有最终回答 且 没有未补救的失败
-                # （空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
+                # 成功 = 有最终回答且没有未补救的失败（空回复不算成功——上游降级时"无文字总结"绝不能记成成功）
                 success = bool(final) and last_success_idx >= last_failure_idx
                 self._emit("run_loop_end", {"success": success, "output": clip_text(final)})
                 return {
@@ -831,8 +740,7 @@ class Executor:
             elif thinking_mode_seen:
                 # 本回合跳过思考（无推理增量）也要带空字段：thinking 服务仍要求回传
                 assistant_msg[response.reasoning_field or "reasoning_content"] = ""
-            # 同 _dispatch_tool_call：id 兜底编号必须按"本轮第几个"算，否则一轮里多个
-            # 调用会共用同一个 id，回喂的 tool 消息却逐条递增，下一次请求必 400。
+            # 同 _dispatch_tool_call：id 兜底编号必须按"本轮第几个"算，否则一轮里多个调用会共用同一个 id，回喂的 tool 消息却逐条递增，下一次请求必 400。
             _base = len(tool_calls_log)
             assistant_msg["tool_calls"] = [
                 {
@@ -847,10 +755,7 @@ class Executor:
             ]
             messages.append(assistant_msg)
 
-            # 本轮工具调用：批量执行。整批并行安全且审批无需交互时并发
-            # （读文件/只读浏览器/低风险终端/生图等互不依赖的调用并行跑），
-            # 其余保持串行；事件与结果回喂始终按模型给出的顺序。
-            # 停止检查点：发起新一轮工具调用前再确认一次（避免批处理中途不可停）
+            # 本轮工具调用：批量执行。整批并行安全且审批无需交互时并发（读文件/只读浏览器/低风险终端/生图等互不依赖的调用并行跑），其余保持串行；事件与结果回喂始终按模型给出的顺序。停止检查点：发起新一轮工具调用前再确认一次（避免批处理中途不可停）
             if stop_event is not None and stop_event.is_set():
                 try:
                     self.tool_manager.cancel_active_tools()
@@ -866,21 +771,15 @@ class Executor:
                     "stopped": True,
                 }
             batch = list(response.tool_calls)
-            # 逐操作签名：与上一轮完全一致 → 视为"原样重复"（空转信号）。
-            # 注意用"参数排序后的签名"，模型打乱参数顺序不算换了新办法。
+            # 逐操作签名：与上一轮完全一致 → 视为"原样重复"（空转信号）。注意用"参数排序后的签名"，模型打乱参数顺序不算换了新办法。
             sig = tool_signature(batch)
             pending.repeated = bool(prev_signature) and sig == prev_signature
             prev_signature = sig
             pending.tool_calls += len(batch)
-            # 先解包嵌套 _raw（模型/供应商把参数再包一层 JSON 字符串）：
-            # 解开的还原为真正命名参数正常派发；解不开的（真截断/坏 JSON）
-            # 保持 _raw，走下方"参数解析失败"拦截。
+            # 先解包嵌套 _raw（模型/供应商把参数再包一层 JSON 字符串）：解开的还原为真正命名参数正常派发；解不开的（真截断/坏 JSON）保持 _raw，走下方"参数解析失败"拦截。
             for tc in batch:
                 tc.arguments = unwrap_raw_arguments(tc.arguments)
-            # 参数解析失败拦截：模型输出的 arguments JSON 不合法（典型是输出
-            # 上限截断——finish_reason=length 时大文件写入参数被拦腰切断）。
-            # 不下发给工具（会得到"未知操作"这类无引导错误让模型盲试重试），
-            # 而是就地生成可行动的失败结果回喂给模型。
+            # 参数解析失败拦截：模型输出的 arguments JSON 不合法（典型是输出上限截断——finish_reason=length 时大文件写入参数被拦腰切断）。
             bad = {
                 id(tc): self._unparseable_error(tc, response)
                 for tc in batch if "_raw" in tc.arguments
@@ -896,8 +795,7 @@ class Executor:
             if dispatch and self._batch_parallelizable(dispatch):
                 executed = self._run_tool_calls_parallel(dispatch, goal)
             else:
-                # 串行执行；批处理中途响应停止：后续未执行的调用标记为取消，
-                # 避免"停了但批里剩下的工具还在跑"
+                # 串行执行；批处理中途响应停止：后续未执行的调用标记为取消，避免"停了但批里剩下的工具还在跑"
                 executed = []
                 for i, tc in enumerate(dispatch):
                     if stop_event is not None and stop_event.is_set() and i > 0:
@@ -921,16 +819,14 @@ class Executor:
                 executed = merged
 
             for tc, (result, blocked_reason, seconds) in zip(batch, executed):
-                # 进展信号（预算判定依赖它，所以不能只在 metrics 开启时才算）：
-                # 文件被改动是最硬的"有进展"证据。
+                # 进展信号（预算判定依赖它，所以不能只在 metrics 开启时才算）：文件被改动是最硬的"有进展"证据。
                 changed = self._changed_file(tc.name, tc.arguments) if result.success else None
                 if changed:
                     pending.files_changed += 1
                 if result.success:
                     pending.succeeded += 1
                 elif not blocked_reason:
-                    # 被审批/Guardian 拦截不算失败（要换做法），但也不构成进展；
-                    # 反复调同一个被拦命令由 pending.repeated 兜住。
+                    # 被审批/Guardian 拦截不算失败（要换做法），但也不构成进展；反复调同一个被拦命令由 pending.repeated 兜住。
                     pending.failed += 1
                 if self.metrics is not None:
                     self.metrics.tool_seconds += seconds
@@ -963,8 +859,7 @@ class Executor:
 
                 if event_sink is not None:
                     try:
-                        # UI 事件输出走完整上限（与工具层 output_max_chars 一致）：
-                        # 300 字符截断会让前端"概要 == 详情"（没有可展开的细节）
+                        # UI 事件输出走完整上限（与工具层 output_max_chars 一致）：300 字符截断会让前端"概要 == 详情"（没有可展开的细节）
                         ui_cap = int(TOOL_CONFIG.get("output_max_chars", 8000))
                         event_sink("tool_result", {
                             "tool": tc.name,
@@ -982,9 +877,7 @@ class Executor:
                     "content": result_text,
                 })
 
-        # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。
-        # 两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），
-        # "无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
+        # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），"无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
         self._emit("run_loop_end", {"success": False, "output": "",
                                     "budget": budget.summary()})
         return {
@@ -999,12 +892,7 @@ class Executor:
     def _supervisor_check(self, goal: str, final: str, tool_calls_log: list,
                           turn: int) -> Optional[dict]:
         """让独立监管者审一次完成度；需要继续时返回 {"reason","instruction"}，否则 None。
-
-        什么时候**不惊动**监管者（省一次模型调用）：
-          · 没启用 / 没有监管者实例；
-          · 还没干什么活就收尾（turn 少于 min_turns，简单问答没必要审）。
-        监管者异常一律放行（fail-open）：坏掉的裁判不能把任务卡死。
-        """
+        监管者异常一律放行（fail-open）：坏掉的裁判不能把任务卡死。"""
         if self.supervisor is None:
             return None
         try:
@@ -1013,9 +901,7 @@ class Executor:
                 return None
             if int(cfg.get("min_turns", 1)) > turn:
                 return None
-            # 一句话问答（"3+4 等于几"）不值得多花一次调用；真任务一律复核。
-            # （注意判据是**目标长度 + 轮次**，不是"用没用工具"——纯文字交付的长任务
-            #   同样可能只做了一半，那正是最该复核的情况。）
+            # 一句话问答（"3+4 等于几"）不值得多花一次调用；真任务一律复核。（注意判据是**目标长度 + 轮次**，不是"用没用工具"——纯文字交付的长任务同样可能只做了一半，那正是最该复核的情况。）
             if len(str(goal or "").strip()) < int(cfg.get("min_goal_chars", 12)):
                 return None
             max_rounds = int(cfg.get("max_rounds", 3))
@@ -1078,15 +964,7 @@ class Executor:
 
     @staticmethod
     def _pending_tasks(since: str = "") -> list:
-        """读 agent 自己的任务清单里未完成的项（todo / in_progress）。
-
-        用于"完成度闸门"：模型想收尾但任务清单还有活时，把它推回去继续。
-
-        设计要点：
-          · `since`（"YYYY-MM-DD HH:MM"）只统计本次循环开始之后创建/更新的任务——
-            任务清单是**全局跨会话**的，历史遗留 todo 会造成无关误判；
-          · 任何异常都返回空列表：闸门是加分项，绝不能因为它自身出错而阻断正常收尾。
-        """
+        """读 agent 自己的任务清单里未完成的项（todo / in_progress）。"""
         try:
             from agent.tasks import load_tasks
             out = []
@@ -1106,11 +984,7 @@ class Executor:
             return []
 
     def _pending_todo_ids(self) -> set:
-        """当前会话待办清单里**未完成**项的 id 集合（起始快照 / 现状对比都用它）。
-
-        清单归属靠 TodoTool 自己的会话 key（Agent 层注入），所以直接问工具实例即可，
-        不用把 session id 再穿一层进来。任何异常都当空集合。
-        """
+        """当前会话待办清单里**未完成**项的 id 集合（起始快照 / 现状对比都用它）。"""
         try:
             tool = self.tool_manager.get_tool("todo_write")
             pending = tool.pending() if tool is not None and hasattr(tool, "pending") else []
@@ -1119,15 +993,7 @@ class Executor:
             return set()
 
     def _unfinished_items(self, since: str, todo_snapshot: set) -> list:
-        """模型想收尾时，它自己列的清单里还剩哪些活（两个来源合并）。
-
-        1. 全局任务板（agent.tasks）：按时间过滤，只算本次循环动过的；
-        2. 会话待办（todo_write）：按 id 快照过滤，只算本次循环新增且仍未完成的。
-
-        之所以要第 2 项：`todo_write` 才是模型实际用来规划任务的清单（写进系统提示，
-        实测 21 份 rollout 里任务板 0 次调用、待办清单是常态），只看任务板等于闸门
-        基本不会触发。返回标题列表，顺序稳定、已去重。
-        """
+        """模型想收尾时，它自己列的清单里还剩哪些活（两个来源合并）。"""
         titles = list(self._pending_tasks(since=since))
         try:
             tool = self.tool_manager.get_tool("todo_write")
@@ -1200,8 +1066,7 @@ class Executor:
                 arguments = {"_raw": tc["args"]}
             if not isinstance(arguments, dict):
                 arguments = {"input": str(arguments)}
-            # 统一解包嵌套 _raw（模型/供应商把参数再包一层 JSON 字符串）：
-            # 解不开的（真截断/坏 JSON）保持原样，走下方"参数解析失败"拦截
+            # 统一解包嵌套 _raw（模型/供应商把参数再包一层 JSON 字符串）：解不开的（真截断/坏 JSON）保持原样，走下方"参数解析失败"拦截
             arguments = unwrap_raw_arguments(arguments)
             tool_calls.append(ToolCall(
                 id=tc["id"] or f"call_{idx}",
@@ -1255,10 +1120,7 @@ class Executor:
     @staticmethod
     def _render_partial_progress(tool_calls_log: list, errors: list) -> str:
         """LLM 连续失败时，把已完成的工具成果渲染成部分进展说明。
-
-        只统计真实的工具调用（排除 think 伪工具），并区分成功/失败/被拦截，
-        避免"已完成 N 次"把 think、被拦截、被取消的调用也算进总次数里误导人。
-        """
+        避免"已完成 N 次"把 think、被拦截、被取消的调用也算进总次数里误导人。"""
         ops = [c for c in tool_calls_log if c.get("name") != "think"]
         if not ops:
             return ""
@@ -1289,16 +1151,7 @@ class Executor:
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """估算消息列表 token 数（复用 rollout 的 CJK 感知算法）。
-
-        两个坑都不能踩：
-        1. **必须算上 tool_calls 的 arguments**：写文件类调用把长内容全放在
-           arguments 里（content 为空），只数 content 会严重低估。
-        2. **不能简单按"字符数 / 3"**：中文一字≈1 token，而 `/3` 把中文低估
-           3~4 倍（实测"你好世界"→1 vs 实际 4）。压缩阈值是窗口的 0.75，
-           低估会让压缩**迟迟不触发**，等真触发时早就超过上游窗口 → 直接 400，
-           长中文会话必踩。这里直接复用 agent/rollout.py 里已验证的实现。
-        """
+        """估算消息列表 token 数（复用 rollout 的 CJK 感知算法）。"""
         from agent.rollout import estimate_tokens as _est
         total = 0
         for m in messages:
@@ -1334,23 +1187,14 @@ class Executor:
 
     def _maybe_compact(self, messages: list) -> list:
         """上下文压缩：token 超阈值时，把旧历史交给 LLM 总结成摘要替换。
-
-        保留最近 keep_last 条，更早的压缩成一段 system 摘要。
-        失败安全：总结失败/未超阈值则原样返回，不破坏对话。
-        """
+        失败安全：总结失败/未超阈值则原样返回，不破坏对话。"""
         threshold = self._compact_threshold()
         keep = int(COMPACT_CONFIG.get("keep_last", 20))
         if len(messages) <= keep + 2 or self._estimate_tokens(messages) < threshold:
             return messages
         old = messages[:-keep]
         recent = messages[-keep:]
-        # 截断点必须落在完整工具闭环之后：单循环里每轮会追加
-        # assistant(tool_calls) + N 条 tool 消息，盲切 messages[-keep:]
-        # 有 N/(N+2) 的概率正好切在 tool 中间，保留区就会以一条"孤立的 tool
-        # 消息"开头（它的 tool_calls 被切走了）→ 上游 400
-        # "Messages with role 'tool' must be a response to a preceding message
-        # with 'tool_calls'"，且无参数可赖，重试 3 次后整轮任务直接失败。
-        # 同一修法在 agent/rollout.py 早已落地，这里是默认路径上的漏网副本。
+        # 截断点必须落在完整工具闭环之后：单循环里每轮会追加 assistant(tool_calls) + N 条 tool 消息，盲切 messages[-keep:]有 N/(N+2) 的概率正好切在 tool 中间。
         while recent and recent[0].get("role") == "tool":
             start = len(messages) - len(recent) - 1
             if start < 0:
@@ -1404,10 +1248,7 @@ class Executor:
 
     def _ask_consent(self, tool_name: str, arguments: dict, reason: str) -> str:
         """拦截当场问人是否放行 → "once" / "session" / ""（不放行）。
-
-        回调由宿主注入（交互式 CLI / 桌面端）；返回空串或抛异常都视为"不放行"——
-        问不出来就等于没授权：无人值守时绝不能因为"没人可问"而默许。
-        """
+        问不出来就等于没授权：无人值守时绝不能因为"没人可问"而默许。"""
         try:
             answer = self.consent_ask({"tool": tool_name, "arguments": arguments,
                                        "reason": reason})
@@ -1422,23 +1263,8 @@ class Executor:
 
     def _dispatch_tool_call(self, tool_name: str, arguments: dict, goal: str,
                             checkpoint: bool = True, stream_output: bool = True):
-        """
-        执行一次工具调用（含审批 + Guardian 把关）。
-
-        Args:
-            checkpoint: 是否在修改成功后做 git checkpoint
-                        （并行线程内关闭，防止 index 锁竞争与乱序提交）。
-            stream_output: 是否绑定实时输出回调。工具实例上只有**一个**回调槽
-                        （tools/base.py 的 _output_callback），并行批里两个
-                        terminal 调用会互相覆盖，且先结束的那个在 finally 里
-                        把槽清空 → 另一个的实时输出静默断掉。并行批里直接
-                        不绑定，避免串台。
-
-        Returns:
-            (ToolResult, blocked_reason: str)  blocked_reason 非空表示被安全机制拦截
-        """
-        # 兜底解包：任何入口进来的参数都先还原嵌套 _raw（审批/Guardian/工具拿到的
-        # 都必须是真正的命名参数，而不是 {"_raw": ...} 字符串）
+        """执行一次工具调用（含审批 + Guardian 把关）。"""
+        # 兜底解包：任何入口进来的参数都先还原嵌套 _raw（审批/Guardian/工具拿到的都必须是真正的命名参数，而不是 {"_raw": ...} 字符串）
         if isinstance(arguments, dict):
             arguments = unwrap_raw_arguments(arguments)
 
@@ -1448,9 +1274,7 @@ class Executor:
             self._emit("tool_call", {"tool": "think", "args": {"thought_len": len(thought)}})
             return ToolResult(success=True, output="思考已记录。"), ""
 
-        # 1+2. 审批门 + Guardian 审校 —— 统一走 gate_tool_call，legacy 字符串入口
-        #      共用同一道门（此前 legacy 与 team 路径**完全没有**这道门，
-        #      2026-09-22 审计）。
+        # 1+2. 审批门 + Guardian 审校 —— 统一走 gate_tool_call，legacy 字符串入口共用同一道门（此前 legacy 与 team 路径**完全没有**这道门，2026-09-22 审计）。
         blocked = self.gate_tool_call(tool_name, arguments, goal)
         if blocked is not None:
             return blocked, blocked.error
@@ -1492,13 +1316,7 @@ class Executor:
                 stream_tool.set_output_callback(None)
 
         if result is None:
-            # 超时：重置该工具实例（丢弃卡死的 playwright 连接/子进程引用），
-            # 让后续调用从干净状态重新开始，避免"一次卡死、次次卡死"。
-            #
-            # 但必须确认**同批次里没有同工具的兄弟调用还在跑**：并行批里若有两个
-            # browser 只读调用（都声明了 parallel_safe），其中一个超时就去 reset，
-            # 会把 worker 线程/队列置空并塞入 None 哨兵，兄弟调用排到队里的任务
-            # 直接被跳过 → 它自己的 done.wait() 永不返回 → 被拖到超时、线程永久泄漏。
+            # 超时：重置该工具实例（丢弃卡死的 playwright 连接/子进程引用），让后续调用从干净状态重新开始，避免"一次卡死、次次卡死"。
             if not self._sibling_calls_in_flight(tool_name):
                 try:
                     self.tool_manager.reset_tool(tool_name)
@@ -1515,15 +1333,9 @@ class Executor:
                 "truncated": False,
             })
             # 注意：第二个返回值是 blocked_reason，**必须留空**。
-            # 调用方把"非空 blocked_reason"一律理解为"被安全策略拦截"：
-            # 超时冒充拦截会导致它不计入 errors、不推进 last_failure_idx，
-            # 最终 success = last_success_idx >= last_failure_idx 判成 True
-            # —— 一次卡死超时的副作用调用被记成"任务成功"并写进经验库。
             return ToolResult(success=False, output="", error=msg), ""
 
-        # 逐操作式检查点：修改成功后立即 git 提交，
-        # 每次操作都有独立提交（git revert HEAD 即可回滚上一步）；
-        # 只提交本次修改的文件（Agent 归因提交），不卷入并行未提交改动
+        # 逐操作式检查点：修改成功后立即 git 提交，每次操作都有独立提交（git revert HEAD 即可回滚上一步）；只提交本次修改的文件（Agent 归因提交），不卷入并行未提交改动
         if self.snapshot_checkpoints and checkpoint and result.success:
             changed = self._changed_file(tool_name, arguments)
             if changed:
@@ -1531,8 +1343,7 @@ class Executor:
                     from agent.snapshot import checkpoint
                     commit_hash = checkpoint(self.snapshot_dir, f"{tool_name} {changed}",
                                              changed_file=changed)
-                    # commit hash 供前端「回滚到此处」按钮调用 /api/rollback。
-                    # 注意必须走 event_sink（→hub→WebSocket）：self._emit 只进 rollout 日志
+                    # commit hash 供前端「回滚到此处」按钮调用 /api/rollback。注意必须走 event_sink（→hub→WebSocket）：self._emit 只进 rollout 日志
                     self._emit("checkpoint", {"tool": tool_name, "file": changed, "commit": commit_hash})
                     if self._event_sink is not None:
                         try:
@@ -1540,9 +1351,7 @@ class Executor:
                         except Exception:
                             pass
                 except Exception as e:
-                    # 静默吞掉会让"每次修改都有独立提交、git revert HEAD 即可回滚"
-                    # 这道安全网**在无声无息中不存在**（自升级场景尤其危险）。
-                    # 只告警一次，不阻断主流程。
+                    # 静默吞掉会让"每次修改都有独立提交、git revert HEAD 即可回滚"这道安全网**在无声无息中不存在**（自升级场景尤其危险）。只告警一次，不阻断主流程。
                     if not self._checkpoint_warned:
                         self._checkpoint_warned = True
                         print(f"[Checkpoint] 警告: 逐操作 git 检查点失败（{str(e)[:120]}）。"
@@ -1590,13 +1399,7 @@ class Executor:
 
     @staticmethod
     def _run_tool_with_timeout(fn, timeout: float):
-        """
-        在守护线程中执行工具调用，超时返回 None（线程继续在后台，进程退出不阻塞）。
-
-        工具实现里的底层库（如 Playwright 同步 API）可能在 CDP 连接半死时
-        永久挂起且无超时保护；这里做最后的硬性兜底，保证 Agent 主循环
-        不会被单个卡死的工具冻结。
-        """
+        """在守护线程中执行工具调用，超时返回 None（线程继续在后台，进程退出不阻塞）。"""
         import threading
 
         box: dict = {}
@@ -1618,11 +1421,7 @@ class Executor:
 
     @staticmethod
     def _sleep_interruptible(seconds: float, stop_event=None, slice_s: float = 0.25) -> bool:
-        """分片睡眠：stop_event 置位立刻返回 True（被打断）。
-
-        旧实现用整段 `time.sleep(delay)`，限流退避最长 30s、内部还有分钟边界
-        等待，期间"停止"完全无响应。
-        """
+        """分片睡眠：stop_event 置位立刻返回 True（被打断）。"""
         if seconds <= 0:
             return bool(stop_event is not None and stop_event.is_set())
         deadline = time.time() + seconds
@@ -1633,17 +1432,7 @@ class Executor:
         return bool(stop_event is not None and stop_event.is_set())
 
     def _sibling_calls_in_flight(self, tool_name: str) -> bool:
-        """同批次里是否还有该工具的**其它**调用正在执行。
-
-        必须排除"我自己"：`_execute_one_tool_call` 在派发**之前**就先
-        `_enter_tool_call` 给自己记了账，所以这里读到的计数至少是 1 ——
-        判 `> 0` 恒为真，`reset_tool` 在生产路径上一次都不会被调用，而错误文案
-        仍写着"已重置该工具状态"：browser 卡死一次后，坏掉的 playwright 连接会
-        原样留到后续每一轮，正是那段注释要根治的"一次卡死、次次卡死"
-        （2026-09-22 审计实测：reset_tool 调用数为 0）。
-        测试没发现是因为它们直接调 `_dispatch_tool_call`、绕过了 `_enter_tool_call`，
-        那时计数确实是 0。
-        """
+        """同批次里是否还有该工具的**其它**调用正在执行。"""
         with self._inflight_lock:
             return self._inflight.get(tool_name, 0) > 1
 
@@ -1673,18 +1462,9 @@ class Executor:
         return result, blocked_reason, time.time() - _t0
 
     def _run_tool_calls_parallel(self, tcs: list, goal: str):
-        """
-        并发执行一批工具调用，返回与输入同序的结果列表。
-
-        用 daemon 线程并行（不用 ThreadPoolExecutor：其 with 退出会等待
-        卡死的 worker，导致 Agent 冻结）；每个工具调用内部已有
+        """并发执行一批工具调用，返回与输入同序的结果列表。
         _run_tool_with_timeout 硬超时兜底，join 最多等待超时上限。
-
-        并发上限：模型一轮可以发 N 个并行安全调用，而每个调用都可能再拉起
-        子进程/HTTP 连接。旧实现"每个调用起一个线程、无上限"，模型一次发
-        10+ 个就能把线程/句柄/上游限流同时打满（免费档尤其敏感）。
-        超过上限的部分排队执行，语义不变（仍然是这一批内完成）。
-        """
+        10+ 个就能把线程/句柄/上游限流同时打满（免费档尤其敏感）。"""
         import threading
 
         results: dict = {}
@@ -1715,10 +1495,7 @@ class Executor:
 
     def _emit_visible(self, event_type: str, data: dict):
         """同时进 rollout 与 event_sink。
-
-        `_emit` 只写 rollout 日志（见其注释），但"Guardian 拦了什么/谁放行的"是
-        用户必须能看到的决策——只进日志的话，前端与 agent 都无从知道该找谁授权。
-        """
+        用户必须能看到的决策——只进日志的话，前端与 agent 都无从知道该找谁授权。"""
         self._emit(event_type, data)
         if self._event_sink is not None:
             try:
@@ -1823,11 +1600,7 @@ class Executor:
 
     def gate_tool_call(self, tool_name: str, arguments: dict,
                        goal: str = "") -> Optional[ToolResult]:
-        """审批门 + Guardian 审校：返回 None = 放行，否则返回**拒绝**结果。
-
-        所有执行路径共用这一道门 —— function calling 主循环（`_dispatch_tool_call`）
-        与 legacy 字符串入口（`call_tool_guarded`）。`goal` 只用于 Guardian 的上下文。
-        """
+        """审批门 + Guardian 审校：返回 None = 放行，否则返回**拒绝**结果。"""
         # 1. 审批门
         if self.approval is not None:
             request = self.tool_manager.build_approval_request(tool_name, arguments)
@@ -1845,9 +1618,7 @@ class Executor:
         if self.guardian is not None:
             request = self.tool_manager.build_approval_request(tool_name, arguments)
             if request is not None and self.guardian.should_review(request.risk_level):
-                # 2.1 人工放行优先：用户已就**这一次完全相同**的调用明确授权
-                #     （授权只能由人类输入产生，见 agent/consent.py），不再让盲审否决。
-                #     只跳过 Guardian 这一层——审批黑名单/沙箱在上面第 1 步，管不到。
+                # 2.1 人工放行优先：用户已就**这一次完全相同**的调用明确授权（授权只能由人类输入产生，见 agent/consent.py），不再让盲审否决。只跳过 Guardian 这一层——审批黑名单/沙箱在上面第 1 步，管不到。
                 if self.consents is not None and self.consents.allows(tool_name, arguments):
                     self._emit_visible("guardian_overridden", {"tool": tool_name,
                                                                "reason": "用户已授权放行"})
@@ -1860,8 +1631,7 @@ class Executor:
                         if self._consents_enabled():
                             self.consents.record_block(tool_name, arguments, verdict.reason,
                                                        command=getattr(request, "command", "") or "")
-                            # 2.2 人就在现场时，就地问他一句——这是"跟 Guardian 说放行"
-                            #     最短的路径：绑定精确、当场生效，不用等下一轮对话。
+                            # 2.2 人就在现场时，就地问他一句——这是"跟 Guardian 说放行"最短的路径：绑定精确、当场生效，不用等下一轮对话。
                             if self.consent_ask is not None:
                                 scope = self._ask_consent(tool_name, arguments, verdict.reason)
                                 if scope:
@@ -1882,18 +1652,7 @@ class Executor:
     def call_tool_guarded(self, tool_name: str, tool_input: str,
                           goal: str = "") -> ToolResult:
         """带**硬超时**的工具调用（所有分发路径都必须走这里）。
-
-        为什么必须统一：`_run_tool_with_timeout` 此前只在 `_dispatch_tool_call`
-        一处使用，而 legacy 步骤、`execute_tool_directly`（启动/清理浏览器）、
-        视觉截图这三条路径都是裸调 `tool_manager.execute()`。一旦 CDP 半死，
-        `browser` 的 `done.wait()` 是**无限等待**（它自己注释写明"靠外层
-        Executor 提供硬超时兜底"），主线程就永久冻结、无法恢复。
-
-        另：这条字符串入口此前还**完全不过审批门**（function calling 主循环是过的），
-        team worker 同样裸调 `tool_manager.execute()` —— 等于黑名单、沙箱等级、
-        Guardian 在 legacy/team 模式下全部不生效（2026-09-22 审计）。现在统一走
-        `gate_tool_call`。
-        """
+        Executor 提供硬超时兜底"），主线程就永久冻结、无法恢复。"""
         from agent.approval import arguments_from_string
         blocked = self.gate_tool_call(
             tool_name, arguments_from_string(tool_input), goal)
@@ -2012,8 +1771,7 @@ class Executor:
             return screenshot_result
 
         except Exception as e:
-            # 视觉模型挂掉不等于"看不见"：本地 OCR 至少能把屏幕上的字读出来，
-            # 让循环继续（用户痛点：视觉模型无响应就整个废掉）。
+            # 视觉模型挂掉不等于"看不见"：本地 OCR 至少能把屏幕上的字读出来，让循环继续（用户痛点：视觉模型无响应就整个废掉）。
             ocr_text = self._ocr_screenshot_text(base64_data)
             if ocr_text:
                 screenshot_result["vision_analysis"] = ocr_text
@@ -2042,12 +1800,7 @@ class Executor:
             return ""
 
     def analyze_page_visually(self, goal: str = "") -> str:
-        """
-        对当前页面执行视觉分析。
-
-        Returns:
-            视觉分析结果文本，失败返回空字符串。
-        """
+        """对当前页面执行视觉分析。"""
         if self.vision_model is None:
             return ""
         result = self._perform_vision_analysis(goal=goal, current_step="查看页面内容")
@@ -2076,12 +1829,7 @@ class Executor:
             return f"帧对比失败: {str(e)}"
 
     def detect_page_anomaly(self, screenshot_base64: str, context: str = "") -> dict:
-        """
-        检测页面异常（弹窗、错误、加载失败等）。
-
-        Returns:
-            {"has_anomaly": bool, "type": str, "description": str}
-        """
+        """检测页面异常（弹窗、错误、加载失败等）。"""
         if self.vision_model is None:
             return {"has_anomaly": False, "type": "", "description": "视觉模型不可用"}
         try:
@@ -2150,12 +1898,7 @@ class Executor:
         return self._parse_decision(response)
 
     def _is_browser_task(self, goal: str, current_step: str) -> bool:
-        """智能判断是否为浏览器任务。
-
-        两级过滤：
-        1. 关键词快速匹配（必须命中关键词才进入第二步）
-        2. 负面模式过滤（排除抱怨、提问、反问等非任务场景）
-        """
+        """智能判断是否为浏览器任务。"""
         combined = (goal + " " + current_step).lower()
         if not any(kw.lower() in combined for kw in self.BROWSER_KEYWORDS):
             return False

@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""备用模型链测试：主模型/主端点挂了就换备用的（用户要求"超时就换这些"）。
-
-实测背景（本机真机验证）：
-- 视觉：默认视觉模型能读图（答对图里的暗号）；
-  同端点上 `sensenova-6.7-flash-lite` 对多模态路由 404、`u1.x` 是生图模型（chat 404）。
-- 生图：默认供应商的几个生图模型都能出图（b64_json）。
-所以默认备用就是"另一家"：备用供应商主 → 默认供应商备。
-"""
+"""备用模型链测试：主模型/主端点挂了就换备用的（用户要求"超时就换这些"）。"""
 import pytest
 
 import config as cfg
@@ -121,10 +114,7 @@ class TestVisionFallback:
 
 
 class TestVisionFallbackChain:
-    """备用链支持"每个条目自带端点"（`模型@预设名`），跨厂商兜底必需。
-
-    预设的 key 放在独立变量里，不进模型列表——那份列表会被 `/config`、doctor 打印。
-    """
+    """备用链支持"每个条目自带端点"（`模型@预设名`），跨厂商兜底必需。"""
 
     def _cfg(self, monkeypatch, models, presets=None, **over):
         monkeypatch.setitem(cfg.VISION_CONFIG, "vision_model", "primary-vision")

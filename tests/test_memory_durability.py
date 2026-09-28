@@ -1,13 +1,4 @@
-"""
-批次2 回归：记忆持久化的原子性与损坏可见性。
-
-实测故障（2026-09-17 审计）：`Memory._save_json` 直接 `open(path,"w")` 就地
-截断，而 `_load_json` 解析失败时静默 `return []`。把 memory.json 截断一半后
-`Memory()` 会加载到 0 条**且不报错**，下一次 `remember()` 只留下新条目——
-长期记忆/经验库静默全丢。agent/session.py 早就是原子写，这里补齐。
-
-存储布局：Memory(db_path=X) → 数据落在 X/default/（chat_db_path）。
-"""
+"""批次2 回归：记忆持久化的原子性与损坏可见性。"""
 import json
 from pathlib import Path
 

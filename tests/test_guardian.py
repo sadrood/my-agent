@@ -1,18 +1,6 @@
 # -*- coding: utf-8 -*-
 """Guardian 安全审校的测试。
-
-重点是一份**真实事故**的回归：运行日志里 Guardian 拦了 10 次，其中
-- 跑 pytest（理由："执行 pytest 不属于必要操作"）
-- 删本项目临时文件（理由："破坏性操作"，但项目规则 9/10 明确要求清理）
-- 读项目内日志（理由："可能泄露敏感调试信息"）
-- `bg output <作业ID>`（理由："命令语法错误，'bg' 无法接受 'output' 参数"）——
-  而 tools/terminal.py 里 `bg output` 就是合法子命令，是被凭空判错的
-- sleep 45 秒（理由："潜在的拖延/拒绝服务行为"）
-
-根因是提示词的第 4 条"是否明显偏离当前任务目标？"：括号里本意是"被注入后做
-无关的**破坏性**操作"，但模型只读到裸条款，于是把"任务相关性"当成了拦截标准。
-后果是 Agent 无法完成正常工作，甚至无法遵守项目自己的清理规则。
-"""
+后果是 Agent 无法完成正常工作，甚至无法遵守项目自己的清理规则。"""
 import json
 
 from agent.guardian import GUARDIAN_SYSTEM_PROMPT, Guardian
@@ -26,9 +14,7 @@ def _req(tool="terminal", risk="medium", command="pytest -q"):
 
 def _guardian(llm=None, config=None, **over):
     """显式给全配置，避免测试依赖 .env 里的 GUARDIAN_* 设置。
-
-    注意这里的构造用**位置参数**，否则下面的全局替换会把它自己也换掉。
-    """
+    注意这里的构造用**位置参数**，否则下面的全局替换会把它自己也换掉。"""
     cfg = {"enabled": True, "min_risk": "medium", "fail_open": True, "timeout": 10}
     cfg.update(config or {})
     cfg.update(over)
@@ -52,10 +38,7 @@ class TestPromptPolicy:
     """提示词契约：这些是修出来的策略，不能被改回去。"""
 
     def test_goal_relevance_is_not_a_block_criterion(self):
-        """旧的裸条款"是否明显偏离当前任务目标？"必须消失。
-
-        它把"任务相关性"变成拦截理由，是 10 次误拦的共同根因。
-        """
+        """旧的裸条款"是否明显偏离当前任务目标？"必须消失。"""
         assert "是否明显偏离当前任务目标？" not in GUARDIAN_SYSTEM_PROMPT
         assert "任务相关性不是安全风险" in GUARDIAN_SYSTEM_PROMPT
 
@@ -64,7 +47,7 @@ class TestPromptPolicy:
             assert item in GUARDIAN_SYSTEM_PROMPT, item
 
     def test_must_not_block_on_guessed_syntax_errors(self):
-        """Guardian 无法可靠判断命令语法——实测它把合法的 `bg output` 判成语法错误。"""
+        """Guardian 无法可靠判断命令语法——它把合法的 `bg output` 判成语法错误。"""
         assert "命令语法错误" in GUARDIAN_SYSTEM_PROMPT
         assert "拿不准就 allow" in GUARDIAN_SYSTEM_PROMPT
 

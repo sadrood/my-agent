@@ -1,19 +1,4 @@
-"""
-光标可视化浮层（电脑操控时的"看得见"提示）。
-
-背景：Agent 用 computer 工具控制键鼠时，用户只能看到屏幕上鼠标自己动，
-不知道是人为还是 Agent 所为，也难以确认点击落点。这里做一个**点击穿透、
-置顶、零干扰**的光环浮层：
-
-- 光环跟随真实光标（半径 16 的橙色圆环 + 中心点）
-- 每次点击在落点画一圈扩散涟漪
-- 仅 Windows；Agent 操作期间显示，空闲 COMPUTER_CURSOR_IDLE 秒后自动隐藏
-- 默认关闭，`COMPUTER_CURSOR_OVERLAY=1` 才开（见 config.COMPUTER_USE_CONFIG）
-
-实现要点：tkinter 无边框置顶窗 + `-transparentcolor` 抠出透明底，
-再用 Win32 扩展样式 WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|
-WS_EX_TOOLWINDOW 让鼠标事件穿透（不挡用户操作、不进任务栏、不抢焦点）。
-"""
+"""光标可视化浮层（电脑操控时的"看得见"提示）。"""
 import sys
 import threading
 import time
@@ -28,11 +13,7 @@ _RIPPLE_COLOR = "#ffd08a"
 
 
 def overlay_enabled() -> bool:
-    """是否启用光标可视化（开关见 config.COMPUTER_USE_CONFIG）。
-
-    默认**关闭**：全屏置顶浮层一旦点击穿透失效会吞掉整屏鼠标事件并抢焦点，
-    风险高于收益，改为按需开启。
-    """
+    """是否启用光标可视化（开关见 config.COMPUTER_USE_CONFIG）。"""
     return bool(COMPUTER_USE_CONFIG.get("cursor_overlay"))
 
 
@@ -115,9 +96,7 @@ class CursorOverlay:
             canvas = tk.Canvas(root, width=sw, height=sh, bg=_TRANSPARENT_KEY,
                                highlightthickness=0, bd=0)
             canvas.pack()
-            # 点击穿透 + 不抢焦点 + 不进任务栏：必须给顶层**和所有子窗口**都设
-            # WS_EX_TRANSPARENT（Tk 的 Canvas 是子窗口，只设顶层会吞掉整屏鼠标事件），
-            # 并在设置后读回校验，任一失败即放弃显示。
+            # 点击穿透 + 不抢焦点 + 不进任务栏：必须给顶层**和所有子窗口**都设 WS_EX_TRANSPARENT（Tk 的 Canvas 是子窗口，只设顶层会吞掉整屏鼠标事件），并在设置后读回校验，任一失败即放弃显示。
             GWL_EXSTYLE = -20
             WS_EX_LAYERED, WS_EX_TRANSPARENT = 0x00080000, 0x00000020
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW = 0x08000000, 0x00000080
@@ -152,16 +131,14 @@ class CursorOverlay:
                     ok = False
             if not ok:
                 print("[cursor_overlay] 点击穿透校验失败，已放弃显示（避免吞掉鼠标事件）", file=sys.stderr)
-                # 不销毁窗口：拆 Tcl 会在随后任意时刻把解释器带崩（见 stop()）。
-                # 此时还没 ShowWindow，保持不映射即可；self._root 持着引用防析构
+                # 不销毁窗口：拆 Tcl 会在随后任意时刻把解释器带崩（见 stop()）。此时还没 ShowWindow，保持不映射即可；self._root 持着引用防析构
                 self._ready.set()
                 return
             try:
                 u32.ShowWindow(HWND_PARENT, 4)      # SW_SHOWNOACTIVATE：显示但不激活
             except Exception:
                 pass
-            # 不用 withdraw/deiconify（overrideredirect + transparentcolor 下重映射不可靠）：
-            # 窗口常驻，空闲时画布清空 = 键色全透明 = 看不见也点不穿。
+            # 不用 withdraw/deiconify（overrideredirect + transparentcolor 下重映射不可靠）：窗口常驻，空闲时画布清空 = 键色全透明 = 看不见也点不穿。
             self._ready.set()
 
             class _PT(ctypes.Structure):

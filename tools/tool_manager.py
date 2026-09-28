@@ -1,13 +1,4 @@
-"""
-工具管理器模块（v2：JSON Schema + 结构化执行 + 输出截断）。
-统一管理所有工具的注册、查找、调用和描述生成。
-
-v2 变化：
-- register 支持结构化工具（BaseTool.schema / execute_json）
-- execute_json(): 按 JSON Schema 参数执行工具（function calling 入口）
-- execute(): 字符串入口（旧接口保留），两个入口都统一做输出截断
-- list_openai_schemas(): 输出 function calling 格式的工具列表
-"""
+"""工具管理器模块：JSON Schema + 结构化执行 + 输出截断。"""
 from typing import Optional
 
 from config import TOOL_CONFIG
@@ -25,15 +16,10 @@ import os
 
 def _create_browser_tool() -> BaseTool:
     """创建浏览器工具。
-
-    桌面端在运行（环境变量注入或桥健康检查通过）→ 一律用内嵌浏览器：
-    Agent 操控的页面就是侧栏里的 <webview>，外部 Playwright 浏览器被禁用。
-    桌面端未运行（纯 CLI 场景）→ 才回退独立 Playwright 浏览器。
-    """
+    桌面端未运行（纯 CLI 场景）→ 才回退独立 Playwright 浏览器。"""
     from config import BROWSER_CONFIG
 
-    # 仅以实时环境变量为准（config 里 embedded_url 是导入时快照，会被陈旧值
-    # 误导：桌面端曾注入过该变量时，即使当前已删除也会误走内嵌分支）。
+    # 仅以实时环境变量为准（config 里 embedded_url 是导入时快照，会被陈旧值误导：桌面端曾注入过该变量时，即使当前已删除也会误走内嵌分支）。
     if os.getenv("MY_AGENT_EMBEDDED_BROWSER_URL"):
         try:
             from tools.embedded_browser import EmbeddedBrowserTool
@@ -120,8 +106,6 @@ class ToolManager:
             pass
 
         # 桌面操控工具（仅 Windows 有实现，且受 COMPUTER_USE_ENABLED 控制）：高危走审批门。
-        # 不注册时模型看不到它 —— 否则非 Windows 上会反复调用一个恒返回「仅支持 Windows」
-        # 的工具，而 agent 还会因它存在而追加整套桌面操控提示。
         try:
             from config import COMPUTER_USE_CONFIG
             from tools.computer_use import COMPUTER_SUPPORTED, DesktopTool
@@ -144,9 +128,7 @@ class ToolManager:
         except Exception:
             pass
 
-        # 多媒体工具的 `*_ENABLED` 开关必须在注册处判一次：只在
-        # `models/*.py::is_configured()` 里读没有调用点，设成 false 也照样注册、
-        # 照样调上游计费。写法与其它按开关注册的工具一致。
+        # 多媒体工具的 `*_ENABLED` 开关必须在注册处判一次：只在 `models/*.py::is_configured()` 里读没有调用点，设成 false 也照样注册、照样调上游计费。写法与其它按开关注册的工具一致。
 
         # 文生图工具（兼容 images 端点；b64 与 url 两种返回都落盘）
         try:
@@ -202,8 +184,7 @@ class ToolManager:
         except Exception:
             pass
 
-        # 本地工具目录（tools/local/，已 gitignore）：agent 自造的工具/技能放这里，
-        # 只在本机生效、不随仓库推送。约定：模块内定义 BaseTool 子类即可。
+        # 本地工具目录（tools/local/，已 gitignore）：agent 自造的工具/技能放这里，只在本机生效、不随仓库推送。约定：模块内定义 BaseTool 子类即可。
         self._local_tools: list = []
         if TOOL_CONFIG.get("local_enabled", True):
             self._local_tools = self._load_local_tools()
@@ -222,12 +203,7 @@ class ToolManager:
         return os.path.abspath(os.path.join(root, raw))
 
     def _load_local_tools(self) -> list:
-        """扫描并加载本地工具目录里的 BaseTool 子类。
-
-        - 单个模块出错只跳过它（打一行警告），绝不影响其它工具与启动；
-        - 以 ``_`` 开头的文件视为私有/临时，跳过；
-        - 约定：工具类必须能无参实例化。
-        """
+        """扫描并加载本地工具目录里的 BaseTool 子类。"""
         import importlib.util
         import sys
 
@@ -270,21 +246,11 @@ class ToolManager:
         return list(getattr(self, "_local_tools", []))
 
     def register(self, tool: BaseTool):
-        """
-        注册一个工具。
-
-        Args:
-            tool: 工具实例（需继承 BaseTool）。
-        """
+        """注册一个工具。"""
         self._tools[tool.name] = tool
 
     def unregister(self, tool_name: str):
-        """
-        注销一个工具。
-
-        Args:
-            tool_name: 工具名称。
-        """
+        """注销一个工具。"""
         self._tools.pop(tool_name, None)
 
     def bind_stop_event(self, event) -> None:
@@ -298,11 +264,7 @@ class ToolManager:
                     pass
 
     def cancel_active_tools(self) -> None:
-        """兜底终止：调用所有工具的 terminate_current()（若实现）。
-
-        用于执行器捕获停止信号后强行打断正在运行的工具，
-        即使工具内部没有轮询停止信号也能被杀掉。
-        """
+        """兜底终止：调用所有工具的 terminate_current()（若实现）。"""
         for tool in self._tools.values():
             terminate = getattr(tool, "terminate_current", None)
             if callable(terminate):
@@ -312,13 +274,7 @@ class ToolManager:
                     pass
 
     def reset_tool(self, tool_name: str):
-        """
-        重置指定工具状态（工具执行超时/挂起后调用）。
-
-        优先调用工具实例的 reset()（同一实例、引用有效）；实例没有 reset()
-        时退回重新实例化。丢弃卡死的底层连接（如 Playwright 的 CDP），
-        下次调用从干净状态重新开始。
-        """
+        """重置指定工具状态（工具执行超时/挂起后调用）。"""
         tool = self._tools.get(tool_name)
         if tool is None:
             return
@@ -352,12 +308,7 @@ class ToolManager:
         return list(self._tools.keys())
 
     def get_tools_description(self) -> str:
-        """
-        生成所有工具的文本描述，供 LLM 阅读并决定使用哪个工具。
-
-        Returns:
-            工具描述文本。
-        """
+        """生成所有工具的文本描述，供 LLM 阅读并决定使用哪个工具。"""
         if not self._tools:
             return "当前无可用工具。"
         lines = ["可用工具列表："]
@@ -371,7 +322,7 @@ class ToolManager:
         return self.get_tools_description()
 
     # ================================================================
-    # v2：JSON Schema 接口
+    # JSON Schema 接口
     # ================================================================
 
     def list_openai_schemas(self) -> list[dict]:
@@ -398,16 +349,7 @@ class ToolManager:
     # ================================================================
 
     def execute(self, tool_name: str, tool_input: str) -> ToolResult:
-        """
-        执行指定工具（字符串入口，旧接口）。
-
-        Args:
-            tool_name: 工具名称。
-            tool_input: 工具输入参数。
-
-        Returns:
-            ToolResult 对象。
-        """
+        """执行指定工具（字符串入口，旧接口）。"""
         tool = self._tools.get(tool_name)
         if tool is None:
             return ToolResult(
@@ -419,16 +361,7 @@ class ToolManager:
         return self._truncate_result(result)
 
     def execute_json(self, tool_name: str, arguments: dict) -> ToolResult:
-        """
-        执行指定工具（结构化入口，function calling 用）。
-
-        Args:
-            tool_name: 工具名称。
-            arguments: JSON Schema 参数。
-
-        Returns:
-            ToolResult 对象。
-        """
+        """执行指定工具（结构化入口，function calling 用）。"""
         tool = self._tools.get(tool_name)
         if tool is None:
             return ToolResult(
@@ -436,10 +369,7 @@ class ToolManager:
                 output="",
                 error=f"未知工具: '{tool_name}'。可用工具: {', '.join(self._tools.keys())}",
             )
-        # 回退判定必须基于**签名**，不能靠捕获 TypeError：
-        # 旧实现 `except TypeError:` 会把工具执行体内部抛出的 TypeError 也当成
-        # "该工具没实现 execute_json"，于是**把同一个调用再走一遍字符串路径**——
-        # 对 terminal / video_gen / file 这类有副作用的工具就是执行两次。
+        # 回退判定必须基于**签名**，不能靠捕获 TypeError：旧实现 `except TypeError:` 会把工具执行体内部抛出的 TypeError 也当成"该工具没实现 execute_json"。
         import inspect
 
         impl = type(tool).execute_json
@@ -468,13 +398,7 @@ class ToolManager:
         return result
 
     def build_approval_request(self, tool_name: str, arguments: dict):
-        """为一次结构化调用生成审批请求。
-
-        这里统一补全工具声明的 `approval` 元数据（auto / on-request）。工具层有
-        覆写 `build_approval_request` 的工具若都不传该字段，`ApprovalPolicy.decide`
-        就判不到 `request.approval`，`approval="on-request"` 的工具会被静默降级成
-        零确认执行。统一在这里补齐：工具声明一次，链路自动带上。
-        """
+        """为一次结构化调用生成审批请求。"""
         tool = self._tools.get(tool_name)
         if tool is None:
             return None
@@ -501,18 +425,7 @@ class ToolManager:
 
     def connect_mcp_server(self, server_name: str, command: str,
                            args: list = None, env: dict = None) -> bool:
-        """
-        连接 MCP 服务器并自动注册其工具。
-
-        Args:
-            server_name: 服务器别名
-            command: 启动命令
-            args: 命令参数
-            env: 环境变量
-
-        Returns:
-            连接是否成功
-        """
+        """连接 MCP 服务器并自动注册其工具。"""
         from tools.mcp_client import MCPClient
 
         client = MCPClient(tool_manager=self)

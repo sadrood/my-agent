@@ -78,13 +78,7 @@ def test_win_unix_shim_translations():
 
 
 class TestSessionCleanupAtExit:
-    """常驻会话必须在进程退出时被收掉。
-
-    实测故障（2026-09-22 审计）：`TerminalTool.close_all_sessions()` **没有任何生产
-    调用方**（Agent 也没有退出清理钩子），于是 `terminal session start` 起的常驻
-    cmd.exe 在进程生命周期内一直活着；叠加 `ToolManager.reset_tool` 超时重建实例，
-    旧实例的 sessions 与后台 job 会被彻底孤儿化 —— 句柄、临时日志、子进程再无人回收。
-    """
+    """常驻会话必须在进程退出时被收掉。"""
 
     def test_manager_registers_itself_for_atexit(self):
         import atexit

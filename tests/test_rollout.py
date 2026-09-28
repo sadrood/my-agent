@@ -95,8 +95,7 @@ def test_compact_keeps_tool_round_integrity(tmp_path):
         return "摘要"
 
     r = Rollout(run_id="t6", enabled=False, summarizer=summarizer)
-    # 4 个完整闭环（各 3 条，共 12 条）；keep=5 → 保留尾部 5 条，
-    # 截断线落在第 3 个闭环的 tool 响应中间
+    # 4 个完整闭环（各 3 条，共 12 条）；keep=5 → 保留尾部 5 条，截断线落在第 3 个闭环的 tool 响应中间
     messages = []
     for i in range(4):
         messages.extend(_tool_round(i))
@@ -104,8 +103,7 @@ def test_compact_keeps_tool_round_integrity(tmp_path):
 
     roles = [m["role"] for m in out]
     assert roles[0] == "system"          # 摘要
-    # 校验协议对仗：从每个 tool 消息向前找最近的 assistant，
-    # 它必须带 tool_calls，且 tool_calls 数 ≥ 从它开始的连续 tool 消息数
+    # 校验协议对仗：从每个 tool 消息向前找最近的 assistant，它必须带 tool_calls，且 tool_calls 数 ≥ 从它开始的连续 tool 消息数
     _check_tool_protocol(out[1:])
 
 
@@ -149,11 +147,7 @@ def test_compact_drops_leading_orphan_tool(tmp_path):
 
 class TestClipLimits:
     """落盘截断：追踪文件是事后诊断的唯一依据，截太狠等于没有记录。
-
-    实测事故（2026-09-18）：agent 的最终自审报告在 rollout 里被截到 300 字、断在
-    半句，复盘"它提了哪些问题"只能去 memory/sessions/*.json 里翻。现在上限可配，
-    且截断时附原文长度——避免把"被截断"误读成"就这么多"。
-    """
+    且截断时附原文长度——避免把"被截断"误读成"就这么多"。"""
 
     def test_short_text_passes_through_untouched(self):
         assert clip_text("你好，世界") == "你好，世界"

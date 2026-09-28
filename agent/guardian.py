@@ -1,15 +1,4 @@
-"""
-Guardian 安全审校模块（借鉴同类实现的 guardian / guardian-v2 设计）。
-
-同类实现的 Guardian 是一个后台运行的独立审校 Agent，在工具调用执行前
-检查其安全性（如发现危险模式则拦截或提醒）。
-
-本项目实现为轻量同步版（Python 单进程）：
-- 仅对 risk_level >= min_risk 的调用进行审校（省 token）
-- 用独立的小型提示词让 LLM 给出 allow / block 判断
-- 超时或异常时按 fail_open 配置决定放行还是拒绝（默认放行，避免卡死）
-- 可配置禁用（GUARDIAN_CONFIG["enabled"] = false）
-"""
+"""Guardian 安全审校模块（借鉴同类实现的 guardian / guardian-v2 设计）。"""
 from dataclasses import dataclass
 from typing import Optional
 
@@ -65,21 +54,10 @@ class GuardianVerdict:
 
 
 class Guardian:
-    """
-    Guardian 安全审校器。
-
-    用法:
-        guardian = Guardian(llm)
-        verdict = guardian.review(request, goal)
-        if verdict.verdict == "block": ...拒绝执行...
-    """
+    """Guardian 安全审校器。"""
 
     def __init__(self, llm=None, config: dict = None):
-        """
-        Args:
-            llm: LLM 实例（需有 chat 方法）。为 None 时 Guardian 禁用。
-            config: 配置覆盖（默认 GUARDIAN_CONFIG）
-        """
+        """Args:"""
         self.config = config or GUARDIAN_CONFIG
         self.llm = llm
         self.review_count = 0
@@ -95,16 +73,7 @@ class Guardian:
         return RISK_LEVELS.get(risk_level, 1) >= RISK_LEVELS.get(min_risk, 1)
 
     def review(self, request: ApprovalRequest, goal: str) -> GuardianVerdict:
-        """
-        审校一次工具调用。
-
-        Args:
-            request: 审批请求（含工具名、参数、风险等级）
-            goal: 当前任务目标
-
-        Returns:
-            GuardianVerdict。未启用 / 风险太低时 verdict 为 "allow"，used=False。
-        """
+        """审校一次工具调用。"""
         if not self.enabled or not self.should_review(request.risk_level):
             return GuardianVerdict(verdict="allow", reason="跳过审校（低风险或未启用）", used=False)
 

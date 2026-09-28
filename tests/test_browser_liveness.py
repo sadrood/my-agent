@@ -1,15 +1,5 @@
 """浏览器工具的探活与点击兜底回归（用假对象，不启动真浏览器）。
-
-实测故障（2026-09-22 审计）：
-1. `Browser.is_connected` 在 playwright 里是**方法**不是 property，而代码写的是
-   `bool(self._browser.is_connected)` —— 等于 `bool(<bound method>)`，**恒为 True**。
-   于是"浏览器已死就重建"的分支永不触发，坏状态再不自愈。
-2. `context.pages` 是 property，context 关闭后返回 `[]` 而不抛异常，`_is_context_alive`
-   同样恒为 True。（以上两条都已在真实 playwright 上复现。）
-3. `_click` 里 `element = get_by_text(...).first; if element:` —— Locator 没有
-   `__bool__`/`__len__`，`bool(locator)` 恒为 True，于是未匹配时白等 10 秒、
-   直接抛到外层 except，**role 兜底永远执行不到**（图标按钮就该走那条）。
-"""
+直接抛到外层 except，**role 兜底永远执行不到**（图标按钮就该走那条）。"""
 import pytest
 
 from tools.browser import BrowserTool
@@ -177,13 +167,7 @@ class _FakePlaywright:
 
 
 class TestPlaywrightDriverNotLeaked:
-    """作废引用时必须真的 stop()，否则每次自愈漂一个 node.exe。
-
-    实测故障（2026-09-22 审计）：只有 `_close_impl` 调 `stop()`，而 `_invalidate()` /
-    `reset()` / `_dispatch` 的守卫都只把 `self._playwright` 置 None。playwright sync 的
-    Playwright/Connection 没有 `__del__` —— 引用一丢，驱动进程就再也没人收，
-    而 `_force_cleanup_residual` 只按 `--user-data-dir=` 匹配 chrome.exe。
-    """
+    """作废引用时必须真的 stop()，否则每次自愈漂一个 node.exe。"""
 
     def _tool(self):
         tool = BrowserTool()

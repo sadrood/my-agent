@@ -1,15 +1,5 @@
-"""
-Deep Research 深度研究模块。
-
-工作流程：
-1. 搜索规划 → 确定搜索策略和关键词
-2. 多源采集 → 并行爬取多个来源
-3. 内容提取 → 从HTML中提取标题、正文、关键数据
-4. 交叉验证 → 对比不同来源的一致性
-5. 综合报告 → 生成带引用来源的结构化报告
-
-依赖: BrowserTool (浏览器工具)、VisionModel (视觉辅助)
-"""
+"""Deep Research 深度研究模块。
+依赖: BrowserTool (浏览器工具)、VisionModel (视觉辅助)"""
 import re
 import time
 from typing import List, Dict, Any
@@ -41,15 +31,7 @@ class ResearchReport:
 
 
 class DeepResearcher:
-    """
-    深度研究员。
-    自动搜索 → 采集 → 提取 → 验证 → 生成报告。
-
-    用法:
-        researcher = DeepResearcher(tool_manager, llm)
-        report = researcher.research("2024年AI Agent发展趋势", depth=3)
-        print(report.summary)
-    """
+    """深度研究员。"""
 
     # 默认搜索引擎和搜索 URL 模板
     SEARCH_ENGINES = {
@@ -70,18 +52,7 @@ class DeepResearcher:
         sources_per_query: int = 5,
         include_citations: bool = True,
     ) -> ResearchReport:
-        """
-        执行深度研究。
-
-        Args:
-            topic: 研究主题
-            depth: 研究深度（1-5），越高越深入
-            sources_per_query: 每个搜索词采集的源数量
-            include_citations: 是否包含引用
-
-        Returns:
-            ResearchReport
-        """
+        """执行深度研究。"""
         print(f"\n[DeepResearch] 开始研究: {topic}")
         print(f"[DeepResearch] 深度: {depth}, 每词源数: {sources_per_query}")
 
@@ -121,12 +92,7 @@ class DeepResearcher:
         return report
 
     def lookup_snippets(self, query: str, limit: int = 3) -> List[Dict[str, str]]:
-        """轻量检索：搜一次并取前 N 个来源的正文摘要。
-
-        与 research() 的区别：不做关键词规划、不提炼事实、不写报告——只回答
-        "这个说法在公开资料里长什么样"。文章工坊的事实核查用它（只查被点名的
-        可疑说法，全文逐条联网既慢又贵）。
-        """
+        """轻量检索：搜一次并取前 N 个来源的正文摘要。"""
         out: List[Dict[str, str]] = []
         try:
             for source in self._search_and_collect(query, limit=limit)[:limit]:
@@ -392,9 +358,7 @@ class DeepResearcher:
             from urllib.parse import quote_plus, urlparse
             domain = urlparse(url).netloc.lower()
             page_lines = page_text.split("\n")
-            # 取有意义的域名片段：`domain.split(".")[:1]` 对 www.example.com 得到的是
-            # `www` —— 于是页面上任何含 www 的行都会被当标题（2026-09-22 审计）。
-            # 跳过 www/m 这类前缀，且片段至少 3 个字符。
+            # 取有意义的域名片段：`domain.split(".")[:1]` 对 www.example.com 得到的是 `www` —— 于是页面上任何含 www 的行都会被当标题。跳过 www/m 这类前缀，且片段至少 3 个字符。
             _keys = [s for s in domain.split(".")
                      if s and s not in ("www", "m", "mobile") and len(s) >= 3]
             if not _keys:
@@ -412,8 +376,7 @@ class DeepResearcher:
         """清理页面文本，去除导航、页脚等噪音。"""
         lines = text.split("\n")
         cleaned = []
-        # 跳过长行（可能是代码或样式）
-        # 跳过太短的行（可能是导航项）
+        # 跳过长行（可能是代码或样式）跳过太短的行（可能是导航项）
         for line in lines:
             stripped = line.strip()
             if not stripped:

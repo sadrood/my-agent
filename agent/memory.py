@@ -1,12 +1,4 @@
-"""
-记忆模块（进化版 v2）。
-支持：
-- 短期记忆：对话历史 + 步骤历史（当前会话）
-- 长期记忆：手动存储的知识
-- 经验库：每次任务完成后自动保存，下次自动召回
-- 失败模式库：自动归纳常见失败原因，生成规避策略
-- 策略库：追踪不同方案的成功率，优先推荐高成功率方案
-"""
+"""记忆模块（进化版 v2）。"""
 import json
 import os
 import re
@@ -26,11 +18,7 @@ from config import PROJECT_ROOT
 
 def build_distill_llm(main_llm=None):
     """经验压缩用的 LLM：配了 LEARN_DISTILL_* 就用它，否则沿用主 LLM。
-
-    为什么单独一个模型：压缩是离线维护任务（一次要跑 5-7 次大请求），而主模型在
-    配额紧张时会回 429 / **空正文**——实测 7 个类别里 4 个拿到空正文，压缩白跑。
-    只影响压缩，不动主循环。
-    """
+    配额紧张时会回 429 / **空正文**——7 个类别里 4 个拿到空正文，压缩白跑。"""
     model = str(LEARN_CONFIG.get("distill_model") or "").strip()
     if not model:
         return main_llm
@@ -106,10 +94,7 @@ class StrategyEntry:
 # ============================================================
 
 class Memory:
-    """
-    Agent 记忆管理器 v2。
-    四层记忆体系：短期记忆 → 长期记忆 → 经验库 → 失败模式库
-    """
+    """Agent 记忆管理器 v2。"""
 
     # 长期记忆自动截断上限（remember() 超过时清理最旧条目）
     MAX_LONG_TERM = 200
@@ -128,13 +113,7 @@ class Memory:
         (r"(编码|encode|decode|乱码|gbk|utf)", "encoding_error"),
     ]
 
-    # 任务类别关键词 → 标签（顺序即优先级：先命中先归类）
-    #
-    # ⚠️ 这张表之前**漏掉了整个开发与视频词汇**：实测 7 个典型目标
-    # （"修 pytest 报的 bug"、"重构 memory.py 的召回逻辑"、"配音+字幕合成视频"…）
-    # **全部**落到 general，而库里 117/159 条都是 general —— 于是"同类别加权"
-    # （W_CATEGORY）形同虚设，召回退化成 2-gram 关键词硬凑。
-    # 补词表时注意：只放**有区分度**的词，别把"写""做"这类放进 coding。
+    # 任务类别关键词 → 标签（顺序即优先级：先命中先归类）⚠️ 这张表之前**漏掉了整个开发与视频词汇**：7 个典型目标（"修 pytest 报的 bug"、"重构 memory.py 的召回逻辑"、"配音+字幕合成视频"…）**全部**落到。
     TASK_CLASSIFIERS = [
         (["安装", "pip", "install", "配置", "部署", "setup"], "setup"),
         (["excel", "表格", "xlsx", "csv", "单元格", "工作表"], "file_excel"),
@@ -143,8 +122,7 @@ class Memory:
           "语音", "tts", "生图", "配音员", "成片", "转场"], "video_media"),
         # 写作/校对（文章工坊那条线）
         (["文章", "润色", "校对", "审阅", "文案", "稿子", "写一篇", "写作", "排版"], "writing"),
-        # 网上的事先判：像"用浏览器搜索这个报错的解法"里也含"报错"，
-        # 若 coding 排在前面会被误判成编程任务（实测踩到）。
+        # 网上的事先判：像"用浏览器搜索这个报错的解法"里也含"报错"，若 coding 排在前面会被误判成编程任务。
         (["浏览器", "网页", "搜索", "访问", "打开.*网", "浏览"], "web_browse"),
         # 编程/调试（"测试""用例""pytest""bug"这些最常见的说法之前一个都没有）
         (["测试", "用例", "单元测试", "pytest", "unittest", r"\btest\b", "bug", "报错",
@@ -156,9 +134,7 @@ class Memory:
         (["文件", "目录", "文件夹", "复制", "移动", "删除", "重命名"], "file_ops"),
     ]
 
-    #: 经验召回打分的权重与近期性半衰期。
-    #: 用显式权重而不是把各项塞进 lexicographic 元组：后者无法表达"近期性只占
-    #: 一部分分量"，也没法调参。关键词重叠是主因，所以权重远高于其它项。
+    # : 经验召回打分的权重与近期性半衰期。: 用显式权重而不是把各项塞进 lexicographic 元组：后者无法表达"近期性只占: 一部分分量"，也没法调参。关键词重叠是主因，所以权重远高于其它项。
     W_OVERLAP = 10.0          # 与经验 **goal** 每命中一个关键词
     W_SUMMARY = 2.0           # 与经验 **summary** 命中（次要信号，防通用词刷分）
     W_CATEGORY = 3.0          # 同一任务类别
@@ -167,14 +143,8 @@ class Memory:
     RECENCY_HALF_LIFE_DAYS = 30.0   # 30 天衰减一半
 
     def __init__(self, db_path: str = None, chat_id: str = None):
-        """
-        Args:
-            db_path: 记忆数据根目录（默认锚定项目根 memory/，不依赖进程 cwd，
-                     避免 cwd 漂移导致记忆写到 output/ 子目录造成分叉）
-            chat_id: 当前对话 ID（如 conv-20260825-abc123）。
-                     为 None 时使用 "default" 兼容旧行为。
-                     长期记忆按 chat_id 分目录存储，实现对话间记忆隔离。
-        """
+        """Args:
+        避免 cwd 漂移导致记忆写到 output/ 子目录造成分叉）"""
         if db_path is None:
             db_path = os.path.join(PROJECT_ROOT, "memory")
         elif not os.path.isabs(db_path):
@@ -195,10 +165,7 @@ class Memory:
         # 经验库
         self.experiences: list[ExperienceEntry] = []
 
-        # 学习相关的容量与预算（全部来自 LEARN_CONFIG，不再写死在代码里）
-        #   max_experiences  : 经验库容量，0 = 不限制
-        #   recall_n         : 每次任务注入几条
-        #   recall_pool      : 打分候选池，每类别各取最近 N 条，0 = 全量
+        # 学习相关的容量与预算（全部来自 LEARN_CONFIG，不再写死在代码里） max_experiences : 经验库容量，0 = 不限制 recall_n : 每次任务注入几条 recall_pool : 打分候选池。
         self.max_experiences = int(LEARN_CONFIG.get("max_experiences_store", 2000))
         self.recall_n = int(LEARN_CONFIG.get("max_experiences_recall", 3))
         self.recall_pool = int(LEARN_CONFIG.get("recall_pool", 200))
@@ -261,14 +228,7 @@ class Memory:
         self.step_history.clear()
 
     def clear_all(self):
-        """清空全部记忆（内存 + 落盘）。
-
-        删的是 `chat_db_path`（= `db_path/<chat_id>/`）而**不是** `db_path`：文件
-        从来就写在 chat 子目录里（`_save_json` 用的是 `chat_dir or self.chat_db_path`），
-        删父目录等于什么都没删 —— 清空后重新 `Memory(db_path=...)`，长期记忆与失败
-        模式原样复活（2026-09-22 审计实测）。旧测试断言的正是父目录下的文件，
-        所以一直是个空断言。
-        """
+        """清空全部记忆（内存 + 落盘）。"""
         self.conversation_history.clear()
         self.step_history.clear()
         self.long_term_memory.clear()
@@ -306,12 +266,7 @@ class Memory:
         return results[-n:]
 
     def prune_long_term(self, keep: int = 100):
-        """
-        清理长期记忆：只保留最新的 keep 条。
-
-        keep <= 0 时清空全部长期记忆。
-        返回被清理的条数。
-        """
+        """清理长期记忆：只保留最新的 keep 条。"""
         keep = max(0, int(keep))
         removed = max(0, len(self.long_term_memory) - keep)
         if removed == 0:
@@ -345,10 +300,7 @@ class Memory:
 
     @staticmethod
     def _redact_secrets(text: str) -> tuple:
-        """把疑似密钥**替换掉**（不是只加一句说明——原文留着就等于没防）。
-
-        Returns: (脱敏后的文本, 是否命中)
-        """
+        """把疑似密钥**替换掉**（不是只加一句说明——原文留着就等于没防）。"""
         try:
             from tools.experience import _SECRET_PATTERNS
         except Exception:                       # noqa: BLE001
@@ -381,24 +333,12 @@ class Memory:
     def distill_experiences(self, llm, min_group: int = 3, dry_run: bool = False,
                             max_records_per_group: int = 20,
                             pause: float = None) -> dict:
-        """按类别把零散经验压缩成高层条目（**原始记录先归档，不丢**）。
-
-        Args:
-            llm: 用于总结的 LLM（必须有 chat 方法）
-            min_group: 少于这么多条的类别不动（不值得为 2 条调一次模型）
-            dry_run: True = 只算不写（先给人看）
-            max_records_per_group: 每类最多喂多少条给模型（防超长；取最近的）
-
-        Returns:
-            {"groups": [...], "before": n, "after": n, "archived": 路径, "error": str}
-        """
+        """按类别把零散经验压缩成高层条目（**原始记录先归档，不丢**）。"""
         from models.prompts import (EXPERIENCE_DISTILL_SYSTEM_PROMPT,
                                     EXPERIENCE_DISTILL_USER_TEMPLATE)
 
         before = len(self.experiences)
-        # 只把**原始记录**分桶：已经蒸馏过的条目不再回炉（否则第二次压缩会把
-        # 上一轮的好条目又揉一遍，白花调用还可能揉糊）。这样重跑天然可续：
-        # 只有"还有 ≥min_group 条原始记录"的类别会被处理。
+        # 只把**原始记录**分桶：已经蒸馏过的条目不再回炉（否则第二次压缩会把上一轮的好条目又揉一遍，白花调用还可能揉糊）。这样重跑天然可续：只有"还有 ≥min_group 条原始记录"的类别会被处理。
         buckets: Dict[str, list] = {}
         for e in self.experiences:
             if self._is_distilled(e):
@@ -413,8 +353,7 @@ class Memory:
         distilled_entries, report = [], []
         errors = []
         done_cats = set()                        # 只有**真的提炼出条目**的类别才算覆盖
-        # 组间间隔：账号 RPM 很低时连续几发大请求必被限流（上游会回 429/空正文），
-        # 拉开间隔比换模型有效。默认 0（不限流时不必等），LEARN_DISTILL_PAUSE 可配。
+        # 组间间隔：账号 RPM 很低时连续几发大请求必被限流（上游会回 429/空正文），拉开间隔比换模型有效。默认 0（不限流时不必等），LEARN_DISTILL_PAUSE 可配。
         if pause is None:
             try:
                 pause = float(LEARN_CONFIG.get("distill_pause", 0) or 0)
@@ -446,17 +385,13 @@ class Memory:
                     errors.append(f"{cat}: 总结失败 {str(e)[:120]}")
                     raw = ""
                     blocked = True
-                    # 配额类错误（429 / quota / rpm）是**账号级**问题：再试别的类别
-                    # 也是白等（LLM 层自己已退避重试过）。标记后跳出**整个组循环**，
-                    # 但已完成的部分照样落盘——半成品也比白跑强。
+                    # 配额类错误（429 / quota / rpm）是**账号级**问题：再试别的类别也是白等（LLM 层自己已退避重试过）。标记后跳出**整个组循环**，但已完成的部分照样落盘——半成品也比白跑强。
                     low = str(e).lower()
                     quota_blocked = any(k in low for k in
                                         ("429", "quota", "rate limit", "rpm", "tpm",
                                          "配额", "限流"))
                     break
-                # 上游配额耗尽时除了回 429，还会回**空正文**。
-                # 空正文不是"模型说没有经验"；而它是**每分钟/每日**限流的表现，
-                # 隔 2 秒重试没用，得等过一个配额窗口。
+                # 上游配额耗尽时除了回 429，还会回**空正文**。空正文不是"模型说没有经验"；而它是**每分钟/每日**限流的表现，隔 2 秒重试没用，得等过一个配额窗口。
                 if (raw or "").strip():
                     blocked = False
                     break
@@ -470,8 +405,7 @@ class Memory:
                 consecutive_blocked += 1
                 errors.append(f"{cat}: 上游无内容返回（{len(items)} 条记录保持原样）")
                 if consecutive_blocked >= 2:
-                    # 连着两组都拿不到内容 = 配额/服务问题，不是模型不会总结。
-                    # 继续磨下去只是白等（实测磨了 8 分钟、7 组里 4 组空转）。
+                    # 连着两组都拿不到内容 = 配额/服务问题，不是模型不会总结。继续磨下去只是白等（磨了 8 分钟、7 组里 4 组空转）。
                     aborted = True
                     errors.append("连续多个类别拿不到模型输出，判定为上游配额不足，已中止压缩")
                     break
@@ -484,8 +418,7 @@ class Memory:
                               f"｜原文开头: {str(raw or '')[:120]}")
                 continue
             if not made:
-                # 模型明确回 `[]`：这批记录里没有可复用的做法/坑（纯闲聊），
-                # 压缩的正确答案就是"丢掉"——原始记录已在归档里，不算丢数据。
+                # 模型明确回 `[]`：这批记录里没有可复用的做法/坑（纯闲聊），压缩的正确答案就是"丢掉"——原始记录已在归档里，不算丢数据。
                 distilled_entries.extend([])
                 done_cats.add(cat)
                 report.append({"category": cat, "records": len(items), "made": 0,
@@ -502,12 +435,6 @@ class Memory:
                     "error": "；".join(errors), "aborted": aborted}
 
         # ⚠️ 只替换**成功提炼**的类别：失败的类别必须原样保留。
-        # （曾经写成"所有尝试过的类别"，于是解析失败那几类的原始记录会被静默丢掉——
-        #  干跑时 7 类里 4 类解析失败，159 条会变成 5 条。这是数据丢失，不是压缩。）
-        # 另外，本类别里**已经蒸馏过**的条目要一并保留：它们不是"待压缩的原始记录"，
-        # 而是上一轮压缩的成果。旧实现按 task_category 一刀切，重跑压缩会把上一轮
-        # 提炼出来的高层条目一起删掉（2026-09-22 审计实测：5 条 coding 记录第 1 轮
-        # 提炼出 1 条，再来 3 条新记录做第 2 轮后，第 1 轮那条消失了）。
         keep = [e for e in self.experiences
                 if e.task_category not in done_cats or self._is_distilled(e)]
         after_entries = keep + distilled_entries
@@ -544,11 +471,7 @@ class Memory:
 
     @staticmethod
     def _salvage_objects(text: str) -> list:
-        """从（可能被截断的）文本里按花括号配对抢救 JSON 对象。
-
-        不能用正则 `\\{[^{}]*\\}`：字段内容里带 `{}`（例如"用 {path} 占位"）就匹配不到，
-        半截数组里的完整对象会被整段丢掉——实测因此让一整组记录白跑。
-        """
+        """从（可能被截断的）文本里按花括号配对抢救 JSON 对象。"""
         import json as _json
 
         out, depth, start, in_str, esc = [], 0, None, False, False
@@ -580,16 +503,7 @@ class Memory:
         return out
 
     def _parse_distilled(self, raw: str, category: str, count: int):
-        """把模型输出解析成 ExperienceEntry 列表（容错；含密钥脱敏）。
-
-        Returns:
-            None  = **解析失败**（调用方必须保留原始记录）
-            []    = 模型明确表示"这批没有可复用经验"（可以丢，归档里有）
-            [..]  = 提炼出的条目
-
-        （必须区分这两种空：前者是故障，后者是结论——混为一谈就会把
-          "模型没答上来"当成"这些记录没价值"而删库。）
-        """
+        """把模型输出解析成 ExperienceEntry 列表（容错；含密钥脱敏）。"""
         import json as _json
         import re as _re
 
@@ -608,9 +522,7 @@ class Memory:
                 data = None
         if data is None:
             # 退一步 1：截断/半截 JSON 抢救——按花括号配对扫描逐个解析，能救几条算几条。
-            # （实测真机：模型明明回了数组，但输出被 max_tokens 截断、或字段里带 {}
-            #   导致整段 json.loads 失败 → 白跑一组。用扫描器而不是 `\{[^{}]*\}`，
-            #   因为字符串里的花括号不能当结构。）
+
             data = self._salvage_objects(text) or None
         if data is None:
             # 退一步 2：模型可能只给了单个对象 {"title": ...}
@@ -666,24 +578,8 @@ class Memory:
 
     def load_chat_memory(self, other_chat_id: str,
                           sources: list = None) -> dict:
-        """
-        读取另一个对话（chat_id）的记忆数据，注入到当前对话上下文中。
-
-        这是"记忆嵌套"的核心方法：让当前对话能看到另一个对话的长期记忆、
-        经验和失败模式，实现跨对话的知识复用。
-
-        Args:
-            other_chat_id: 目标对话 ID
-            sources: 要加载的记忆来源列表。可选值：
-                     "long_term"  — 长期记忆
-                     "experiences" — 经验库
-                     "failure_patterns" — 失败模式
-                     "strategies"  — 策略库
-                     默认加载全部。
-
-        Returns:
-            dict，包含各来源的摘要信息和注入的上下文文本。
-        """
+        """读取另一个对话（chat_id）的记忆数据，注入到当前对话上下文中。
+        经验和失败模式，实现跨对话的知识复用。"""
         if sources is None:
             sources = ["long_term", "experiences", "failure_patterns", "strategies"]
 
@@ -794,20 +690,7 @@ class Memory:
         return result
 
     def inject_chat_context(self, other_chat_id: str, n_messages: int = 10) -> str:
-        """
-        从 SessionStore 读取另一个对话的最近对话记录，注入当前对话上下文。
-
-        与 load_chat_memory 的区别：
-        - load_chat_memory: 加载长期记忆/经验/策略等结构化数据
-        - inject_chat_context: 加载原始对话消息（user/assistant 交替）
-
-        Args:
-            other_chat_id: 目标对话 ID
-            n_messages: 读取最近多少条消息
-
-        Returns:
-            格式化的对话上下文文本。
-        """
+        """从 SessionStore 读取另一个对话的最近对话记录，注入当前对话上下文。"""
         from agent.session import SessionStore
         store = SessionStore()
         data = store.load_conversation(other_chat_id)
@@ -829,8 +712,7 @@ class Memory:
     # 经验库（自我进化核心）
     # ================================================================
 
-    #: 像"问句/闲聊"的目标（不是任务）。**只用来判断短目标**：长目标里出现"如何"
-    #: 往往是真任务（"如何让 agent 学会用知乎"），不能一刀切。
+    # : 像"问句/闲聊"的目标（不是任务）。**只用来判断短目标**：长目标里出现"如何": 往往是真任务（"如何让 agent 学会用知乎"），不能一刀切。
     _CHAT_HINT = re.compile(
         r"(吗|呢|什么|为什么|怎么|如何|哪个|哪些|能不能|可不可以|是不是|有没有|"
         r"^\s*(你|您)|谢谢|你好|\?|？)")
@@ -838,23 +720,9 @@ class Memory:
     def should_record_experience(self, goal: str, tool_usage: dict = None,
                                  success: bool = True, errors: list = None) -> bool:
         """这次任务值不值得沉淀成"经验"？（调用方在 save_experience 前问一句）
-
-        为什么需要它（实测数据）：库里 159 条中有 59 条是"你能做什么""你现在用的
-        什么模型""为什么停止了""还有什么需要升级迭代的地方吗"这类一句话问答。它们
-        往往**确实调用过一两个工具**（列目录、看模型），所以能穿过"有没有干活"的
-        判断，但毫无可复用价值；召回时还会靠一两个通用 bigram 挤进前 3 条，把提示词
-        塞满噪音——这正是"召回看起来没用"的主因。
-
-        规则（宁可少记，也别记没用的）：
-          · 失败/踩坑的**总是记**（失败模式靠它）；
-          · 工具调用 ≥ min_tool_calls（默认 2）→ 记，不管目标长短
-            （"重构召回逻辑"这种短目标是真任务）；
-          · 很短（< 8 字）→ 不记（"你能做什么""为什么停止了"）；
-          · 像问句/闲聊 且 短于 min_goal_chars（默认 15）→ 不记。
-        阈值由 LEARN_MIN_* 配置，设 0 分别关闭。
-        """
+        阈值由 LEARN_MIN_* 配置，设 0 分别关闭。"""
         if not success or errors:
-            return True                       # 失败/踩坑：必须留
+            return True                       # 失败/有坑：必须留
         usage = tool_usage or {}
         calls = sum(int(v) for v in usage.values() if isinstance(v, (int, float)))
         min_calls = int(getattr(self, "min_tool_calls", 2) or 0)
@@ -863,8 +731,7 @@ class Memory:
         text = (goal or "").strip()
         min_chars = int(getattr(self, "min_goal_chars", 15) or 0)
         if min_chars and len(text) < min_chars:
-            # 短目标里只有"纯闲聊/问句"该丢；祈使句的小任务（"用python计算3加4"）照记。
-            # 8 字以下无论像不像问句都不像任务。min_goal_chars=0 → 整段判断关闭。
+            # 短目标里只有"纯闲聊/问句"该丢；祈使句的小任务（"用python计算3加4"）照记。8 字以下无论像不像问句都不像任务。min_goal_chars=0 → 整段判断关闭。
             if len(text) < 8 or self._CHAT_HINT.search(text):
                 return False
         return bool(usage) or bool(errors)
@@ -872,17 +739,7 @@ class Memory:
     def save_experience(self, goal: str, plan_steps: list, success: bool,
                          summary: str = "", tool_usage: dict = None,
                          errors: list = None) -> ExperienceEntry:
-        """
-        任务完成后自动保存经验。
-        Agent 调用此方法后，经验将持久化并可在下次任务时召回。
-
-        质量门槛：纯问答（无工具使用、无错误、且成功）不入库——经验库只
-        沉淀"做了事"的记录（调用过工具 / 出过错 / 失败），避免闲聊问答
-        稀释真正可复用的技能经验。
-
-        （"任务值不值得沉淀"的**策略**判断在 should_record_experience()，
-        由调用方在记录前问一句；这里是存储层，保持"给什么存什么"。）
-        """
+        """任务完成后自动保存经验。"""
         tool_usage = tool_usage or {}
         errors = errors or []
         has_work = bool(tool_usage) or bool(errors) or not success
@@ -919,40 +776,14 @@ class Memory:
         return entry
 
     def _trim_experiences(self) -> None:
-        """按 LEARN_MAX_STORE 裁剪经验库（0 = 不限制，文件留全量）。
-
-        早先这里是硬编码的 `[-100:]`：库是滑动窗口，永远超不过 100 条，
-        老经验被静默顶掉——而配置项 LEARN_MAX_STORE 定义了却没人读。
-        容量与召回预算是两件事：库该留全量，只限制每次注入几条
-        （recall_experiences 的 n，见 LEARN_MAX_RECALL）。
-        """
+        """按 LEARN_MAX_STORE 裁剪经验库（0 = 不限制，文件留全量）。"""
         cap = int(getattr(self, "max_experiences", 0) or 0)
         if cap > 0 and len(self.experiences) > cap:
             self.experiences = self.experiences[-cap:]
 
     def recall_experiences(self, goal: str, n: int = None, llm=None,
                            use_llm_rank: bool = False) -> str:
-        """
-        根据当前目标，召回最相关的历史经验。
-
-        默认用**轻量关键词相似度**排序（零额外 LLM 调用，快且稳定）：
-        - 同类别经验优先
-        - 关键词重叠越多排名越靠前
-        - 同类同分时按时间倒序（最新优先）
-
-        库容量与召回预算是两件事：库默认留全量（LEARN_MAX_STORE），
-        每次只注入 n 条（LEARN_MAX_RECALL）。
-
-        Args:
-            goal: 当前任务目标
-            n: 返回的经验数量；None = 用 LEARN_MAX_RECALL 配置值
-            llm: 可选的 LLM 实例（仅当 use_llm_rank=True 时用于语义匹配）
-            use_llm_rank: 是否用 LLM 做语义排序（慢，默认关闭；
-                          开启时在主 LLM 慢速模型下会拖慢每次任务启动）
-
-        Returns:
-            格式化的经验文本，可直接注入 Planner 上下文。
-        """
+        """根据当前目标，召回最相关的历史经验。"""
         if not self.experiences:
             return ""
 
@@ -963,11 +794,6 @@ class Memory:
         other = [e for e in self.experiences if e.task_category != task_category]
 
         # 同类优先：**各组内各自限流**，不能写成 (same_category + other)[-30:]。
-        # 那个写法是"先拼接、再取末尾 30 条"，而同类别条目排在被拼接串的开头，
-        # 于是被整段切掉——实测 3 条 coding + 97 条其它时，候选池里 coding 剩 0 条，
-        # 与下面 _score 里"同类别加权"以及 docstring 声明的"同类别经验优先"
-        # 完全相反（用真实 experiences.json 复现）。真正的相关度排序交给 _score。
-        # 池大小可配（LEARN_RECALL_POOL，0 = 全量参与）——库留全量后由它压住打分成本。
         pool = int(getattr(self, "recall_pool", 0) or 0)
         if pool > 0:
             candidates = same_category[-pool:] + other[-pool:]
@@ -988,13 +814,7 @@ class Memory:
         goal_keywords = set(self._extract_keywords(goal))
 
         def _recency(exp) -> float:
-            """近期性：按半衰期指数衰减（0~1）。
-
-            早先 timestamp 只当 tiebreaker，于是"半年前的经验"和"昨天的"在同类
-            同分时只差在最后的字符串比较上——经历过一次坑的经验，三个月后仍然
-            和刚踩过的等价。主流记忆系统（如 Generative Agents）都把近期性作为
-            显式的加权项，这里照做。
-            """
+            """近期性：按半衰期指数衰减（0~1）。"""
             try:
                 then = datetime.fromisoformat(getattr(exp, "timestamp", "") or "")
             except (TypeError, ValueError):
@@ -1008,9 +828,6 @@ class Memory:
 
         def _score(exp) -> tuple:
             # goal 重叠是**主信号**，summary 重叠只作次要信号（权重低一档）。
-            # 教训（本次实测踩到）：把两者并成一个集合等权算重叠，summary 里那些
-            # 处处都有的通用词（"测试""项目""文件"）会把每条经验的 overlap 都抬到 2，
-            # 排序反而更糊——等于给无关条目背书。
             sum_overlap = len(goal_keywords & set(
                 self._extract_keywords(getattr(exp, "summary", "") or "", limit=60)))
             score = (self.W_OVERLAP * _goal_overlap(exp)
@@ -1025,10 +842,6 @@ class Memory:
             candidates = sorted(candidates, key=_score, reverse=True)
 
             # 相关性下限（LEARN_MIN_OVERLAP，默认 1）：**只看与 goal 的重叠**，宁缺毋滥。
-            # 库里 59/159 条是"视频任务你完成了吗"这类十几字的闲聊，靠一两个通用
-            # bigram（"视频""agent"）就能挤进前 3 条，把提示词塞满噪音；一条都不重叠
-            # 时**不如不注入**（调用方对空串已有处理）。summary 的通用词不算数——
-            # 它证明不了"这件事我做过"。
             min_overlap = int(getattr(self, "min_overlap", 1) or 0)
             if min_overlap > 0:
                 candidates = [e for e in candidates if _goal_overlap(e) >= min_overlap]
@@ -1088,10 +901,7 @@ class Memory:
     # ================================================================
 
     def learn_from_failure(self, failed_step: str, error_message: str):
-        """
-        从失败中学习：自动检测错误类型，更新或新建失败模式。
-        多次遇到同一模式时，会自动生成规避策略。
-        """
+        """从失败中学习：自动检测错误类型，更新或新建失败模式。"""
         error_type = self._classify_error(error_message)
         if error_type == "unknown":
             return
@@ -1120,8 +930,7 @@ class Memory:
             )
             self.failure_patterns.append(pattern)
 
-        # 安全阀：按 error_type 去重的模式天然有界，这里只防极端情况；
-        # 超限时丢"最久未见"的，保留一直在踩的那些（LEARN_MAX_PATTERNS，0 = 不限）
+        # 安全阀：按 error_type 去重的模式天然有界，这里只防极端情况；超限时丢"最久未见"的，保留一直在踩的那些（LEARN_MAX_PATTERNS，0 = 不限）
         cap = int(getattr(self, "max_failure_patterns", 0) or 0)
         if cap > 0 and len(self.failure_patterns) > cap:
             self.failure_patterns.sort(key=lambda f: f.last_seen or "")
@@ -1130,10 +939,7 @@ class Memory:
         self._save_failure_patterns()
 
     def get_failure_warnings(self, goal: str) -> str:
-        """
-        根据当前目标，返回相关的失败模式警告文本。
-        可在执行前注入到 Executor 提示中。
-        """
+        """根据当前目标，返回相关的失败模式警告文本。"""
         if not self.failure_patterns:
             return ""
 
@@ -1262,13 +1068,7 @@ class Memory:
                     return label
         return "general"
 
-    #: 出现在 bigram 首/尾就说明它跨了词边界（「的经」「并给」「我优」），丢掉。
-    #: ⚠️ 只能放**单字虚词**，而且要避开高频内容词的首/尾字，两类坑都踩过：
-    #:   · 「已经」拆成单字会让 `经` 变虚词 → 内容词「经验」被整词丢掉；
-    #:   · `用` 会让「用户」被丢掉（`使用` 也会）。
-    #: 现在只保留明确无害的虚词；「需要/重要/存在/对比」这类词会被顺带滤掉，
-    #: 这是有意的取舍——它们在目标描述里几乎没有区分度。
-    #: 由 TestKeywordExtraction.test_content_words_survive_edge_filter 看守。
+    # : 出现在 bigram 首/尾就说明它跨了词边界（「的经」「并给」「我优」），丢掉。
     _EDGE_STOPCHARS = frozenset("的了吗呢啊吧呀嘛哦和与及或并而但这那我你他她它们"
                                 "请帮一下现在先再还也就都是正在到从对把被让给做"
                                 "应该怎什为何如已要不想没")
@@ -1284,20 +1084,8 @@ class Memory:
     @staticmethod
     def _extract_keywords(text: str, limit: int = 12) -> list[str]:
         """提取用于相似度打分的关键词——**确定性且对中文有效**。
-
-        早先实现是 `list(set(english + chinese))[:10]`，有两个真问题：
-        1. 中文按 `[\\u4e00-\\u9fff]{2,}` 整段切，切出来的是「然后任务断了的情况啊」
-           这种连续汉字段，不是词。两个不同任务几乎不可能共享整段——用真实库里
-           100 条经验实测，关键词重叠 **100 条全为 0**。于是"相关性"这个主排序键
-           等于失效，排序实际退化成 (类别, 成功, 时间)。
-        2. `set` 顺序受 Python 哈希随机化影响（每进程随机，未设 PYTHONHASHSEED），
-           `[:10]` 会**丢掉不同的词**：同一个长目标两次运行保留的关键词不是同一批，
-           召回结果不可复现。
-
-        现在：切段 → 英文小写 → 中文 2-gram（经典廉价 CJK 切分）+ 整段保留
-        （≤6 字，让完全相同的短语精确命中）→ 丢掉跨词边界的 bigram 与停用词
-        → **保序去重**，因此同一输入在任何进程都得到同一结果。
-        """
+        等于失效，排序实际退化成 (类别, 成功, 时间)。
+        召回结果不可复现。"""
         if not text:
             return []
         low = str(text).lower()
@@ -1329,15 +1117,7 @@ class Memory:
     # ================================================================
 
     def _save_json(self, filename: str, data, chat_dir: str = None):
-        """原子保存数据到 JSON 文件（临时文件 + os.replace）。
-
-        必须是原子的：长期记忆/经验库/策略库每次 remember/save_experience 都会
-        整份重写，而旧实现直接 `open(filepath, "w")` 就地截断——进程在写入中途
-        被 Ctrl+C / 断电打断，文件就只剩半截 JSON。更糟的是 `_load_json` 遇到
-        解析失败静默 `return []`，下一次写入又只保留新条目：**历史数据静默全丢，
-        且毫无提示**（实测把文件截断一半 → 加载 0 条且不报错）。
-        agent/session.py 早已采用同款原子写法，这里补齐。
-        """
+        """原子保存数据到 JSON 文件（临时文件 + os.replace）。"""
         base = chat_dir or self.chat_db_path
         os.makedirs(base, exist_ok=True)
         filepath = os.path.join(base, filename)
@@ -1349,9 +1129,7 @@ class Memory:
                 os.fsync(f.fileno())
             os.replace(tmp, filepath)     # 原子替换，失败时原文件完好
         except BaseException:
-            # 必须捕 BaseException：真实的中断是 Ctrl+C（KeyboardInterrupt），
-            # 它不是 Exception 的子类，只捕 Exception 会漏掉"最需要清理"的那种情况，
-            # 临时文件残留在数据目录里。
+            # 必须捕 BaseException：真实的中断是 Ctrl+C（KeyboardInterrupt），它不是 Exception 的子类，只捕 Exception 会漏掉"最需要清理"的那种情况，临时文件残留在数据目录里。
             try:
                 if os.path.exists(tmp):
                     os.remove(tmp)
@@ -1369,8 +1147,7 @@ class Memory:
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            # 旧实现直接 return []：用户既不知道数据坏了，下一次写入还会把
-            # 残存内容覆盖掉。这里保留现场（.corrupt）并明确告警。
+            # 旧实现直接 return []：用户既不知道数据坏了，下一次写入还会把残存内容覆盖掉。这里保留现场（.corrupt）并明确告警。
             broken = f"{filepath}.corrupt"
             try:
                 if os.path.exists(broken):

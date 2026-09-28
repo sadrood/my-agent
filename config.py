@@ -1,34 +1,11 @@
-"""
-配置中心
-所有模块的配置都从这里读，按模块分组。
-
-使用方式：
-    from config import LLM_CONFIG
-    print(LLM_CONFIG["api_key"])
-
-环境变量在项目根目录的 .env 文件中设置。
-"""
+"""配置中心"""
 
 import os
 from dotenv import load_dotenv
 
 def _drop_empty_env_values() -> None:
     """把**空值**环境变量当成"没设置"。
-
-    `os.getenv(key, "默认")` 在变量被设成空串时返回 `""` 而不是默认值，于是
-    `int(os.getenv("LLM_DEFAULT_TEMPERATURE", "0.7"))` 这类直接抛
-    `ValueError: could not convert string to float: ''` —— `import config` 崩，
-    `python main.py` 连欢迎界面都出不来（2026-09-22 审计实测）。
-
-    而"留空"恰恰是这个项目里最常见的写法：`.env.example` 自己就用
-    `VISION_API_KEY=` 引导用户按需填值，照抄给数字项留空太自然了；本文件 64 处
-    `int(os.getenv(` 与 34 处 `float(os.getenv(` 里只有两处写了空值保护。
-    与其逐个补，不如在读到配置之后统一收掉：**空 = 未设置**。
-
-    安全性：全仓库没有一处依赖"空串 ≠ 未设置"来区分行为 —— 无默认值的
-    `os.getenv(...)` 调用点要么做真值判断、要么串在 `or` 链里，而 `""` 与 `None`
-    同为假值，删除后语义不变。
-    """
+    `int(os.getenv(` 与 34 处 `float(os.getenv(` 里只有两处写了空值保护。"""
     for key in [k for k, v in os.environ.items() if v == ""]:
         os.environ.pop(key, None)
 
@@ -38,31 +15,12 @@ load_dotenv()
 # 留空的项当"未设置"：否则 int()/float() 解析会抛 ValueError，整个配置导入即崩
 _drop_empty_env_values()
 
-# 项目根目录（config.py 位于仓库顶层）：默认存储路径（记忆/会话/缓存）统一
-# 锚定到这里，杜绝进程 cwd 漂移导致数据写到 output/ 等子目录造成分叉。
+# 项目根目录（config.py 位于仓库顶层）：默认存储路径（记忆/会话/缓存）统一锚定到这里，杜绝进程 cwd 漂移导致数据写到 output/ 等子目录造成分叉。
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def resolve_under_root(path) -> str:
-    """把相对路径锚定到项目根（绝对路径原样返回）。
-
-    同一个坑在这个仓库里被踩了三次，所以收成一个函数、只在配置加载时做一次：
-      · 浏览器持久 profile：cwd 一变就换一份空 profile，表现为"自动化浏览器每次
-        打开都没有记录"；
-      · memory / session 存储：cwd 漂移会把记忆/会话写到 output/ 子目录造成分叉；
-      · 经验库缓存 / rollout 目录 / 各 save_dir：云经验库看起来"凭空变空"、
-        运行日志找不到、产物落到启动目录。
-
-    实测：从 C:\\Users\\Administrator 启动时，`./memory/experience_lib` 会解析到
-    `C:\\Users\\Administrator\\memory\\experience_lib`——一个不存在的新目录，
-    于是 experience search 什么都搜不到。
-
-    Args:
-        path: 配置里的路径值；空值返回项目根（表示"就用项目根"）。
-
-    Returns:
-        绝对路径字符串。
-    """
+    """把相对路径锚定到项目根（绝对路径原样返回）。"""
     expanded = os.path.expanduser(str(path if path is not None else "").strip())
     if not expanded:
         return PROJECT_ROOT
@@ -95,12 +53,7 @@ def resolve_llm_config(env: dict) -> dict:
 
 
 def llm_config_provenance(env: dict) -> dict:
-    """LLM 连接配置的来源（纯函数）：生效值取自哪个变量、哪些显式配置被别名顶掉了。
-
-    取值顺序是 MY_AGENT_* → ANTHROPIC_* → LLM_* —— 在带着 ANTHROPIC_* 的环境里跑
-    （例如在其它 CLI 里），`.env` 的 LLM_* 会被静默忽略：看配置与实际连的不是一家。
-    `shadowed` 只含变量名与端点，不含密钥值。
-    """
+    """LLM 连接配置的来源（纯函数）：生效值取自哪个变量、哪些显式配置被别名顶掉了。"""
     def source(*names):
         for name in names:
             if env.get(name):
@@ -144,9 +97,28 @@ def _env(*names, default=None):
 #   api_key 和 base_url 是创建客户端用的，必须在 .env 里配置。
 #   default_model / default_temperature / default_max_output_tokens
 #   只是默认值，调用 chat() 时可以覆盖。
+#: LLM_FALLBACK_MODELS 里 `模型@预设名` 用到的端点预设前缀
+LLM_FALLBACK_PRESET_PREFIX = "LLM_FALLBACK_ENDPOINT_"
+
+
+def llm_fallback_presets() -> dict:
+    """收集主模型备用链的命名端点预设：{预设名: {"base_url":..., "api_key":...}}。"""
+    out: dict = {}
+    for name, value in list(os.environ.items()):
+        if not name.startswith(LLM_FALLBACK_PRESET_PREFIX):
+            continue
+        rest = name[len(LLM_FALLBACK_PRESET_PREFIX):]
+        for suffix, field in (("_BASE_URL", "base_url"), ("_API_KEY", "api_key")):
+            if rest.endswith(suffix):
+                preset = rest[: -len(suffix)].strip().lower()
+                if preset and str(value).strip():
+                    out.setdefault(preset, {})[field] = str(value).strip()
+                break
+    return out
+
+
 LLM_CONFIG = {
-    # --- 连接配置（必须）---
-    # 别名兼容 ANTHROPIC_MODEL / ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY 环境变量
+    # --- 连接配置（必须）---别名兼容 ANTHROPIC_MODEL / ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY 环境变量
     "api_key": _env("MY_AGENT_API_KEY", "ANTHROPIC_API_KEY", "LLM_API_KEY"),
     "base_url": _env("MY_AGENT_BASE_URL", "ANTHROPIC_BASE_URL", "LLM_BASE_URL",
                      default="https://api.openai.com/v1"),
@@ -154,8 +126,7 @@ LLM_CONFIG = {
                           default="gpt-4o-mini"),
     "default_temperature": float(os.getenv("LLM_DEFAULT_TEMPERATURE", "0.7")),
     "default_max_output_tokens": int(os.getenv("LLM_DEFAULT_MAX_OUTPUT_TOKENS", "4096")),
-    # 固定温度：某些 thinking 模型只接受特定 temperature（如必须为 1）。
-    # 设置后忽略传入的 temperature，强制用该值（None=不启用）。
+    # 固定温度：某些 thinking 模型只接受特定 temperature（如必须为 1）。设置后忽略传入的 temperature，强制用该值（None=不启用）。
     "fixed_temperature": (lambda v: float(v) if v else None)(os.getenv("LLM_FIXED_TEMPERATURE", "")),
 
     # --- 自动重试（OpenRouter 等供应商限流/网络抖动时自动重试） ---
@@ -163,14 +134,22 @@ LLM_CONFIG = {
     "retry_base_delay": float(os.getenv("LLM_RETRY_BASE_DELAY", "2.0")),
     # --- 请求超时（秒）：防止上游挂起导致无限等待 ---
     "timeout": float(os.getenv("LLM_TIMEOUT", "300")),
+    # --- 备用链：主端点限流/不可用时顶上（同视觉的写法：`模型名` 用共享备用端点，`模型名@预设名` 用预设端点）---
+    "fallback_models": [m.strip() for m in os.getenv("LLM_FALLBACK_MODELS", "").split(",") if m.strip()],
+    "fallback_base_url": os.getenv("LLM_FALLBACK_BASE_URL", "").strip(),
+    "fallback_api_key": os.getenv("LLM_FALLBACK_API_KEY", "").strip(),
+    "fallback_presets": llm_fallback_presets(),
+    # 401"无效的令牌"常是突发保护（同一端点前一秒还成功过）：先退避重试这么多次再考虑换端点
+    "auth_retry_max": int(os.getenv("LLM_AUTH_RETRY_MAX", "2")),
+    "auth_retry_delay": float(os.getenv("LLM_AUTH_RETRY_DELAY", "2.0")),
+    "fallback_after": int(os.getenv("LLM_FALLBACK_AFTER", "2")),
+    "fallback_probe_seconds": float(os.getenv("LLM_FALLBACK_PROBE_SECONDS", "300")),
 }
 
 # 上下文压缩（借鉴同类实现的 compaction：token 压力时把旧历史总结成摘要）
 COMPACT_CONFIG = {
     "enabled": os.getenv("COMPACT_ENABLED", "true").lower() == "true",
     # 压缩阈值（字符量，约等于 token ×3；messages 总字符数超过则压缩旧历史）。
-    # 0/未设置 = 自动：按当前模型在网关报告的 context_window × window_ratio 计算，
-    # 避免固定小数字在 1M 窗口模型下过早压缩（历史 4.5% 就丢细节）。
     "token_threshold": int(os.getenv("COMPACT_TOKEN_THRESHOLD", "0")),
     # 自动阈值 = 模型真实窗口 × 该比例（窗口来自网关 /models 的 context_length）
     "window_ratio": float(os.getenv("COMPACT_WINDOW_RATIO", "0.75")),
@@ -185,20 +164,14 @@ BROWSER_CONFIG = {
     "headless": os.getenv("BROWSER_HEADLESS", "false").lower() == "true",
     "viewport_width": int(os.getenv("BROWSER_VIEWPORT_WIDTH", "1280")),
     "viewport_height": int(os.getenv("BROWSER_VIEWPORT_HEIGHT", "720")),
-    # 持久浏览器（内置浏览器）：launch_persistent_context + 用户数据目录，
-    # 登录态（cookie/localStorage）跨次启动保留——需要登录的站点先手动登录一次，
-    # agent 之后复用会话。false = 每次全新上下文
+    # 持久浏览器（内置浏览器）：launch_persistent_context + 用户数据目录，登录态（cookie/localStorage）跨次启动保留——需要登录的站点先手动登录一次， agent 之后复用会话。
     "persistent": os.getenv("BROWSER_PERSISTENT", "true").lower() == "true",
     # 持久 profile 目录（登录态落盘点）；memory/ 已被 gitignore，不入库
     "profile_dir": resolve_under_root(
         os.getenv("BROWSER_PROFILE_DIR", "./memory/browser_profile")),
     # 内嵌浏览器桥地址（仅桌面端模式由 Electron 主进程注入，如 http://127.0.0.1:8091/browser）。
-    # 非空时 ToolManager 用 EmbeddedBrowserTool 替代独立 Playwright 浏览器：
-    # Agent 操控的页面就是桌面端侧栏里内嵌的 <webview>（所见即所控）。
     "embedded_url": os.getenv("MY_AGENT_EMBEDDED_BROWSER_URL", ""),
-    # 自动探测内嵌桥（默认开）：即使环境变量没注入成功，只要桌面端在运行
-    # （桥 health 检查通过），browser 工具一律走内嵌浏览器，禁止弹出独立
-    # Playwright 窗口；桌面端没开时（纯 CLI 场景）才回退外部浏览器。
+    # 自动探测内嵌桥（默认开）：即使环境变量没注入成功，只要桌面端在运行（桥 health 检查通过），browser 工具一律走内嵌浏览器，禁止弹出独立 Playwright 窗口；桌面端没开时（纯 CLI 场景）才回退外部浏览器。
     "embedded_auto_detect": os.getenv("BROWSER_EMBEDDED_AUTO", "true").lower() == "true",
 }
 
@@ -211,11 +184,7 @@ VISION_FALLBACK_PRESET_PREFIX = "VISION_FALLBACK_ENDPOINT_"
 
 
 def vision_fallback_presets() -> dict:
-    """收集备用视觉链的命名端点预设：{预设名: {"base_url":..., "api_key":...}}。
-
-    预设给 `模型@预设名` 用：跨厂商备用需要各自一套 key，而 fallback_api_key 只有一份，
-    把 key 写进模型列表又会被 `/config`、doctor 打印出来。预设名大小写不敏感。
-    """
+    """收集备用视觉链的命名端点预设：{预设名: {"base_url":..., "api_key":...}}。"""
     out: dict = {}
     for name, value in list(os.environ.items()):
         if not name.startswith(VISION_FALLBACK_PRESET_PREFIX):
@@ -230,21 +199,16 @@ def vision_fallback_presets() -> dict:
     return out
 
 
-# 视觉模型可使用独立端点（VISION_API_KEY / VISION_BASE_URL），
-# 留空时回退到主 LLM 的 key / base_url。
-# `/models` 的 input_modalities 不可信：有模型标 ["text"] 实际能读图。
-# 判断能否读图要用答案已知的图实打一次，别只看元数据。
+# 视觉模型可使用独立端点（VISION_API_KEY / VISION_BASE_URL），留空时回退到主 LLM 的 key / base_url。
 VISION_CONFIG = {
     "screenshot_path": os.getenv("VISION_SCREENSHOT_PATH", "./screenshots"),
     "vision_model": os.getenv("VISION_MODEL", ""),  # 留空则自动选择
     "enabled": os.getenv("VISION_ENABLED", "true").lower() == "true",
     "api_key": os.getenv("VISION_API_KEY", "") or LLM_CONFIG["api_key"],
     "base_url": os.getenv("VISION_BASE_URL", "") or LLM_CONFIG["base_url"],
-    # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、
-    # browser visionclick 仅 60s），必须显式收紧
+    # 单次视觉调用超时：SDK 默认 600s×3 次，远超调用方预算（工具 300s、browser visionclick 仅 60s），必须显式收紧
     "timeout": float(os.getenv("VISION_TIMEOUT", "30")),
-    # 备用视觉链：条目为 `模型名`（用共享端点）或 `模型名@预设名`（用预设端点）。
-    # 顺序敏感：同厂商那级只兜"单个模型坏了"，跨厂商那级才兜得住端点级故障。
+    # 备用视觉链：条目为 `模型名`（用共享端点）或 `模型名@预设名`（用预设端点）。顺序敏感：同厂商那级只兜"单个模型坏了"，跨厂商那级才兜得住端点级故障。
     "fallback_models": [m.strip() for m in
                         os.getenv("VISION_FALLBACK_MODELS",
                                   "sensenova-6.8-flash-lite").split(",") if m.strip()],
@@ -273,8 +237,7 @@ IMAGE_GEN_CONFIG = {
     "timeout": float(os.getenv("IMAGE_GEN_TIMEOUT", "120")),
     # 官方公测期间免费开放去水印（watermark=false）；默认关闭水印
     "watermark": os.getenv("IMAGE_GEN_WATERMARK", "false").lower() == "true",
-    # 备用生图端点：主端点超时/报错时按顺序接着试（返回 b64_json 的端点为佳）。
-    # 与主端点相同的条目会被自动跳过；留空即关闭。
+    # 备用生图端点：主端点超时/报错时按顺序接着试（返回 b64_json 的端点为佳）。与主端点相同的条目会被自动跳过；留空即关闭。
     "fallback_models": [m.strip() for m in
                         os.getenv("IMAGE_GEN_FALLBACK_MODELS",
                                   "sensenova-u1.5-lite").split(",") if m.strip()],
@@ -311,8 +274,7 @@ VIDEO_GEN_CONFIG = {
         os.getenv("VIDEO_GEN_SAVE_DIR", "./generated_videos")),
     # 单次 HTTP 请求超时（创建/查询）
     "timeout": float(os.getenv("VIDEO_GEN_TIMEOUT", "120")),
-    # 工具内等待上限（秒）：超过则返回 task_id 让模型稍后用 status 查询。
-    # 需小于 TOOL_TIMEOUT(300)，避免撞上工具级硬超时被判定"挂起"。
+    # 工具内等待上限（秒）：超过则返回 task_id 让模型稍后用 status 查询。需小于 TOOL_TIMEOUT(300)，避免撞上工具级硬超时被判定"挂起"。
     "max_wait": float(os.getenv("VIDEO_GEN_MAX_WAIT", "240")),
     "poll_interval": float(os.getenv("VIDEO_GEN_POLL_INTERVAL", "6")),
 }
@@ -328,37 +290,30 @@ VIDEO_GEN_CONFIG = {
 TTS_CONFIG = {
     "enabled": os.getenv("TTS_ENABLED", "true").lower() == "true",
     "provider": os.getenv("TTS_PROVIDER", "edge").strip().lower(),
-    # 默认音色（edge 的简短别名，见 models/tts.py ZH_VOICES）：
-    #   xiaoxiao 女声温柔 / yunxi 男声年轻 / yunjian 男声沉稳解说
+    # 默认音色（edge 的简短别名，见 models/tts.py ZH_VOICES）：xiaoxiao 女声温柔 / yunxi 男声年轻 / yunjian 男声沉稳解说
     "voice": os.getenv("TTS_VOICE", "xiaoxiao"),
     "rate": os.getenv("TTS_RATE", "+0%"),      # 语速（仅 edge 支持），如 +20%
     "volume": os.getenv("TTS_VOLUME", "+0%"),  # 音量（仅 edge 支持），如 +20%
     "save_dir": resolve_under_root(
         os.getenv("TTS_SAVE_DIR", "./generated_audio")),
     "timeout": float(os.getenv("TTS_TIMEOUT", "60")),
-    # --- openrouter 供应商 ---
-    # 专用 key 优先；也接受通用的 OPENROUTER_API_KEY
+    # --- openrouter 供应商 ---专用 key 优先；也接受通用的 OPENROUTER_API_KEY
     "openrouter_api_key": (os.getenv("TTS_OPENROUTER_API_KEY")
                            or os.getenv("OPENROUTER_API_KEY", "")),
     "openrouter_base_url": os.getenv("TTS_OPENROUTER_BASE_URL",
                                      "https://openrouter.ai/api/v1"),
     "model": os.getenv("TTS_MODEL", "fish-audio/s2.1-pro-free:free"),
-    # openrouter 的音色由模型决定：默认留空＝用模型内置默认音色。
-    # 注意别把 edge 的音色别名（xiaoxiao 等）填这里——上游会报 Invalid voice。
+    # openrouter 的音色由模型决定：默认留空＝用模型内置默认音色。注意别把 edge 的音色别名（xiaoxiao 等）填这里——上游会报 Invalid voice。
     "openrouter_voice": os.getenv("TTS_OPENROUTER_VOICE", ""),
     # 输出格式：mp3（默认）/ pcm / wav —— 按模型支持情况填写
     "response_format": os.getenv("TTS_RESPONSE_FORMAT", "mp3"),
-    # 站点归属头（可选，OpenRouter 官方示例里的 HTTP-Referer / X-OpenRouter-Title，
-    # 仅用于 openrouter.ai 的排行榜统计，不影响请求结果）
+    # 站点归属头（可选，OpenRouter 官方示例里的 HTTP-Referer / X-OpenRouter-Title，仅用于 openrouter.ai 的排行榜统计，不影响请求结果）
     "referer": os.getenv("TTS_OPENROUTER_REFERER", ""),
     "title": os.getenv("TTS_OPENROUTER_TITLE", "my_agent"),
     # 声音克隆（部分 TTS 模型支持）：参考音频 + 其文字稿（可选）
     "reference_audio": os.getenv("TTS_REFERENCE_AUDIO", ""),
     "reference_text": os.getenv("TTS_REFERENCE_TEXT", ""),
-    # 角色声线库（多角色配音用）：一个目录，每个文件是一个角色的克隆参考样本，
-    # 命名 {角色名}.wav|mp3（如 linshen.wav / hugong.wav）。
-    # 合成时传 voice=角色名，会自动带上对应参考样本 → 同角色音色恒定不偏移。
-    # 优先级高于上面的全局 reference_audio；目录为空则退回全局参考。
+    # 角色声线库（多角色配音用）：一个目录，每个文件是一个角色的克隆参考样本，命名 {角色名}.wav|mp3（如 linshen.wav / hugong.wav）。
     "reference_dir": os.getenv("TTS_REFERENCE_DIR", ""),
     # 在线合成失败时是否回退本地兜底 TTS（在线免费档不保证可用性）
     "fallback_edge": os.getenv("TTS_FALLBACK_EDGE", "true").lower() == "true",
@@ -464,9 +419,7 @@ def _load_user_mcp_servers() -> list:
 
 def _merge_user_mcp_servers(env_servers: list) -> list:
     """合并内置(.env) servers 与用户级已安装插件；同名时用户级覆盖。
-
-    用户级插件打上 installed 标记（区别于 .env 静态配置），启动时一并自动连接。
-    """
+    用户级插件打上 installed 标记（区别于 .env 静态配置），启动时一并自动连接。"""
     merged = [dict(s) for s in env_servers if isinstance(s, dict)]
     names = {str(s.get("name")) for s in merged}
     for s in _load_user_mcp_servers():
@@ -480,10 +433,7 @@ def _merge_user_mcp_servers(env_servers: list) -> list:
 
 
 MCP_CONFIG = {
-    # 客户端侧总开关（连接外部 MCP 服务器）。默认 true = 与**当前实际行为**一致：
-    # 这个键此前从未被任何代码读取（2026-09-22 审计），也就是说不管 `.env` 里
-    # 写什么，MCP 客户端都在跑。改默认值而不是直接照读 false，是为了让
-    # `MCP_ENABLED=false` 这个开关真正可用，同时不悄悄关掉别人现有的 MCP。
+    # 客户端侧总开关（连接外部 MCP 服务器）。默认 true = 与**当前实际行为**一致：这个键之前从未被任何代码读取，也就是说不管 `.env` 里写什么，MCP 客户端都在跑。
     "enabled": os.getenv("MCP_ENABLED", "true").lower() == "true",
     "servers": _merge_user_mcp_servers(_mcp_servers),
     "user_config_file": MCP_USER_CONFIG_FILE,
@@ -496,9 +446,7 @@ COMPUTER_USE_CONFIG = {
     # 关掉则不注册 computer 工具（模型看不到它）
     "enabled": os.getenv("COMPUTER_USE_ENABLED", "true").lower() == "true",
     "default_steps": int(os.getenv("COMPUTER_USE_DEFAULT_STEPS", "10")),
-    # 光标可视化浮层：操作键鼠时显示跟随真实光标的橙色光环 + 点击涟漪。默认关 ——
-    # 浮层点击穿透一旦失效会吞掉整屏鼠标事件并抢焦点，风险高于收益。
-    # 取值宽容（1/true/on/yes）：文档与该键的 docstring 一直写的是 =1
+    # 光标可视化浮层：操作键鼠时显示跟随真实光标的橙色光环 + 点击涟漪。默认关 ——浮层点击穿透一旦失效会吞掉整屏鼠标事件并抢焦点，风险高于收益。取值宽容（1/true/on/yes）：文档与该键的 docstring 一直写的是 =1
     "cursor_overlay": os.getenv("COMPUTER_CURSOR_OVERLAY", "").strip().lower()
                       in ("1", "true", "on", "yes"),
     "cursor_idle_seconds": float(os.getenv("COMPUTER_CURSOR_IDLE", "6")),
@@ -531,33 +479,20 @@ LEARN_CONFIG = {
     "enable": os.getenv("LEARN_ENABLED", "true").lower() == "true",
     # 每次任务注入几条经验（召回预算；调大只影响提示词长度，不影响库容量）
     "max_experiences_recall": int(os.getenv("LEARN_MAX_RECALL", "3")),
-    # 经验库容量：0 = 不限制（文件留全量）。
-    # 默认给宽裕值而非真正的无限：experiences.json 每次保存是**整体重写**，
-    # 无上限时单次写盘成本随历史线性增长（要真无限得改成 JSONL 追加）。
+    # 经验库容量：0 = 不限制（文件留全量）。默认给宽裕值而非真正的无限：experiences.json 每次保存是**整体重写**，无上限时单次写盘成本随历史线性增长（要真无限得改成 JSONL 追加）。
     "max_experiences_store": int(os.getenv("LEARN_MAX_STORE", "2000")),
-    # 召回打分的候选池：同一类别各取最近 N 条参与打分（0 = 全量参与）。
-    # 库变全量后由它把打分成本压住；排序仍由关键词/类别/时间打分决定。
+    # 召回打分的候选池：同一类别各取最近 N 条参与打分（0 = 全量参与）。库变全量后由它把打分成本压住；排序仍由关键词/类别/时间打分决定。
     "recall_pool": int(os.getenv("LEARN_RECALL_POOL", "200")),
-    # 相关性下限：候选经验与当前目标的关键词重叠数低于它就**不注入**
-    # （宁缺毋滥）。库里大量是十几字的闲聊式目标，靠一两个通用 bigram 就能挤进
-    # 前 3 条把提示词塞满噪音；设为 0 恢复"总是凑满 n 条"的旧行为。
+    # 相关性下限：候选经验与当前目标的关键词重叠数低于它就**不注入**（宁缺毋滥）。库里大量是十几字的闲聊式目标，靠一两个通用 bigram 就能挤进前 3 条把提示词塞满噪音；设为 0 恢复"总是凑满 n 条"的旧行为。
     "min_overlap": int(os.getenv("LEARN_MIN_OVERLAP", "1")),
-    # 写入侧质量门槛（策略判断在 Memory.should_record_experience，调用方记录前问一句）：
-    # 目标短于 min_goal_chars **且**工具调用少于 min_tool_calls 才不记——两者都小的
-    # 是闲聊/一次性问答，不是可复用经验。实测库里 159 条有 59 条属于此类，它们往往
-    # 动过一两个工具（列目录/看模型）能穿过"有没有干活"的判断，召回时却只会塞噪音。
-    # 只影响**新记录**，不动已有历史；**失败的经验总是记**（失败模式靠它）。0 = 关闭。
+    # 写入侧质量门槛
     "min_goal_chars": int(os.getenv("LEARN_MIN_GOAL_CHARS", "15")),
     "min_tool_calls": int(os.getenv("LEARN_MIN_TOOL_CALLS", "2")),
     # 经验压缩（memory distill）用的模型：留空 = 主模型。
-    # 压缩是**离线维护任务**，主模型配额紧张时会回 429 / 空正文；
-    # 换一个端点/模型跑更划算（LEARN_DISTILL_BASE_URL / _MODEL / _API_KEY 三项）。
-    # 只影响压缩，不动主循环的模型。
     "distill_model": os.getenv("LEARN_DISTILL_MODEL", ""),
     "distill_base_url": os.getenv("LEARN_DISTILL_BASE_URL", ""),
     "distill_api_key": os.getenv("LEARN_DISTILL_API_KEY", ""),
-    # 压缩时**每组之间**等待秒数：账号 RPM 很低时连续几发大请求必被限流
-    # （上游会回 429 + 空正文），拉开间隔比换模型有效。
+    # 压缩时**每组之间**等待秒数：账号 RPM 很低时连续几发大请求必被限流（上游会回 429 + 空正文），拉开间隔比换模型有效。
     "distill_pause": float(os.getenv("LEARN_DISTILL_PAUSE", "0")),
     # 失败模式按 error_type 去重，天然有界；此项只是安全阀（超限丢最久未见的）
     "max_failure_patterns": int(os.getenv("LEARN_MAX_PATTERNS", "50")),
@@ -577,9 +512,7 @@ LEARN_CONFIG = {
 #   workspace-write     - 默认：允许项目目录内读写，高风险操作需批准
 #   danger-full-access  - 除硬性黑名单外全部放行
 APPROVAL_CONFIG = {
-    # 这两个值会被拿去和**小写**枚举比对（ApprovalPolicy 的 mode、SANDBOX_LEVELS
-    # 的键），写 `Never` / `Workspace-Write` 会直接抛 ValueError、启动即 traceback
-    # （2026-09-22 审计）。统一归一化，和本文件其它布尔量保持一致。
+    # 这两个值会被拿去和**小写**枚举比对（ApprovalPolicy 的 mode、SANDBOX_LEVELS 的键）
     "approval_policy": os.getenv("APPROVAL_POLICY", "on-failure").strip().lower(),
     "sandbox_mode": os.getenv("SANDBOX_MODE", "workspace-write").strip().lower(),
     "interactive": os.getenv("APPROVAL_INTERACTIVE", "true").lower() == "true",
@@ -588,19 +521,15 @@ APPROVAL_CONFIG = {
     # 审批决策日志最多保留条数（长驻进程里只增不减会越用越慢；只影响报表口径）
     "decision_log_max": int(os.getenv("APPROVAL_DECISION_LOG_MAX", "200")),
     "dangerous_requires_approval": os.getenv("APPROVAL_DANGEROUS_REQUIRES", "true").lower() == "true",
-    # 命令白名单（深度防御）：true = 终端命令只有命中白名单才按原策略放行，
-    # 未命中的一律升级为需人工批准（never/无人值守下直接拒绝）。
+    # 命令白名单（深度防御）：true = 终端命令只有命中白名单才按原策略放行，未命中的一律升级为需人工批准（never/无人值守下直接拒绝）。
     "command_whitelist": os.getenv("APPROVAL_COMMAND_WHITELIST", "false").lower() == "true",
     # 追加白名单正则（| 分隔），在内置只读白名单基础上放行项目自有安全命令
     "command_whitelist_extra": [
         p for p in os.getenv("APPROVAL_COMMAND_WHITELIST_EXTRA", "").split("|") if p.strip()
     ],
-    # execpolicy DSL（结构化命令策略，白名单模式的升级）：true = 启用策略文件
-    # 规则（deny 优先）。安全边界：DSL 评估永远在黑名单与沙箱等级检查之后——
-    # DSL 不能豁免黑名单，也不能豁免沙箱等级不足，allow 只影响"是否需要询问"。
+    # execpolicy DSL（结构化命令策略，白名单模式的升级）：true = 启用策略文件规则（deny 优先）。
     "exec_policy_enabled": os.getenv("APPROVAL_EXEC_POLICY_ENABLED", "false").lower() == "true",
-    # 策略文件路径（规则数组 JSON，格式见 agent/execpolicy.py；文件缺失/损坏时
-    # fail-open：规则置空并告警，回到内建策略，不放大权限）
+    # 策略文件路径（规则数组 JSON，格式见 agent/execpolicy.py；文件缺失/损坏时 fail-open：规则置空并告警，回到内建策略，不放大权限）
     "exec_policy_file": os.getenv("APPROVAL_EXEC_POLICY_FILE", "./execpolicy.json"),
 }
 
@@ -679,8 +608,8 @@ SMALL_MODEL_CONFIG = {
 # 任务监管者（Supervisor）配置
 # ============================================================
 # 用户痛点："我让他写小说，它每写一章就来问我一次，不应该是写完所有的然后交接
-# 任务结果吗"。实测原因：单循环唯一的停止条件是"模型给出最终回答"，而唯一能拦住
-# 提前收尾的完成度闸门依赖 agent 自己的清单——实测最近 8 次运行 todo_write 调用数
+# 任务结果吗"。原因：单循环唯一的停止条件是"模型给出最终回答"，而唯一能拦住
+# 提前收尾的完成度闸门依赖 agent 自己的清单——最近 8 次运行 todo_write 调用数
 # 全是 0，闸门从未触发；也没有任何角色对照**目标**审"到底做完没有"。
 #
 # 监管者 = 一个独立模型，在 agent 想收尾时审完成度；没做完就发回**下一步指令**。
@@ -718,8 +647,7 @@ OCR_CONFIG = {
     # Windows OCR 的识别语言（逗号分隔，按顺序尝试）；留空用系统当前语言
     "languages": os.getenv("OCR_LANGUAGES", "zh-Hans-CN,en-US"),
     "timeout": float(os.getenv("OCR_TIMEOUT", "60")),
-    # 识别前放大倍数：实测 2 倍对小字号截图明显更准（20px 图 83%→93%，
-    # 34px 图 87%→89%），3 倍不再提升还会切碎英文单词。1 = 不放大。
+    # 识别前放大倍数：实测 2 倍对小字号截图明显更准（20px 图 83%→93%，34px 图 87%→89%），3 倍不再提升还会切碎英文单词。1 = 不放大。
     "scale": int(os.getenv("OCR_SCALE", "2")),
     # 视觉模型失败/不可用时自动降级到本地 OCR（"就废了"的根治）
     "auto_fallback": os.getenv("OCR_AUTO_FALLBACK", "true").lower() == "true",
@@ -734,13 +662,10 @@ ROLLOUT_CONFIG = {
     "enabled": (not MINIMAL_MODE) and os.getenv("ROLLOUT_ENABLED", "true").lower() == "true",
     "dir": resolve_under_root(os.getenv("ROLLOUT_DIR", "./rollouts")),
     "max_files": int(os.getenv("ROLLOUT_MAX_FILES", "20")),     # 保留最近 N 个追踪文件
-    # 旧式固定阈值已废弃（默认 0 = 不触发）：executor 传入窗口比例制阈值；
-    # 仍想手动覆盖可显式设 ROLLOUT_COMPACT_TOKENS
+    # 旧式固定阈值已废弃（默认 0 = 不触发）：executor 传入窗口比例制阈值；仍想手动覆盖可显式设 ROLLOUT_COMPACT_TOKENS
     "compact_tokens": int(os.getenv("ROLLOUT_COMPACT_TOKENS", "0")),
     "keep_recent_messages": int(os.getenv("ROLLOUT_KEEP_RECENT", "8")),
-    # 落盘文本上限。追踪文件是事后诊断的唯一依据，截得太狠等于没有记录：
-    # 实测 agent 的最终报告被截到 300 字、断在半句，复盘时只能去翻会话文件。
-    # 0 = 不截断（不建议：单次 run 的 JSONL 会长得很快）。
+    # 落盘文本上限。追踪文件是事后诊断的唯一依据，截得太狠等于没有记录：agent 的最终报告被截到 300 字、断在半句，复盘时只能去翻会话文件。0 = 不截断（不建议：单次 run 的 JSONL 会长得很快）。
     "text_limit": int(os.getenv("ROLLOUT_TEXT_LIMIT", "4000")),      # 模型输出/最终回答
     "result_limit": int(os.getenv("ROLLOUT_RESULT_LIMIT", "2000")),  # 工具返回
 }
@@ -811,13 +736,7 @@ REPOMAP_CONFIG = {
 # OS 级沙箱（Windows AppContainer，BEST_PRACTICES「下一步优先级」）
 # ============================================================
 def _normalize_sandbox_mode(raw) -> str:
-    """把 SANDBOX_EXECUTION 归一化到 off / appcontainer。
-
-    只做 `.lower()` 不够：下游判的是 `sandbox_mode() != "off"`，所以 `False` / `0` /
-    `OFF` 这些"显然是想关"的写法都会被判成"开着" —— 在非 Windows 上表现为每条
-    终端命令都返回"沙箱模式 OFF 在当前平台不可用"，终端工具整体瘫痪
-    （2026-09-22 审计）。未知取值原样返回，交给沙箱层按 fail-closed 处理。
-    """
+    """把 SANDBOX_EXECUTION 归一化到 off / appcontainer。"""
     value = str(raw or "").strip().lower()
     if value in ("", "off", "false", "0", "no", "none", "disabled"):
         return "off"
@@ -827,24 +746,17 @@ def _normalize_sandbox_mode(raw) -> str:
 
 
 SANDBOX_EXEC_CONFIG = {
-    # 沙箱执行模式：off（默认，行为不变）/ appcontainer
-    # appcontainer = 终端前台命令在 Windows AppContainer 内执行：
-    # 默认不可访问用户文件/注册表/网络，仅可写工作区（icacls 授权）。
-    # fail-closed：容器创建/启动失败时返回错误，不静默回退明文执行。
-    # 归一化到规范词表（见 _normalize_sandbox_mode）：
+    # 沙箱执行模式：off（默认，行为不变）/ appcontainerappcontainer = 终端前台命令在 Windows AppContainer 内执行：默认不可访问用户文件/注册表/网络，仅可写工作区（icacls 授权）。
     "mode": _normalize_sandbox_mode(os.getenv("SANDBOX_EXECUTION", "off")),
     # 沙箱内命令硬超时秒数
     "timeout": float(os.getenv("SANDBOX_EXEC_TIMEOUT", "120")),
     # AppContainer 档案名（确定性 GUID 由此派生，跨会话复用授权）
     "profile": os.getenv("SANDBOX_EXEC_PROFILE", "my_agent.sandbox"),
-    # 给 Python/Node/Git 解释器授予容器只读执行权限（icacls best-effort）：
-    # 不授权则沙箱内只能跑系统目录自带命令，项目工具链全部「拒绝访问」。
+    # 给 Python/Node/Git 解释器授予容器只读执行权限（icacls best-effort）：不授权则沙箱内只能跑系统目录自带命令，项目工具链全部「拒绝访问」。
     "grant_tools": os.getenv("SANDBOX_GRANT_TOOLS", "true").lower() == "true",
-    # 额外授权目录清单（; 分隔，icacls 只读 RX best-effort）：工作区之外的
-    # 只读资源目录（如共享库、数据集）。工作区本身始终可写，不在此列。
+    # 额外授权目录清单（; 分隔，icacls 只读 RX best-effort）：工作区之外的只读资源目录（如共享库、数据集）。工作区本身始终可写，不在此列。
     "grant_dirs": [d.strip() for d in os.getenv("SANDBOX_GRANT_DIRS", "").split(";") if d.strip()],
-    # 容器网络放行（默认 false 保持全禁）：true = 注入 internetClient /
-    # internetClientServer / privateNetworkClientServer capability。
+    # 容器网络放行（默认 false 保持全禁）：true = 注入 internetClient /internetClientServer / privateNetworkClientServer capability。
     "allow_network": os.getenv("SANDBOX_ALLOW_NETWORK", "false").lower() == "true",
 }
 
@@ -854,53 +766,43 @@ SANDBOX_EXEC_CONFIG = {
 TOOL_CONFIG = {
     "output_max_chars": int(os.getenv("TOOL_OUTPUT_MAX_CHARS", "8000")),
     "max_step_ops": int(os.getenv("MAX_STEP_OPS", "12")),   # 单个计划步骤内最多工具操作数
-    # 单循环整次任务的轮数。注意语义已升级（见 agent/loop_budget.py）：
-    # 它现在是**安全网硬上限**，不再是"跑到这个数就断"的工作限额——起步轮数由
-    # loop_base_turns 决定，每出现一轮有进展就按 loop_extend_per_progress 续期，
-    # 连续 loop_stall_limit 轮无进展则提前停（空转才是真正该拦的）。
-    # 历史语义即"最大轮数"，所以缺省值仍取它，保证没有配置新旋钮的机器行为不劣化。
+    # 单轮 LLM 重试的两个预算（秒）。普通错误（网络抖动/5xx）用短的；429 限流用长的——
+    # 配额按分钟窗口重置，等得起才熬得过去，否则一次限流就把能续跑的任务判死。
+    "llm_turn_retry_budget": float(os.getenv("LLM_TURN_RETRY_BUDGET", "180")),
+    "llm_quota_retry_budget": float(os.getenv("LLM_QUOTA_RETRY_BUDGET", "900")),
+    "llm_quota_min_attempts": int(os.getenv("LLM_QUOTA_MIN_ATTEMPTS", "4")),
+    # 限流时单轮最多试几次；0 = 不限（一直重试到配额恢复或用户停止）
+    "llm_max_attempts": int(os.getenv("LLM_MAX_ATTEMPTS", "6")),
+    # 单循环整次任务的轮数。注意语义已升级（见 agent/loop_budget.py）：它现在是**安全网硬上限**，不再是"跑到这个数就断"的工作限额——起步轮数由 loop_base_turns 决定。
     "max_loop_ops": int(os.getenv("MAX_LOOP_OPS", "80")),
     "loop_base_turns": int(os.getenv("LOOP_BASE_TURNS", "30")),          # 起步轮数
     "loop_extend_per_progress": int(os.getenv("LOOP_EXTEND_PER_PROGRESS", "10")),
     "loop_stall_limit": int(os.getenv("LOOP_STALL_LIMIT", "5")),         # 连续无进展即停
-    # "连续无进展"预警阈值（LOOP_HARD_CAP=0 的无限模式下，只有原样重复/空回复会停；
-    #  "换了新做法但失败"的轮次永远到不了上限——达到该阈值时向前端发一次提示。
-    #  0 = 关闭。只预警不自动停：无限模式的语义是"让 agent 做完任务再结束"。）
+    # "连续无进展"预警阈值
     "loop_stagnation_warn": int(os.getenv("LOOP_STAGNATION_WARN", "10")),
-    # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。
-    # 留空则回退到 max_loop_ops（即升级前的行为）。
+    # 绝对值安全网：0 = 不设上限（此时只由进展/停滞与用户的停止按钮决定轮数）。留空则回退到 max_loop_ops（即升级前的行为）。
     "loop_hard_cap": (int(os.getenv("LOOP_HARD_CAP"))
                       if os.getenv("LOOP_HARD_CAP", "").strip() else None),
-    # 完成度闸门（"让 agent 做完任务再结束"）：模型给出最终答案时，若它自己的任务
-    # 清单里还有本次工作产生的未完成项，就把它推回去继续。有界，不会与模型僵持。
+    # 完成度闸门（"让 agent 做完任务再结束"）：模型给出最终答案时，若它自己的任务清单里还有本次工作产生的未完成项，就把它推回去继续。有界，不会与模型僵持。
     "loop_completion_gate": os.getenv("LOOP_COMPLETION_GATE", "true").lower() == "true",
     "loop_completion_nudges": int(os.getenv("LOOP_COMPLETION_NUDGES", "2")),
-    # edit 验证式应用（apply_patch preflight 思路）：修改 .py 后自动跑测试，
-    # 失败自动回滚（.bak 恢复）并把测试尾部回喂模型。默认关闭，EDIT_PREFLIGHT=true 开启。
+    # edit 验证式应用（apply_patch preflight 思路）：修改 .py 后自动跑测试，失败自动回滚（.bak 恢复）并把测试尾部回喂模型。默认关闭，EDIT_PREFLIGHT=true 开启。
     "edit_preflight": os.getenv("EDIT_PREFLIGHT", "false").lower() == "true",
     "edit_preflight_timeout": int(os.getenv("EDIT_PREFLIGHT_TIMEOUT", "180")),
     "edit_preflight_tail": int(os.getenv("EDIT_PREFLIGHT_TAIL", "80")),   # 回喂的失败日志行数
-    # preflight 测试范围：related=只跑与被改模块相关的测试（默认；全套 600+
-    # 个测试会超过超时，导致文件已改却报失败）；full=始终跑全套
+    # preflight 测试范围：related=只跑与被改模块相关的测试（默认；全套 600+个测试会超过超时，导致文件已改却报失败）；full=始终跑全套
     "edit_preflight_scope": os.getenv("EDIT_PREFLIGHT_SCOPE", "related"),
-    # 工具执行硬超时（秒）：任何工具调用超过该时间即视为挂起，返回超时错误并
-    # 重置该工具实例（丢弃卡死的 playwright/子进程引用），防止整个 Agent 冻结。
-    # 默认 300s；browser 因 CDP 挂起高发单独设短值。
+    # 工具执行硬超时（秒）：任何工具调用超过该时间即视为挂起，返回超时错误并重置该工具实例（丢弃卡死的 playwright/子进程引用），防止整个 Agent 冻结。默认 300s；browser 因 CDP 挂起高发单独设短值。
     "tool_timeout": float(os.getenv("TOOL_TIMEOUT", "300")),
     "browser_timeout": float(os.getenv("BROWSER_TIMEOUT", "60")),
-    # 单个模型轮次内并行执行的工具调用上限（超出排队）。模型一轮可发 N 个
-    # 并行安全调用，每个都可能再拉子进程/HTTP 连接——无上限会把线程、句柄
-    # 和上游限流同时打满（免费档尤其敏感）。
+    # 单个模型轮次内并行执行的工具调用上限（超出排队）。模型一轮可发 N 个并行安全调用，每个都可能再拉子进程/HTTP 连接——无上限会把线程、句柄和上游限流同时打满（免费档尤其敏感）。
     "max_parallel_tools": int(os.getenv("MAX_PARALLEL_TOOLS", "4")),
-    # python 代码工具执行超时（秒）：exec 无法中断，超时后工具立即返回明确错误
-    # （此前该工具体没有任何超时，sleep 轮询/长循环会挂到 tool_timeout 才返回）
+    # python 代码工具执行超时（秒）：exec 无法中断，超时后工具立即返回明确错误（之前该工具体没有任何超时，sleep 轮询/长循环会挂到 tool_timeout 才返回）
     "python_timeout": float(os.getenv("PYTHON_TOOL_TIMEOUT", "30")),
-    # 本地工具目录（agent 自己新增的工具放这里：只在本机生效，已在 .gitignore
-    # 中忽略，永不推送；仓库只保留产品自带的核心工具与配置）
+    # 本地工具目录（agent 自己新增的工具放这里：只在本机生效，已在 .gitignore中忽略，永不推送；仓库只保留产品自带的核心工具与配置）
     "local_dir": os.getenv("LOCAL_TOOLS_DIR", "./tools/local"),
     "local_enabled": os.getenv("LOCAL_TOOLS_ENABLED", "true").lower() == "true",
-    # 终端前台命令超时（秒）：实战发现 60s 会掐断负载下的全量测试，
-    # 默认 120s。后台命令（background=true）不受此限。
+    # 终端前台命令超时（秒）：实战发现 60s 会掐断负载下的全量测试，默认 120s。后台命令（background=true）不受此限。
     "terminal_fg_timeout": float(os.getenv("TERMINAL_FOREGROUND_TIMEOUT", "120")),
     # 桌面操控（computer 工具）：无障碍树规模与截图保存目录
     "computer_a11y_max_elements": int(os.getenv("COMPUTER_A11Y_MAX_ELEMENTS", "120")),
@@ -913,8 +815,7 @@ TOOL_CONFIG = {
 # TUI 状态栏（常驻状态行：token 计数/沙箱/审批策略）
 # ============================================================
 TUI_CONFIG = {
-    # verbose 模式下每轮模型调用前刷新状态栏（↑输入 ↓输出 token、缓存命中、
-    # 沙箱等级、审批策略）。false 关闭，只保留运行结束的统计行。
+    # verbose 模式下每轮模型调用前刷新状态栏（↑输入 ↓输出 token、缓存命中、沙箱等级、审批策略）。false 关闭，只保留运行结束的统计行。
     "status_bar": os.getenv("TUI_STATUS_BAR", "true").lower() == "true",
 }
 
@@ -922,9 +823,7 @@ TUI_CONFIG = {
 # Team 多Agent协作配置（Manager-Worker 模式）
 # ============================================================
 TEAM_CONFIG = {
-    # 并行执行独立子任务（multi_agents 式）。Manager 拆解时把不依赖其他
-    # 子任务结果的子任务标记为 independent；并行前有安全门（参与角色的
-    # 工具集必须全部并行安全，否则自动回退串行）。默认关闭保持旧行为。
+    # 并行执行独立子任务（multi_agents 式）。Manager 拆解时把不依赖其他子任务结果的子任务标记为 independent；并行前有安全门（参与角色的工具集必须全部并行安全，否则自动回退串行）。默认关闭保持旧行为。
     "parallel": os.getenv("TEAM_PARALLEL", "false").lower() == "true",
     # 单个并行 Worker 的硬超时（秒）：超时标记该子任务失败，不冻结整个团队。
     "worker_timeout": float(os.getenv("TEAM_WORKER_TIMEOUT", "900")),
@@ -934,11 +833,8 @@ TEAM_CONFIG = {
 # 测试命令配置（跨平台可配：循环提示词中引用的测试命令）
 # ============================================================
 def resolve_test_command(env: dict, is_windows: bool = None) -> str:
-    r"""测试命令解析（纯函数）：显式配置优先，否则按平台选 venv 路径。
-
-    默认值必须分平台 —— 写死 Windows 的 `.venv\Scripts` 会让 Linux 上跑测试
-    一路失败，EDIT_PREFLIGHT 打开时还会把每次 edit 都回滚掉。
-    """
+    """测试命令解析（纯函数）：显式配置优先，否则按平台选 venv 路径。
+    一路失败，EDIT_PREFLIGHT 打开时还会把每次 edit 都回滚掉。"""
     explicit = str(env.get("TEST_COMMAND") or "").strip()
     if explicit:
         return explicit
@@ -1016,13 +912,9 @@ ARTICLE_CONFIG = {
     "factcheck": os.getenv("ARTICLE_FACTCHECK", "true").lower() == "true",
     "factcheck_max_claims": int(os.getenv("ARTICLE_FACTCHECK_MAX_CLAIMS", "5")),
     "lookup_limit": int(os.getenv("ARTICLE_LOOKUP_LIMIT", "3")),
-    # 检索通道（按顺序凑够 lookup_limit 条即停）：zhihu=知乎开放平台全网搜索
-    # （结构化、稳，需 ZHIHU_ACCESS_SECRET）；browser=抓搜索引擎结果页（无密钥依赖，
-    # 但经常抓不到东西）。两条都拿不到才记"未查到"。
+    # 检索通道（按顺序凑够 lookup_limit 条即停）：zhihu=知乎开放平台全网搜索（结构化、稳，需 ZHIHU_ACCESS_SECRET）；browser=抓搜索引擎结果页（无密钥依赖，但经常抓不到东西）。
     "lookup_sources": os.getenv("ARTICLE_LOOKUP_SOURCES", "zhihu,browser"),
     # 限流兜底：长文一次跑 8+ 个大请求，很容易撞上游 TPM/RPM。
-    # 同端点退避重试 stage_retries 次 → 仍失败就换另一个端点续跑
-    # （fallback_endpoint=auto 表示自动选"另一家"；留空/off 关闭换端点）。
     "stage_retries": int(os.getenv("ARTICLE_STAGE_RETRIES", "1")),
     "retry_wait": float(os.getenv("ARTICLE_RETRY_WAIT", "20")),
     "fallback_endpoint": os.getenv("ARTICLE_FALLBACK_ENDPOINT", "auto"),

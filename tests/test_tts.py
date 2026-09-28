@@ -1,8 +1,5 @@
-"""
-models/tts.py 与 tools/tts.py 的离线单元测试（不联网）。
-
-本地兜底 TTS 的合成被 monkeypatch 拦截。
-"""
+"""models/tts.py 与 tools/tts.py 的离线单元测试（不联网）。
+本地兜底 TTS 的合成被 monkeypatch 拦截。"""
 import pytest
 
 from tools.tts import TTSTool
@@ -26,11 +23,7 @@ class FakeCommunicate:
 @pytest.fixture(autouse=True)
 def default_provider_edge(monkeypatch):
     """测试默认走 edge 分支，不跟着开发者 .env 的 TTS_PROVIDER 走。
-
-    TTSModel 在构造时读 TTS_CONFIG，若 .env 设了 TTS_PROVIDER=openrouter，
-    下面这些 edge 用例会静默跑到另一条分支上去（联网、断言全变）。
-    openrouter 相关用例要么显式传 provider=，要么自己 monkeypatch 覆盖。
-    """
+    下面这些 edge 用例会静默跑到另一条分支上去（联网、断言全变）。"""
     from config import TTS_CONFIG
     monkeypatch.setitem(TTS_CONFIG, "provider", "edge")
 
@@ -388,12 +381,7 @@ class TestOpenRouterProvider:
 
     def test_tool_shows_fallback_warning(self, tmp_path, or_model, monkeypatch):
         """降级到本地 TTS 时必须在输出里写明。
-
-        注意：这里必须把 edge 合成打桩。旧写法让降级路径**真的跑了一遍
-        本地兜底 TTS**（实测唯一的外部网络调用：GETADDRINFO speech.platform.bing.com），
-        而且断言写成 `if r.success:` —— 离线时它会静默变成空操作，
-        既依赖网络又失去检出能力。
-        """
+        既依赖网络又失去检出能力。"""
         m, _ = or_model(FakeResponse(500, payload={"error": {"message": "x"}}))
 
         def fake_edge(text, voice=None, rate=None, volume=None, output=None):

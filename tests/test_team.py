@@ -1,14 +1,4 @@
-"""
-Team 多Agent协作测试：FakeLLM 脚本化，无网络。
-
-覆盖：
-- 串行模式（默认）行为不变：按序执行 + 上下文链
-- 并行模式：独立子任务真并发（Barrier 验证），依赖型子任务继承其结果
-- DAG 细粒度依赖调度：线性链、菱形（并行分支 + 汇合）、依赖环、失败下游
-- 并行安全门：工具不并行安全时回退串行
-- Worker 硬超时：超时子任务标记失败，不冻结团队
-- Manager 拆解解析：dict 格式（depends_on / independent）与旧字符串格式兼容
-"""
+"""Team 多Agent协作测试：FakeLLM 脚本化，无网络。"""
 import json
 import threading
 import time
@@ -41,12 +31,7 @@ class FakeToolManager:
 
 
 class FakeTeamLLM:
-    """
-    按消息内容路由的脚本化 LLM：
-    - system 含「任务分配经理」→ 返回拆解 JSON
-    - system 含「任务汇总专家」→ 返回最终答案
-    - 其余视为 Worker 轮次：记录消息、统计并发度、可选 Barrier/睡眠
-    """
+    """按消息内容路由的脚本化 LLM："""
 
     def __init__(self, decompose_json, worker_reply="完成",
                  barrier: threading.Barrier = None, worker_sleep: float = 0.0):
@@ -169,8 +154,7 @@ class TestParallelMode:
         assert result.success is True
         assert all(st.status == "completed" for st in result.subtasks)
         assert llm.max_concurrent == 2                     # 真并发
-        # 用 barrier 是否被打破判断"有没有等到超时"：比 elapsed 阈值精确，
-        # 且不因整套测试时的机器负载而假失败（真串行时 barrier 会超时置 broken）
+        # 用 barrier 是否被打破判断"有没有等到超时"：比 elapsed 阈值精确，且不因整套测试时的机器负载而假失败（真串行时 barrier 会超时置 broken）
         assert not barrier.broken, "未真并发：barrier 等待超时（时序被串行化）"
 
     def test_dependent_subtask_inherits_wave_results(self):
@@ -252,8 +236,7 @@ class TestParallelMode:
                     else:
                         reply = "完成"
                     if reply.startswith("{"):
-                        # 30s：全套测试并发压力下线程调度可能滞后，
-                        # 10s 会在慢环境下 BrokenBarrierError 造成假失败
+                        # 30s：全套测试并发压力下线程调度可能滞后，10s 会在慢环境下 BrokenBarrierError 造成假失败
                         self.barrier.wait(timeout=30)
                 finally:
                     with self._lock:
@@ -312,16 +295,9 @@ class TestParallelMode:
 
     def test_late_worker_cannot_resurrect_failed_subtask(self, monkeypatch):
         """超时后**迟到的** worker 不能把 failed 改回 completed。
-
-        实测故障（2026-09-22 审计）：超时分支只做标记，daemon 线程并未被取消；
-        `_execute_subtask` 成功路径无条件置 "completed"，慢 worker 在 deadline 之后
-        跑完时会把自己从 failed 覆写回 completed —— 同一个 SubTask 上
-        `status="completed"` 与 `error="Worker 执行超时"` 并存，而调用方拿到的是空
-        结果（`results` 里是 ""），Dashboard 也已推过 `step_end status=failed`。
-        """
+        故障：超时分支只做标记，daemon 线程并未被取消；"""
         from config import TEAM_CONFIG
-        # 余量要拉开：worker 睡 3s、超时 0.5s，wall-clock 上不可能有 worker 在
-        # deadline 前跑完（0.8/0.3 那种窄余量在全量跑、机器负载高时会偶发假失败）
+        # 余量要拉开：worker 睡 3s、超时 0.5s，wall-clock 上不可能有 worker 在 deadline 前跑完（0.8/0.3 那种窄余量在全量跑、机器负载高时会偶发假失败）
         monkeypatch.setitem(TEAM_CONFIG, "worker_timeout", 0.5)
 
         llm = FakeTeamLLM(two_independent_json(), worker_sleep=3.0)
@@ -339,13 +315,7 @@ class TestParallelMode:
 
 
 class TestWorkerApprovalGate:
-    """team worker 的工具调用必须过审批门。
-
-    实测漏洞（2026-09-22 审计）：worker 此前是裸调
-    `tool_manager.execute(tool, input_str)` —— 没有黑名单、没有沙箱等级、没有审批
-    策略、没有 Guardian。team 模式下 worker 一句
-    `{"tool":"terminal","tool_input":"del /f /s /q D:\\data"}` 就直接执行了。
-    """
+    """team worker 的工具调用必须过审批门。"""
 
     class _OneShotLLM:
         """每轮都返回同一句工具调用（worker 解析 → 执行 → 再问）。"""
@@ -617,11 +587,7 @@ class TestBackwardCompat:
                      "review_feedback", "total_time"):
             assert hasattr(result, attr)
         assert result.final_answer == "最终答案"
-        # Worker 解析仍走各自角色的系统提示。
-        # ⚠️ 不能按下标断言：两个 independent 子任务是**并行**执行的（同文件其它用例
-        # 用 Barrier 证明真并发），worker_chats 的写入顺序取决于线程调度——全量测试有
-        # CPU 压力时先后会反转，表现为偶发失败（实测：全量里挂过，单独跑 15 次全过）。
-        # 这里改成与顺序无关的断言，且比原来更严格：两个角色的提示都必须出现。
+        # Worker 解析仍走各自角色的系统提示。⚠️ 不能按下标断言：两个 independent 子任务是**并行**执行的（同文件其它用例用 Barrier 证明真并发）
         prompts = [c[0]["content"] for c in llm.worker_chats]
         assert ALL_ROLES["writer"].system_prompt in prompts
         assert ALL_ROLES["researcher"].system_prompt in prompts

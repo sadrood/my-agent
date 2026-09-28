@@ -1,22 +1,4 @@
-"""
-短剧工厂服务的 REST API 客户端。
-
-短剧工厂服务本身是 Electron 桌面工具，
-但它的后端是一个**独立的 Express 服务**（默认 127.0.0.1:10588），把整条流水线
-暴露成 169 个 /api 路由 —— 所以 agent 可以完全不碰它的界面，直接编排它。
-
-契约（读源码核实，2026-09-17）：
-    登录: POST /api/login/login  {"username","password"}
-          → {"data": {"token": "Bearer <jwt>", ...}}（有效期 180 天）
-    其余: 带上 `Authorization: <token>`（token 字符串本身已含 "Bearer " 前缀）
-    路径: 就是 router.ts 里 app.use("/api/xxx", ...) 的原样路径，无额外前缀
-    校验: 各路由用 zod + validateFields，字段缺失/类型错时返回 400 与具体原因
-          → 所以"先调一次看报错"是可行的发现手段（错误会原样回传）
-
-⚠️ 它的 API 没有公开文档、路由是代码生成的（router.ts 顶部有 @routes-hash），
-版本之间字段可能变。因此这里只做**薄封装**：登录/重试/错误翻译由本模块负责，
-业务字段一律交给调用方，不猜。
-"""
+"""短剧工厂服务的 REST API 客户端。"""
 import json
 import threading
 from typing import Any, Dict, Optional
@@ -53,8 +35,7 @@ class ToonflowClient:
         self.username = username or cfg.get("username", "admin")
         self.password = password or cfg.get("password", "admin123")
         self.timeout = float(timeout or cfg.get("timeout", 60))
-        # 生成类调用要等分钟级：服务端会同步轮询到出图/出片才返回
-        # （实测 5 秒视频片段 60s 超时不够，会误报"连不上"）。
+        # 生成类调用要等分钟级：服务端会同步轮询到出图/出片才返回（5 秒视频片段 60s 超时不够，会误报"连不上"）。
         self.gen_timeout = float(cfg.get("gen_timeout", 900))
         self.max_chars = int(cfg.get("max_chars", 6000))
         self._token: Optional[str] = None
@@ -92,9 +73,7 @@ class ToonflowClient:
     def request(self, method: str, path: str, params: Dict[str, Any] = None,
                 json_body: Any = None, timeout: float = None) -> Any:
         """发起一次带鉴权的请求；401 时自动重登并重试一次。
-
-        超时按路径自动选择：命中生成类路由用 gen_timeout，其余用普通 timeout。
-        """
+        超时按路径自动选择：命中生成类路由用 gen_timeout，其余用普通 timeout。"""
         self.login()
         return self._request_raw(method, path, params=params, json_body=json_body,
                                  timeout=timeout if timeout is not None
@@ -122,10 +101,7 @@ class ToonflowClient:
             resp = httpx.request(method.upper(), url, params=params,
                                  json=json_body, headers=headers,
                                  timeout=timeout if timeout is not None else self.timeout,
-                                 # 回环地址**不走环境里的代理**：实测本机没启动
-                                 # 该服务时，若让 httpx 读环境代理配置，会得到
-                                 # 一个莫名其妙的 HTTP 502（本该是"连接被拒绝"），
-                                 # 排查方向直接被带偏。远端部署仍允许走代理。
+                                 # 回环地址**不走环境里的代理**：本机没启动该服务时，若让 httpx 读环境代理配置，会得到一个莫名其妙的 HTTP 502（本该是"连接被拒绝"），排查方向直接被带偏。远端部署仍允许走代理。
                                  trust_env=not _is_loopback(self.base_url))
         except httpx.HTTPError as e:
             raise ToonflowError(
@@ -198,10 +174,7 @@ class ToonflowClient:
     @staticmethod
     def method_for(path: str) -> str:
         """该路由的正确 HTTP 方法（查权威表；表外按 POST 试）。
-
-        1.1.8 版 169 条路由里 159 条是 POST——**读接口也是 POST + JSON body**，
-        用 GET 会得到 404 "API 404 Not Found"，所以方法不能靠猜。
-        """
+        用 GET 会得到 404 "API 404 Not Found"，所以方法不能靠猜。"""
         return method_for(path)
 
     def summarize(self, data: Any) -> str:
@@ -215,9 +188,7 @@ class ToonflowClient:
         return text
 
 
-#: 全量路由 → HTTP 方法（从上游 src/router.ts 逐条提取，2026-09-17 核实；
-#: 1.1.8 版共 169 条：159 个 POST / 10 个 GET）。读接口也是 POST + JSON body，
-#: 用 GET 调它们会得到 404 "API 404 Not Found"——call 命令据此自动选方法。
+# : 全量路由 → HTTP 方法（从上游 src/router.ts 逐条提取，2026-09-17 核实；: 1.1.8 版共 169 条：159 个 POST / 10 个 GET）。
 ROUTE_METHODS: Dict[str, str] = {
     "/api/agents/clearMemory": "POST",
     "/api/agents/getMemory": "POST",

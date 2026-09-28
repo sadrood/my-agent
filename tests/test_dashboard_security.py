@@ -1,12 +1,4 @@
-"""
-批次5 回归：Dashboard 的跨站访问防护。
-
-实测背景（2026-09-17 审计）：`allow_origins=["*"]` 的注释写着"只监听 127.0.0.1
-所以安全"——但回环绑定**不是**安全边界：浏览器里任何网页都能向 127.0.0.1 发跨域
-请求，CORS 正是决定放不放行的那道门。而暴露的接口里有 `POST /api/run`（用用户
-自己的 approval=never + danger-full-access 跑任意目标）、`/api/approve`、
-`/api/rollback`、`/api/config` —— 组合起来就是本地 RCE。
-"""
+"""批次5 回归：Dashboard 的跨站访问防护。"""
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -52,15 +44,7 @@ class TestOriginAllowlist:
 
 
 class TestWebSocketOriginAllowlist:
-    """WebSocket 握手必须自己查 Origin。
-
-    实测漏洞（2026-09-22 审计）：上面两道防线**都只覆盖 http scope** ——
-    `@app.middleware("http")` 用的 BaseHTTPMiddleware 与 CORSMiddleware 遇到
-    websocket scope 都是直接透传，`websocket_endpoint` 自己也不读 origin。
-    于是用户浏览器里任意一个页面 `new WebSocket("ws://127.0.0.1:8090/ws")` 就能：
-    ① 收到全部事件流（含审批卡片的 id、工具命令原文、截图）；② 回发
-    `approval_response` 直接批准本该由用户裁决的高危命令；③ 发 `stop` 停任务。
-    """
+    """WebSocket 握手必须自己查 Origin。"""
 
     @pytest.mark.parametrize("origin", [
         "https://evil.example.com",

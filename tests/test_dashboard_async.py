@@ -1,13 +1,4 @@
-"""静态守卫：async 路由里不许直接调用同步阻塞函数。
-
-uvicorn 是单事件循环，一处同步阻塞会把 `/ws` 推送与 `/api/stop`、`/api/approve`
-一起排住 —— 前端表现为"任务卡住、点停止没反应"。修法是挪进 `asyncio.to_thread`；
-本测试按 AST 找 async 函数里的已知阻塞调用，豁免两种写法：`to_thread(fn, ...)` 里
-直接包的，以及 `to_thread(_nested_def)`（调用在嵌套函数体里）。
-
-匹配按**限定名**而非只看尾名 —— 尾名匹配会把 `str.replace`、`img.save` 一起误报，
-守卫就没人看了。另外故意豁免单次 stat（`os.path.exists` 等，微秒级）与纯内存操作。
-"""
+"""静态守卫：async 路由里不许直接调用同步阻塞函数。"""
 import ast
 import os
 
@@ -30,8 +21,7 @@ BLOCKING = {
 #: `os.*` 里的文件**内容**读写（`os.path.*` 是元数据 stat，故意不收）
 BLOCKING_OS = {"makedirs", "remove", "unlink", "rename", "replace"}
 
-#: pathlib 的文本/字节读写 —— 接收者是变量（`p.read_text()`）而不是 `os`，
-#: 没法限定在 `os` 上；这几个名字本身足够特异，按尾名收即可。
+# : pathlib 的文本/字节读写 —— 接收者是变量（`p.read_text()`）而不是 `os`，: 没法限定在 `os` 上；这几个名字本身足够特异，按尾名收即可。
 BLOCKING_PATHLIB = {"read_text", "write_text", "read_bytes", "write_bytes"}
 
 #: `json.load` / `json.dump`（接收者以 json 结尾，所以 `_json` 这类别名也认）
@@ -78,10 +68,7 @@ def _blocking_name(call) -> str:
 
 def _exempted(fn):
     """收集 async 函数体里"已交给线程"的节点 id。
-
-    两种写法都豁免：`to_thread(f())` 里直接包的表达式；`to_thread(_nested)`
-    把整个嵌套函数体交给线程的。
-    """
+    把整个嵌套函数体交给线程的。"""
     safe, deferred = set(), set()
     for sub in ast.walk(fn):
         if not _is_to_thread(sub):
@@ -112,10 +99,7 @@ def _scan(tree):
             name = _blocking_name(sub)
             if not name or id(sub) in safe:
                 continue
-            # `result` 有两副面孔：
-            #   · concurrent.futures.Future.result(timeout=…) —— 真阻塞；
-            #   · asyncio Future.result()（在 done 集合里的）—— 不阻塞。
-            # 用"有没有传参"区分（阻塞那个必须给 timeout）。
+            # `result` 有两副面孔：；  · concurrent.futures.Future.result(timeout=…) —— 真阻塞；
             if name == "result" and not sub.args and not sub.keywords:
                 continue
             bad.append((fn.name, sub.lineno, name))
@@ -137,10 +121,7 @@ class TestNoSyncBlockingInAsyncRoutes:
         )
 
     def test_scanner_actually_catches_violations(self):
-        """反向验证：扫描器对一段**故意写成阻塞**的代码必须报出来。
-
-        没有这条，扫描器一旦因为 AST 结构变化而失灵，上面那条会永远"通过"。
-        """
+        """反向验证：扫描器对一段**故意写成阻塞**的代码必须报出来。"""
         bad_src = (
             "import asyncio, subprocess\n"
             "async def route():\n"

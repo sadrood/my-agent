@@ -1,8 +1,4 @@
-"""运行环境提示按平台分叉：Linux 上不能出现 Windows 专有命令。
-
-原先只有 Windows cmd 一份，Linux 上填 `shell=sh` 后模型仍被告知用 findstr/dir，
-等于主动把模型引向不存在的命令。
-"""
+"""运行环境提示按平台分叉：Linux 上不能出现 Windows 专有命令。"""
 from models.prompts import (PLATFORM_NOTICE_TEMPLATE, PLATFORM_NOTICE_WINDOWS,
                             platform_notice)
 

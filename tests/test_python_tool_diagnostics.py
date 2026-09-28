@@ -1,13 +1,6 @@
-"""
-python 工具"可行动报错"测试（v3，2026-09-15）。
-
-背景：漫剧任务里模型写 `import shutil, pathlib` 复制产物图片，被黑名单正确拦下，
-但工具返回的 error 字段恒为「代码执行出错。」，真正有用的信息埋在 12 行 traceback
-中间（还混着 tools/python.py 的内部帧），模型据此认定"报错没有详情"，
+"""python 工具"可行动报错"测试（v3，2026-09-15）。
 连续 3 轮瞎猜（换绝对路径、换相对路径、查 cwd）才绕过去。
-
-结论：黑名单不能放松（AGENTS.md 安全底线：只能增不能减），要修的是报错质量。
-"""
+结论：黑名单不能放松（AGENTS.md 安全底线：只能增不能减），要修的是报错质量。"""
 from tools.python import BlockedImportError, PythonTool
 
 
@@ -80,7 +73,7 @@ def test_unknown_module_is_not_a_blocked_import():
 # ----------------------------------------------------------------------
 
 def test_user_traceback_has_no_internal_frames():
-    """回归：此前 traceback 里全是 tools/python.py 的帧，看不到用户代码行号。"""
+    """回归：之前 traceback 里全是 tools/python.py 的帧，看不到用户代码行号。"""
     r = make_tool().execute("x = 1\nraise ValueError('boom')")
     assert not r.success
     assert "ValueError: boom" in r.output

@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""本地 OCR 测试：截图取字不再依赖视觉模型。
-
-用户痛点原话："agent 还缺少截图识别文字的能力，总是依赖视觉模型，有的时候视觉模型
-无响应，就废了。"  所以这里钉住三件事：
-  1) 本地 OCR 能把字读出来（真引擎，无后端时跳过）；
-  2) 归一化正确（中文空格、数字写法），且不破坏英文空格；
-  3) **视觉模型挂掉时自动降级到 OCR**，而不是整个失败。
-"""
+"""本地 OCR 测试：截图取字不再依赖视觉模型。"""
 import base64
 import os
 
@@ -146,7 +139,7 @@ class TestRecognize:
             OcrEngine().recognize(self._png(tmp_path))
 
     def test_upscale_used_and_temp_removed(self, tmp_path, monkeypatch):
-        """放大是为了更准（实测 20px 图 83%→93%）：2x 时后端拿到的图应更大。"""
+        """放大是为了更准（20px 图 83%→93%）：2x 时后端拿到的图应更大。"""
         PIL = pytest.importorskip("PIL.Image")
         from PIL import Image
         src = tmp_path / "small.png"
@@ -227,10 +220,7 @@ class TestOcrTool:
 
 def _fake_engine(text):
     """替身引擎：**继承真引擎**只覆盖识别与后端探测，避免漏掉工具用到的属性。
-
-    （第一版是个独立小类，结果工具里 `OcrEngine.BACKENDS` / `.languages`
-    一访问就 AttributeError——替身必须长得像真货。）
-    """
+    一访问就 AttributeError——替身必须长得像真货。）"""
     class _Fake(OcrEngine):
         TEXT = text
 
@@ -397,12 +387,7 @@ class TestRealOcr:
 
 class TestPowerShellBridgeNoLeak:
     """PowerShell 桥脚本必须**每个进程一份**，而不是每次 OCR 一份。
-
-    实测故障（2026-09-22 审计）：脚本缓存在**实例**属性 `self._ps_script` 上，而
-    `OcrEngine()` 每次调用都新建实例 —— 每调一次 OCR 就在 %TEMP% 留一个 .ps1 永不
-    删除（审计时本机已累积 51 个，这次修复前已涨到 97 个）。同函数的 out_file 与
-    recognize_base64 的 PNG 都有 finally 清理，只有它漏了。
-    """
+    recognize_base64 的 PNG 都有 finally 清理，只有它漏了。"""
 
     def test_same_path_across_calls_and_instances(self):
         import glob

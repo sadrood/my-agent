@@ -1,9 +1,5 @@
-"""
-原生桌面 GUI（Tkinter，Python 自带，零第三方依赖）。
-
-独立桌面窗口：输入目标 → 后台线程跑 Agent → 事件经 event_sink 推入队列 →
-主线程轮询渲染（工具调用 / 结果 / 最终回答）。非 Web、非浏览器壳。
-"""
+"""原生桌面 GUI（Tkinter，Python 自带，零第三方依赖）。
+主线程轮询渲染（工具调用 / 结果 / 最终回答）。非 Web、非浏览器壳。"""
 import json
 import queue
 import threading
@@ -15,10 +11,7 @@ _WIN_TITLE = "my_agent · 小悟"
 
 
 def _wake_existing_instance() -> bool:
-    """Windows: 若已有同名窗口，唤醒它并置前，返回 True。
-
-    防止重复启动堆积多个桌面窗口。
-    """
+    """Windows: 若已有同名窗口，唤醒它并置前，返回 True。"""
     try:
         import ctypes
         from ctypes import wintypes
@@ -65,11 +58,7 @@ def _wake_existing_instance() -> bool:
 
 
 def apply_event(out, event_type: str, data: dict, pending_cards: list) -> None:
-    """把一条 Agent 事件渲染到输出区（独立函数，便于脱离 Tk 单测）。
-
-    工具调用渲染为"卡片"：头部（工具名 + 运行状态 + 耗时）+ 参数摘要 + 结果行，
-    通过 Text 的 tag 机制（card/card_ok/card_err）形成块状底色。
-    """
+    """把一条 Agent 事件渲染到输出区（独立函数，便于脱离 Tk 单测）。"""
 
     def _insert(text: str, tag: str = "meta") -> int:
         out.config(state="normal")
@@ -304,9 +293,8 @@ def launch_desktop():
     send_btn.config(command=send)
 
     def _on_close():
-        # 点右上角 × 时必须**真的停任务**：Tk 默认只退出 mainloop，而 agent 线程是
-        # daemon、解释器退出时被硬杀 —— 正在执行的 write/edit 可能只落一半
-        # （2026-09-22 审计）。
+        # 点右上角 × 时必须**真的停任务**：Tk 默认只退出 mainloop，而 agent 线程是 daemon、解释器退出时被硬杀 —— 正在执行的 write/edit 可能只落一半
+
         try:
             stop_event.set()
         except Exception:

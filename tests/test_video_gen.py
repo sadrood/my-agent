@@ -1,12 +1,4 @@
-"""
-models/video_gen.py 与 tools/video_gen.py 的离线单元测试。
-
-httpx.post / httpx.get 被 monkeypatch 拦截，不发起真实网络请求。
-重点覆盖：
-- 查询端点在 **HOST 根路径**（/查询端点，不在 /v1 下）——实测踩过的坑
-- 异步任务状态流转与**超时不丢任务**（返回 task_id 供稍后查询）
-- 工具层 generate / status 两个命令
-"""
+"""models/video_gen.py 与 tools/video_gen.py 的离线单元测试。"""
 import json
 
 import pytest
@@ -146,12 +138,7 @@ class TestVideoGenModel:
         assert "审核" in out["error"]
 
     def test_wait_survives_transient_429(self, tmp_path, monkeypatch):
-        """回归：轮询被限流不能判任务死刑。
-
-        实测（2026-09-17）6 秒一次的查询被上游拒绝 429 "查询过于频繁"，
-        旧实现直接抛错 → 模型重做整条视频，白烧一次配额（500 秒/天）外加
-        两分钟等待。现在应退避重试直到拿到结果。
-        """
+        """回归：轮询被限流不能判任务死刑。"""
         import models.video_gen as vg
         seq = [
             ("err", 429, '{"error":{"code":429,"message":"查询过于频繁，请稍后重试"}}'),
@@ -334,12 +321,7 @@ class TestVideoGenTool:
         assert r.success is False and "task_id" in r.error
 
     def test_command_holding_prompt_is_tolerated(self):
-        """回归：模型常把整段提示词塞进 command、漏掉 prompt。
-
-        实测（2026-09-17 动漫漫剧任务）30 次 video_gen 调用里 7 次如此，旧实现
-        回一句"未知命令: <两百字提示词>"，模型只能整轮重做——每次白等约 110 秒。
-        现在按提示词处理，与字符串入口 execute() 的宽松语义一致。
-        """
+        """回归：模型常把整段提示词塞进 command、漏掉 prompt。"""
         fm = FakeModel(gen={"video_id": "t9", "status": "completed",
                             "local_path": "/tmp/x.mp4"})
         r = VideoGenTool(video_model=fm).execute_json(
@@ -384,7 +366,7 @@ class TestSecondsClamp:
 
     def test_normalize_seconds_bounds(self):
         from models.video_gen import _normalize_seconds as n
-        assert n("3") == "4"          # 3s 实测会被拒（invalid_request）
+        assert n("3") == "4"          # 3s 会被拒（invalid_request）
         assert n("5") == "5"
         assert n("30") == "12"
         assert n("4.5") == "4.5"

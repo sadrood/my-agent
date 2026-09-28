@@ -1,14 +1,5 @@
-"""
-OS 级沙箱（Windows AppContainer）测试。
-
-单测全部 Fake 化（不真启动容器，无平台依赖）：
-- 配置开关与可用性探测
-- fail-closed：沙箱不可用/启动失败时终端返回错误，绝不回退明文执行
-- 终端集成：sandbox 开启时前台命令走沙箱，后台命令不走
-
-真实 AppContainer 冒烟属于手工集成测试（会在容器内起真实进程），
-不放进常规测试集，避免测试耗时与平台抖动。
-"""
+"""OS 级沙箱（Windows AppContainer）测试。
+不放进常规测试集，避免测试耗时与平台抖动。"""
 import sys
 import time
 
@@ -148,13 +139,7 @@ class TestTerminalIntegration:
 
 
 class TestUnsandboxablePathsFailClosed:
-    """沙箱模式下，走不到 AppContainer 的执行路径必须拒绝，而不是放行。
-
-    实测故障（2026-09-22 审计）：`session=true` 走 `_session_run`，那条路径既不过
-    `CommandSafety.classify`、也不进沙箱；桌面端内嵌终端把命令交给 Electron 桥执行，
-    同样套不上 AppContainer。而 `session` 是 schema 里公开给模型的参数 ——
-    等于模型可以单方面放弃 SANDBOX_EXECUTION 承诺的 fail-closed。
-    """
+    """沙箱模式下，走不到 AppContainer 的执行路径必须拒绝，而不是放行。"""
 
     def test_session_run_refused_when_sandbox_enabled(self, monkeypatch):
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")

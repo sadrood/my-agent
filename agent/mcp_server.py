@@ -1,37 +1,10 @@
-"""
-MCP Server 模块（借鉴同类实现的 mcp-server 模式）。
-
-同类框架除了消费 MCP 工具，还可以把自己作为 MCP server 暴露出去，
-让任何 MCP 宿主（IDE、其他 Agent、宿主平台等）以工具的方式调用它。
-
-本模块同样把 my_agent 包装成 MCP server：
-- run_agent: 让宿主把一个目标交给 my_agent 执行（单Agent / Team / Research）
-- list_agent_tools: 查看 my_agent 当前可用的工具
-
-用法:
-    python main.py --mcp-server            # stdio 传输（默认）
-    python main.py --mcp-server --mcp-port 8080   # 可选: SSE（暂不支持，保留参数）
-
-兼容性: 自动适配 mcp SDK 1.x（mcp.server.fastmcp.FastMCP）与 2.x
-（mcp.server.mcpserver.MCPServer）。
-"""
+"""MCP Server 模块（借鉴同类实现的 mcp-server 模式）。"""
 from typing import List
 
 from config import MCP_CONFIG
 
 
-#: `run_agent` 允许宿主请求的最高沙箱等级。
-#:
-#: 为什么必须在**服务端**夹取：`danger-full-access` 是唯一能解锁硬黑名单的取值 ——
-#: `agent/approval.py` 的 `decide()` 在 `risk == "blocked"` 时只在这一种组合下放行：
-#: `sandbox_mode == "danger-full-access" and mode == "never"`。
-#: 而 run_agent 的参数是**宿主 LLM 自己填的**，等于让被调方决定要不要守这条底线：
-#: 一句 `run_agent(goal, sandbox_mode="danger-full-access")` 就能让
-#: mkfs / diskpart / format c: / rm -rf / 这类"任何情况下均被拒绝"的命令全过
-#: （2026-09-22 审计）。
-#:
-#: 不给环境变量留后门：AGENTS.md 的安全底线写明「审批策略 never 只能用于无人值守
-#: 且沙箱受限的场景（如 MCP server 默认配置）」，要放开必须改代码、走评审。
+# : `run_agent` 允许宿主请求的最高沙箱等级。:: 为什么必须在**服务端**夹取：`danger-full-access` 是唯一能解锁硬黑名单的取值 ——: `agent/approval.py` 的 `decide()` 在。
 _MAX_SANDBOX_MODE = "workspace-write"
 
 #: 沙箱等级由低到高（与 tools.base.SANDBOX_LEVELS 同序，仅用于夹取比较）
@@ -89,24 +62,7 @@ def _run_agent(
     guardian: bool = True,
     max_step_ops: int = 12,
 ) -> str:
-    """
-    执行一个 Agent 任务。
-
-    Args:
-        goal: 任务目标描述
-        mode: single（单Agent）/ team（团队协作）/ research（深度研究）
-        max_steps: 最大计划步骤数
-        approval_policy: untrusted / on-failure / on-request / never
-                         （MCP 无人值守环境默认 never）
-        sandbox_mode: read-only / workspace-write / danger-full-access
-                       — 会被服务端夹取到 `_MAX_SANDBOX_MODE` 以内，
-                         调用方**无法**自行提权到 danger-full-access
-        guardian: 是否启用 Guardian 安全审校
-        max_step_ops: 单步骤内最大工具操作数
-
-    Returns:
-        执行结果文本
-    """
+    """执行一个 Agent 任务。"""
     from agent import Agent, AgentConfig
     from agent.team import Team
     from tools import ToolManager
@@ -189,12 +145,7 @@ def register_tools(server):
 
 
 def run_server(transport: str = "stdio"):
-    """
-    启动 MCP server。
-
-    Args:
-        transport: stdio（默认）。mcp 2.x 亦支持 sse / streamable-http。
-    """
+    """启动 MCP server。"""
     server = register_tools(_create_server())
     server.run(transport=transport)
 

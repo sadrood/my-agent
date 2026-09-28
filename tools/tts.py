@@ -1,13 +1,5 @@
-"""
-语音合成工具（TTSTool）：把文字变成配音 mp3。
-
-用于漫剧/短视频配音：每镜台词 → 独立音频 → 与画面对齐合成。
-底层本地兜底 TTS（微软在线语音，免费、中文多音色）。
-
-命令式接口（与 video_edit / video_gen 一致）：
-    speak  — 合成一段语音（text 必填）
-    voices — 列出可用中文音色
-"""
+"""语音合成工具（TTSTool）：把文字变成配音 mp3。
+底层本地兜底 TTS（微软在线语音，免费、中文多音色）。"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult

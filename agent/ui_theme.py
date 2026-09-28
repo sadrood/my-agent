@@ -1,13 +1,4 @@
-"""
-Agent UI 主题模块（v2：主流 CLI 风格极简界面）。
-
-设计原则（对齐主流 CLI 的终端审美）：
-- 无重型边框面板：内容即界面（唯一例外：启动欢迎面板，对齐主流 CLI 双栏启动框）
-- 工具调用灰色内联：``⏺ tool(args)``，结果 ``⎿ ...``（主流 CLI 符号体系）
-- 答案直接输出，无"最终结果"大框
-- 单一强调色 + 大量 muted/dim 灰阶
-- 等待模型时显示 "✻ 思考中…" 转圈状态
-"""
+"""Agent UI 主题模块：主流 CLI 风格极简界面。"""
 import sys
 import os
 
@@ -122,13 +113,7 @@ def _rule(c: Console, char: str = "─", width: int = 60):
 
 def print_header(title: str, goal: str = "", use_rich: bool = True,
                  status_items: list = None, status_text: str = ""):
-    """
-    打印 Agent 启动头信息（极简）。
-
-    Args:
-        status_text: 状态说明文本（单行灰字，推荐；无 emoji）
-        status_items: 旧式徽章列表 [(label, value), ...]（兼容保留，不推荐）
-    """
+    """打印 Agent 启动头信息（极简）。"""
     c = get_console(use_rich)
 
     if use_rich:
@@ -293,14 +278,7 @@ def print_edit_diff(old_string: str, new_string: str, use_rich: bool = True,
 
 def print_unified_diff(old_text: str, new_text: str, use_rich: bool = True,
                        max_diff_lines: int = 60, context_lines: int = 3):
-    """
-    Git 风格 unified diff 渲染（对齐同类实现的修改展示）：
-
-        @@ -10,3 +10,3 @@        ← 块头（青色，含行号）
-          不变的上下文行          ← 灰色
-        - 删除的行               ← 红色
-        + 新增的行               ← 绿色
-    """
+    """Git 风格 unified diff 渲染（对齐同类实现的修改展示）："""
     import difflib
 
     c = get_console(use_rich)
@@ -363,10 +341,7 @@ def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
         if use_rich:
             from rich.text import Text
             style = "muted" if success else "error"
-            # 用 Text 而不是 f-string 拼 markup：工具输出/文件内容里的 `[doc](url)`
-            # 会被 rich 当成标签**静默吞掉文本**，`[/muted]` 这种还会直接抛
-            # MarkupError（异常被 executor 的 event_sink try/except 吞掉，用户只看到
-            # "这次结果没显示"）（2026-09-22 审计）。
+            # 用 Text 而不是 f-string 拼 markup：工具输出/文件内容里的 `[doc](url)`会被 rich 当成标签**静默吞掉文本**。
             c.print(Text(f"{prefix}{line}", style=style))
         else:
             c.print(f"{prefix}{line}")
@@ -394,13 +369,7 @@ def print_final_result(result: str, use_rich: bool = True):
 # ============================================================
 
 class StreamingMarkdown:
-    """
-    流式 Markdown 渲染器：把逐 token 到达的文本实时渲染到终端。
-
-    支持的内联语法（v1）：
-    - **加粗**（跨增量边界也能正确配对）
-    - 其余内容原样输出（代码块/标题等保持原文本）
-    """
+    """流式 Markdown 渲染器：把逐 token 到达的文本实时渲染到终端。"""
 
     def __init__(self, use_rich: bool = True):
         self.use_rich = use_rich
@@ -465,11 +434,7 @@ class StreamingMarkdown:
 
 def print_welcome(use_rich: bool = True, info: dict = None):
     """打印欢迎界面。
-
-    info 为 None 时保持极简欢迎（旧调用 / 窄终端回退）；
-    提供 info（model/session_id/api_key）时渲染单面板启动框：
-    状态行 + 快速开始（多行粘贴/对话管理/常用命令）+ 模型与 key。
-    """
+    info 为 None 时保持极简欢迎（旧调用 / 窄终端回退）；"""
     c = get_console(use_rich)
     if not use_rich or not info:
         # 极简版（兼容旧调用；非 rich 模式不渲染面板）

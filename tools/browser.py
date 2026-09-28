@@ -1,8 +1,4 @@
-"""
-浏览器工具模块（增强版）。
-基于 Playwright 封装浏览器操作，让 Agent 像人一样操作网页。
-新增：多Tab、键盘操作、弹窗处理、视觉驱动点击、JS执行。
-"""
+"""浏览器工具模块（增强版）。"""
 import os
 import base64
 import time
@@ -14,9 +10,7 @@ from tools.computer_use import ComputerUseMixin
 from tools.intent_detector import get_intent_detector
 from config import BROWSER_CONFIG, PROJECT_ROOT, resolve_under_root
 
-# 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage
-# 在 Default/ 下），但会随每次浏览器启动各长几 MB。实测该目录涨到 250MB：
-# DeferredBrowserMetrics 144MB + BrowserMetrics 48MB + Default/Cache 30MB。
+# 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage 在 Default/ 下），但会随每次浏览器启动各长几 MB。
 
 
 def _resolve_under_root(path: str) -> str:
@@ -39,13 +33,7 @@ _PROFILE_JUNK_DIRS = (
 
 def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
                        max_total_mb: float = None) -> int:
-    """清理持久 profile 里的遥测/缓存垃圾，返回释放的字节数。
-
-    sessions/rollouts 都有轮转上限，唯独 web-profile 从无清理策略（grep
-    profile_dir 只有创建点）——每个用过浏览器的任务都会留下约 3×4MB 的
-    DeferredBrowserMetrics。这里在每次启动前按年龄+总量清一遍，**只动上述
-    遥测目录**，绝不碰 Default/Cookies、Login Data、Local Storage 等登录态。
-    """
+    """清理持久 profile 里的遥测/缓存垃圾，返回释放的字节数。"""
     import shutil
     from datetime import datetime
 
@@ -73,8 +61,7 @@ def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
         target = os.path.join(root, rel.replace("/", os.sep))
         if not os.path.isdir(target):
             continue
-        # Crashpad/reports 与 *Metrics 目录都是"一堆历史文件"，按年龄删；
-        # 缓存目录整体删（浏览器会重建）。
+        # Crashpad/reports 与 *Metrics 目录都是"一堆历史文件"，按年龄删；缓存目录整体删（浏览器会重建）。
         if rel in ("Default/Code Cache", "Default/GPUCache",
                    "Default/DawnWebGPUCache", "Default/DawnGraphiteCache"):
             freed += _dir_size(target)
@@ -105,14 +92,7 @@ def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
 
 
 class BrowserTool(BaseTool, ComputerUseMixin):
-    """
-    浏览器操作工具（基于 Playwright）。
-
-    设计原则：
-    - Agent 只知道命令字符串，无需了解 Playwright 存在
-    - 底层 Playwright 被完全封装
-    - 支持视觉驱动操作：截图 → 分析 → 定位 → 操作
-    """
+    """浏览器操作工具（基于 Playwright）。"""
 
     def __init__(
         self,
@@ -130,9 +110,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._screenshot_dir = _resolve_under_root(screenshot_dir)
         self._viewport_width = viewport_width or BROWSER_CONFIG.get("viewport_width", 1280)
         self._viewport_height = viewport_height or BROWSER_CONFIG.get("viewport_height", 720)
-        # 内置浏览器：持久 profile 模式（登录态跨次启动保留，网页型分身依赖）。
-        # persistent 可显式传 False 创建独立临时 profile 实例（如侧栏辅助浏览器），
-        # 避免与主任务浏览器争用同一 user-data-dir 锁。
+        # 内置浏览器：持久 profile 模式（登录态跨次启动保留，网页型分身依赖）。 persistent 可显式传 False 创建独立临时 profile 实例（如侧栏辅助浏览器），避免与主任务浏览器争用同一 user-data-dir 锁。
         if persistent is not None:
             self._persistent = bool(persistent)
         else:
@@ -146,11 +124,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._pages: list = []        # 所有 page 列表
         self._current_page_idx = 0     # 当前活跃 page 索引
 
-        # 专属 worker 线程：Playwright sync API 把 asyncio 事件循环绑定在
-        # 启动线程上，而 Executor 每次调用工具都在新的 daemon 线程执行；
-        # 跨线程复用 playwright 对象会抛 "cannot switch to a different
-        # thread"。用长生命周期 worker 串行执行所有命令，保证 playwright
-        # 对象始终在同一线程创建与使用。
+        # 专属 worker 线程：Playwright sync API 把 asyncio 事件循环绑定在启动线程上，而 Executor 每次调用工具都在新的 daemon 线程执行。
         self._worker: Optional[threading.Thread] = None
         self._worker_queue = None       # queue.Queue（惰性创建）
         self._worker_broken = False     # 上次执行疑似卡死被废弃，下次命令重建
@@ -218,7 +192,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         )
 
     # ================================================================
-    # v2：审批元数据 + JSON Schema 接口
+    # 审批元数据 + JSON Schema 接口
     # ================================================================
 
     risk_level: str = "medium"
@@ -351,8 +325,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             result = ToolResult(
                 success=False, output="", error=f"浏览器操作失败: {str(e)}"
             )
-        # 会话失效（浏览器被杀/CDP 断开/worker 线程 loop 不可复用）→ 自动重建重试一次，
-        # 不再要求用户重启整个项目。
+        # 会话失效（浏览器被杀/CDP 断开/worker 线程 loop 不可复用）→ 自动重建重试一次，不再要求用户重启整个项目。
         if not getattr(result, "success", False) and self._looks_dead(
             f"{getattr(result, 'error', '') or ''} {getattr(result, 'output', '') or ''}"
         ):
@@ -367,13 +340,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _start_worker(self) -> None:
         """创建/重建专属 worker 线程。
-
         Playwright sync API 底层把 asyncio 事件循环绑定到启动它的线程；
-        Executor 每次调用工具都在新的 daemon 线程里执行，跨线程复用
-        playwright 对象会抛 "cannot switch to a different thread (which
-        happens to have exited)"。这里用长生命周期 worker 串行执行所有
-        浏览器命令，playwright 对象始终在同一线程创建和使用。
-        """
+        浏览器命令，playwright 对象始终在同一线程创建和使用。"""
         import queue
 
         self._worker_queue = queue.Queue()
@@ -411,18 +379,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return any(sig.lower() in t.lower() for sig in cls._DEAD_SIGNALS)
 
     def _stop_playwright(self) -> None:
-        """停掉 Playwright 的**驱动进程**（node.exe）。
-
-        只有 `_close_impl` 会调 `stop()`，而 `_invalidate()` / `reset()` /
-        `_launch()` 覆盖旧对象时都只把引用置 None —— playwright sync 的
-        Playwright/Connection **没有 `__del__`**，`stop()` 才是唯一杀驱动进程的
-        入口。于是浏览器被外部杀掉、或工具超时触发一次自愈，就漂一个几十 MB 的
-        node.exe；而 `_force_cleanup_residual` 只按 `--user-data-dir=` 匹配
-        chrome.exe，收不到它（2026-09-22 审计）。
-
-        跨线程调用可能抛（sync API 绑线程），所以失败只吞掉不往上冒 ——
-        行为退化成“只丢引用”，不会比修复前更糟。
-        """
+        """停掉 Playwright 的**驱动进程**（node.exe）。"""
         pw = self._playwright
         self._playwright = None
         if pw is not None:
@@ -443,10 +400,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _recover_and_retry(self, command: str, handler, args: str):
         """会话失效后的自愈：重建 worker（+必要时重开浏览器）并重试一次原命令。
-
-        这是"必须重启项目才能恢复"的根治点：浏览器进程被杀 / CDP 断开 /
-        旧 worker 线程的 asyncio loop 无法复用时，不再把错误直接抛给模型。
-        """
+        旧 worker 线程的 asyncio loop 无法复用时，不再把错误直接抛给模型。"""
         try:
             self._invalidate()
             if command not in ("launch", "close"):
@@ -470,20 +424,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _dispatch(self, fn, *args, wait_timeout: float = None, **kwargs):
         """把浏览器命令投递到 worker 线程执行并等待结果。
-
-        wait_timeout=None（默认）：无限等待——外层
-        Executor._run_tool_with_timeout 提供硬超时兜底，超时后调用
-        reset() 把 worker 标记废弃、下次命令重建。
-        wait_timeout 指定（如 __del__ 析构场景）：短等待，超时放弃该
-        worker（daemon 线程随进程退出），由 _force_cleanup_residual 兜底。
-        """
-        # worker 缺失/已死/上次卡死被废弃 → 重建。
-        # 附加情况：worker 线程虽然还活着，但绑定的浏览器/上下文引用
-        # 已经死掉（浏览器进程被杀、CDP 会话关闭等）。旧 worker 线程
-        # 内 Playwright 的 asyncio loop 已被创建且无法复用——继续把
-        # launch 投递给它会在『已有 loop 的线程』再次 start()，抛
-        # "Sync API inside asyncio loop"。此时同样必须重建全新 worker
-        # （新线程无 loop 绑定）。
+        worker（daemon 线程随进程退出），由 _force_cleanup_residual 兜底。"""
+        # worker 缺失/已死/上次卡死被废弃 → 重建。附加情况：worker 线程虽然还活着，但绑定的浏览器/上下文引用已经死掉（浏览器进程被杀、CDP 会话关闭等）。
         needs_rebuild = (
             self._worker is None
             or not self._worker.is_alive()
@@ -502,8 +444,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             if not browser_alive and not context_alive:
                 needs_rebuild = True
         if needs_rebuild:
-            # 防御性丢弃旧 playwright 引用（若未被 reset 清空），
-            # 避免新 worker 复用绑定在已死线程上的事件循环。
+            # 防御性丢弃旧 playwright 引用（若未被 reset 清空），避免新 worker 复用绑定在已死线程上的事件循环。
             if self._playwright is not None or self._context is not None:
                 self._stop_playwright()
                 self._browser = None
@@ -552,11 +493,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         if self._persistent and self._context is not None and self._is_context_alive() and self._page_alive():
             return ToolResult(success=True, output="浏览器已在运行中（持久 profile）。")
 
-        # context 仍活着但页面已死/缺失（如外部关闭了标签页、CDP 会话
-        # 中断后页面失效）：只重建页面列表，不要重启 Playwright——
-        # 旧 worker 线程的 asyncio loop 已被绑定，再次 start() 会抛
-        # "Sync API inside the asyncio loop"。重建页面既绕过该坑，
-        # 又能完整保留持久 profile 的登录态。
+        # context 仍活着但页面已死/缺失（如外部关闭了标签页、CDP 会话中断后页面失效）：只重建页面列表，不要重启 Playwright——旧 worker 线程的 asyncio loop 已被绑定。
         if self._persistent and self._context is not None and self._is_context_alive():
             try:
                 existing = [p for p in self._context.pages if not p.is_closed()]
@@ -577,9 +514,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
             self._playwright = sync_playwright().start()
             if self._persistent:
-                # 持久模式：用户数据目录落盘，登录态（cookie/localStorage）跨次
-                # 启动保留——网页型分身先 headed 手动登录一次，之后 agent 复用会话。
-                # 返回值直接是 BrowserContext（没有独立 Browser 对象）。
+                # 持久模式：用户数据目录落盘，登录态（cookie/localStorage）跨次启动保留——网页型分身先 headed 手动登录一次，之后 agent 复用会话。返回值直接是 BrowserContext（没有独立 Browser 对象）。
                 os.makedirs(self._profile_dir, exist_ok=True)
                 _prune_profile_dir(self._profile_dir)
                 self._browser = None
@@ -591,9 +526,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
                     ),
-                    # 实测：crashpad 管道初始化失败（TransactNamedPipe: 管道已结束）
-                    # 会让 chromium 启动即退出（exitCode 21），加此参数禁用崩溃上报
-                    # 模块后恢复。crashpad 仅用于崩溃收集，禁掉不影响功能。
+                    # crashpad 管道初始化失败（TransactNamedPipe: 管道已结束）会让 chromium 启动即退出（exitCode 21），加此参数禁用崩溃上报模块后恢复。crashpad 仅用于崩溃收集，禁掉不影响功能。
                     args=["--disable-crashpad"],
                 )
             else:
@@ -605,11 +538,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
                     ),
                 )
-            # launch_persistent_context 会自带一个初始 about:blank 页面，
-            # 直接复用而不是再 new_page()——否则浏览器里会出现两个空白
-            # 标签页，且第一个成为未被 self._pages 管理的『孤儿 tab』
-            # （用户看到的现象：两个 blank，后续操作全发生在第二个上）。
-            # 非持久模式 context 无自带页面，自然走 new_page，逻辑统一。
+            # launch_persistent_context 会自带一个初始 about:blank 页面，直接复用而不是再 new_page()——否则浏览器里会出现两个空白标签页。
             existing = list(self._context.pages)
             if existing:
                 self._pages = existing
@@ -633,10 +562,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _close(self, _args: str = "", _wait: float = None) -> ToolResult:
         """优雅关闭浏览器（实际关闭逻辑在 worker 线程执行，避免跨线程）。
-
-        _wait：仅 __del__ 析构场景使用（短等待，超时交给兜底清理）；
-        正常调用无限等待，外层 Executor 有硬超时兜底。
-        """
+        正常调用无限等待，外层 Executor 有硬超时兜底。"""
         if threading.current_thread() is self._worker:
             # 已在 worker 线程内（理论上不会发生，防御处理）
             return self._close_impl()
@@ -660,8 +586,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             if self._playwright:
                 self._playwright.stop()
         except Exception:
-            # CDP 连接异常（如管理线程已退出）时优雅关闭会抛错，
-            # 此时浏览器进程可能仍驻留并占着 profile_dir 锁——兜底清理。
+            # CDP 连接异常（如管理线程已退出）时优雅关闭会抛错，此时浏览器进程可能仍驻留并占着 profile_dir 锁——兜底清理。
             graceful = False
         finally:
             self._context = None
@@ -676,10 +601,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         return ToolResult(success=True, output=f"浏览器已关闭。{note}")
 
     def _force_cleanup_residual(self) -> int:
-        """兜底：清理仍占用 profile_dir 的残留浏览器进程，返回清掉的个数。
-
-        只认命令行里带本工具 `--user-data-dir` 的进程 —— 不碰用户自己的浏览器。
-        """
+        """兜底：清理仍占用 profile_dir 的残留浏览器进程，返回清掉的个数。"""
         killed = 0
         for pid in self._residual_pids():
             if self._kill_residual(pid):
@@ -709,9 +631,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _residual_pids_posix(self) -> list:
         """POSIX 侧：`ps` 取完整命令行，realpath **全等**比对 profile 目录。
-
-        全等而不是子串：避免 "profile" 前缀误伤 "profile2" 这类无关实例。
-        """
+        全等而不是子串：避免 "profile" 前缀误伤 "profile2" 这类无关实例。"""
         import subprocess
         try:
             out = subprocess.run(["ps", "-A", "-o", "pid=,args="],
@@ -797,15 +717,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _accessibility_snapshot(self, max_depth: int = 12,
                                 max_nodes: int = 400) -> ToolResult:
-        """
-        返回当前页面的结构快照（对齐 Playwright MCP 的 browser_snapshot）：
-        按钮/输入框/链接/标题等元素的角色与文本，带层级缩进与状态标注
-        （required/disabled/checked/level 等）。模型据此了解页面布局并
+        """返回当前页面的结构快照（对齐 Playwright MCP 的 browser_snapshot）：
         决定点击/填写目标，避免每次都截图走视觉模型。
-
-        优先用新版 locator.aria_snapshot（Playwright ≥1.49 已取代
-        page.accessibility）；旧版本回退 accessibility.snapshot 字典树。
-        """
+        page.accessibility）；旧版本回退 accessibility.snapshot 字典树。"""
         ensure = self._ensure_page()
         if not ensure.success:
             return ensure
@@ -1142,13 +1056,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 return ToolResult(success=True, output=f"已点击元素: {selector}")
             except Exception:
                 pass
-            # 2. 文本匹配
-            # ⚠️ 不能用 `element = get_by_text(...).first; if element:` —— Locator
-            # **没有** __bool__/__len__（已在 playwright 1.62 实测：bool(locator) 恒为
-            # True），于是那个 if 永远成立，未匹配到时直接在 click 上白等 10 秒、
-            # 抛到外层 except 返回"点击失败"，**第 3 步的 role 匹配永远执行不到**。
-            # 图标按钮（`<button aria-label="Close"><svg/></button>`）是最常见的
-            # 无文字形态，本应命中 role 分支（2026-09-22 审计实测）。
+            # 2. 文本匹配⚠️ 不能用 `element = get_by_text(...).first。
             try:
                 self._page.get_by_text(selector, exact=False).first.click(timeout=3000)
                 return ToolResult(success=True, output=f"已点击文本为 '{selector}' 的元素")
@@ -1169,10 +1077,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return ToolResult(success=False, output="", error=f"点击失败: {str(e)}")
 
     def _vision_click(self, description: str) -> ToolResult:
-        """
-        基于视觉描述的智能点击。
-        流程：截图 → 视觉模型定位坐标 → Playwright 点击坐标
-        """
+        """基于视觉描述的智能点击。"""
         ensure = self._ensure_page()
         if not ensure.success:
             return ensure
@@ -1341,9 +1246,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return ensure
         action = args.strip().lower()
         try:
-            # 弹窗文字：唯一可靠的来源是 dialog 事件回调。旧实现读的是
-            # `window.__dialog_text`——该变量在全仓库只出现在这一行、**从未被赋值**，
-            # 所以 `alert text` 永远返回"无活跃弹窗"。
+            # 弹窗文字：唯一可靠的来源是 dialog 事件回调。旧实现读的是`window.__dialog_text`——该变量在全仓库只出现在这一行、**从未被赋值**，所以 `alert text` 永远返回"无活跃弹窗"。
             captured = {}
 
             def _dialog_handler(dialog):
@@ -1358,10 +1261,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 elif "prompt" in action or "text" not in action:
                     dialog.accept(action.split(" ", 1)[1] if " " in action else "")
 
-            # 关键：只能注册**一次性**监听器。此前每次 alert 调用都 `page.on(...)`
-            # 且永不摘除：监听器越堆越多，而且一旦注册了 dialog 监听器，
-            # Playwright 就不再自动 dismiss → 弹窗挂着，后续操作全部阻塞到超时；
-            # 残留的旧处理器还会在无关的新弹窗上乱点。
+            # 关键：只能注册**一次性**监听器。之前每次 alert 调用都 `page.on(...)`且永不摘除：监听器越堆越多，而且一旦注册了 dialog 监听器， Playwright 就不再自动 dismiss → 弹窗挂着。
             self._page.once("dialog", _dialog_handler)
 
             if action == "text":
@@ -1384,21 +1284,12 @@ class BrowserTool(BaseTool, ComputerUseMixin):
     # ================================================================
 
     def _screenshot(self, full_base64: bool = False) -> ToolResult:
-        """截取当前页面截图。
-
-        `full_base64=True`（`screenshot_base64` / see 工具 / computer-use 循环用的那个
-        变体）**不落盘**：那些调用方只用 base64，而落盘会产生一棵只涨不减的
-        screenshots/ 树（2026-09-22 审计：computer-use 循环里反复 see，每次约
-        200KB–1MB，实测已涨到 12MB 且没有任何清理策略，而 profile 目录反倒有
-        `_prune_profile_dir`）。
-        """
+        """截取当前页面截图。"""
         ensure = self._ensure_page()
         if not ensure.success:
             return ensure
         try:
-            # 毫秒精度：旧实现只到秒，同一秒内两次截图会**互相覆盖**，
-            # 而两次调用都返回 success 和同一个路径（与 tts/video_gen/
-            # image_gen/video_edit 里已经修过的同款问题一致）。
+            # 毫秒精度：旧实现只到秒，同一秒内两次截图会**互相覆盖**，而两次调用都返回 success 和同一个路径（与 tts/video_gen/image_gen/video_edit 里已经修过的同款问题一致）。
             timestamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
             filename = f"screenshot_{timestamp}.png"
             filepath = os.path.join(self._screenshot_dir, filename)
@@ -1465,14 +1356,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 return self._is_context_alive()
             return False
         try:
-            # is_connected 是本地状态检查（CDP 连接是否还活着），不会走网络挂起；
-            # 旧实现访问 self._browser.contexts 在 CDP 半死时同样可能永久阻塞。
-            #
-            # ⚠️ 必须**调用**它：playwright 里 `is_connected` 是**方法**不是 property
-            # （已在 1.62 实测），`bool(self._browser.is_connected)` 等于
-            # `bool(<bound method>)`，**恒为 True** —— 于是"浏览器已死就重建"的分支
-            # 永不触发，`_launch` 对死浏览器也回"已在运行中"，坏状态再不自愈
-            # （2026-09-22 审计）。
+            # is_connected 是本地状态检查（CDP 连接是否还活着），不会走网络挂起；旧实现访问 self._browser.contexts 在 CDP 半死时同样可能永久阻塞。
+
             if hasattr(self._browser, "is_connected"):
                 conn = self._browser.is_connected
                 return bool(conn() if callable(conn) else conn)
@@ -1483,11 +1368,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def _is_context_alive(self) -> bool:
         """持久模式下的 context 探活。
-
-        只访问 `context.pages` **不够**：它是 property，context 关闭后返回 `[]`
-        而不抛异常（已实测），于是这里恒为 True、坏死状态永不自愈。补一层
-        `page.is_closed()` —— 那才是真实的探活信号（关闭后同为 True）。
-        """
+        `page.is_closed()` —— 那才是真实的探活信号（关闭后同为 True）。"""
         try:
             if self._context.pages:
                 return True
@@ -1513,11 +1394,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def reset(self):
         """强制重置浏览器状态（工具超时后由 ToolManager.reset_tool 调用）。
-
-        丢弃 Playwright 引用与页面列表，下次任何命令都会重新 launch。
-        不尝试优雅关闭（CDP 可能已挂死，关闭调用同样会阻塞）；worker
-        线程标记废弃并通知退出（若未卡死），下次命令自动重建。
-        """
+        线程标记废弃并通知退出（若未卡死），下次命令自动重建。"""
         self._worker_broken = True
         wq = self._worker_queue
         self._worker_queue = None
@@ -1532,11 +1409,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages = []
         self._current_page_idx = 0
-        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时
-        # 都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node，
-        # 并且 `--user-data-dir=<profile>` 仍被占用，下一次
-        # launch_persistent_context 直接起不来（`_force_cleanup_residual` 存在的
-        # 意义正是收拾这个局面，_close_impl 里会调它，这里此前漏了）。
+        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node。
         try:
             killed = self._force_cleanup_residual()
             if killed:

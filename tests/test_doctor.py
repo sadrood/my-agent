@@ -225,11 +225,7 @@ class TestEnvSyncCheck:
 
 
 class TestSubsystemModelCheck:
-    """子系统「模型名 × 端点」对账。
-
-    子系统的端点常默认跟随主 LLM，而模型名是厂商专有的：换网关就失效，且运行时不报错
-    （小快模型 503 → 杂活无声退回规则实现；备用链 key 与端点不匹配 → 401）。
-    """
+    """子系统「模型名 × 端点」对账。"""
 
     ITEMS = [
         {"name": "主模型", "base_url": "https://a.example/v1", "api_key": "k1",
@@ -315,12 +311,7 @@ class TestSubsystemModelCheck:
         assert all(i["model"] and i["base_url"] and i["api_key"] for i in items)
 
     def test_disabled_subsystems_are_skipped(self, monkeypatch):
-        """关掉的子系统不进对账清单。
-
-        注意 conftest 的 autouse fixture 全程把 `SMALL_MODEL_CONFIG["enabled"]` 关掉
-        （否则 `build_small_llm` 会建真端点、测试打外部 API），所以这里显式开一次
-        再关一次，验证开关确实被尊重。
-        """
+        """关掉的子系统不进对账清单。"""
         from config import SMALL_MODEL_CONFIG
         monkeypatch.setitem(SMALL_MODEL_CONFIG, "enabled", True)
         assert "小快模型" in {i["name"] for i in doc._subsystem_endpoints()}

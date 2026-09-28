@@ -1,10 +1,5 @@
 """MCP 工具名解析回归：服务器名含下划线时必须仍能路由。
-
-实测故障（2026-09-22 审计）：工具注册名是 `mcp_{server}_{tool}`，而解析用的是
-`tool_full_name[4:].split("_", 1)` —— 第一个下划线就切。服务器名带下划线时
-（如 `my_fs`）`mcp_my_fs_read_file` 会解出服务器名 `"my"`，查不到 → 返回 None，
-调用方只看到"MCP 工具无响应"，与超时/崩溃无法区分。
-"""
+调用方只看到"MCP 工具无响应"，与超时/崩溃无法区分。"""
 import pytest
 
 from tools.mcp_client import MCPClient

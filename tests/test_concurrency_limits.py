@@ -1,14 +1,4 @@
-"""
-批次3 回归：并发上限、同批兄弟调用的 reset 保护、重试预算与可中断睡眠。
-
-背景（2026-09-17 审计）：
-- `_run_tool_calls_parallel` 每个调用起一个线程、**无上限**，模型一轮发 N 个
-  并行安全调用就 N 路并发（各自还能再拉子进程/HTTP）。
-- 并行批里同工具的兄弟调用还在跑时，一个超时就会 `reset_tool`，把
-  worker/队列置空并塞 None 哨兵 → 兄弟调用被跳过、`done.wait()` 永不返回。
-- 轮级重试 6 次 × llm.py 内层 3 次 × 分钟边界 65s ≈ 单回合最坏十几分钟纯等待，
-  且 `time.sleep` 整段睡，期间 stop_event 完全不响应。
-"""
+"""批次3 回归：并发上限、同批兄弟调用的 reset 保护、重试预算与可中断睡眠。"""
 import threading
 import time
 
@@ -38,8 +28,7 @@ class SlowTool(BaseTool):
         self.rendezvous_timeout = rendezvous_timeout
         self.live = 0
         self.peak = 0
-        #: [(线程名, 进入时刻, 进入后在飞数)] —— 断言失败时打出来，便于判断是
-        #: "第 N 个线程来得太晚"还是"根本没被派发"，不用再靠猜
+        # : [(线程名, 进入时刻, 进入后在飞数)] —— 断言失败时打出来，便于判断是: "第 N 个线程来得太晚"还是"根本没被派发"，不用再靠猜
         self.entries = []
         self.lock = threading.Lock()
 
@@ -52,11 +41,7 @@ class SlowTool(BaseTool):
             self.peak = max(self.peak, self.live)
             self.entries.append((threading.current_thread().name, time.time(), self.live))
         try:
-            # "并发真的跑起来了"不能靠 sleep 撞运气：机器有负载时第 N 个线程可能还没起，
-            # 前 N-1 个就已经结束 → peak 少 1（实测在全量测试里抖过两次，独立跑则 8/8 通过）。
-            # 这里让每个调用**等**到凑够 rendezvous 个同时在飞再往下走；上限真的更小的话，
-            # 等待会在 deadline 后超时退出，peak 仍达不到目标值，断言照样能抓出来
-            # （已用"把上限压到 3"负向验证过：peak=3 → 断言失败）。
+            # "并发真的跑起来了"不能靠 sleep 撞运气：机器有负载时第 N 个线程可能还没起，前 N-1 个就已经结束 → peak 少 1（在全量测试里抖过两次，独立跑则 8/8 通过）。
             if self.rendezvous:
                 deadline = time.time() + self.rendezvous_timeout
                 while time.time() < deadline:
@@ -125,14 +110,7 @@ class TestParallelCap:
 
 class TestSiblingResetProtection:
     def test_refcount_counts_only_other_calls(self, monkeypatch):
-        """判定必须是"**其它**调用在飞"，不能把调用者自己算进去。
-
-        实测故障（2026-09-22 审计）：`_execute_one_tool_call` 在派发**之前**就先
-        `_enter_tool_call` 给自己记了账，于是 `_dispatch_tool_call` 里读到的计数至少
-        是 1 —— 判 `> 0` 恒为真，`reset_tool` 在生产路径上一次都不会被调用，而错误
-        文案仍写着"已重置该工具状态"：browser 卡死一次后，坏掉的 playwright 连接
-        原样留到后续每一轮，正是那段注释要根治的"一次卡死、次次卡死"。
-        """
+        """判定必须是"**其它**调用在飞"，不能把调用者自己算进去。"""
         tool = SlowTool()
         ex = make_executor(monkeypatch, tool)
         assert ex._sibling_calls_in_flight("slowtool") is False
@@ -144,11 +122,7 @@ class TestSiblingResetProtection:
         assert ex._sibling_calls_in_flight("slowtool") is False
 
     def test_timeout_resets_tool_on_real_entry(self, monkeypatch):
-        """走**真实入口**时超时必须真的 reset_tool（旧实现恒不执行）。
-
-        这条是上面那条的"行为版"：只看 `_sibling_calls_in_flight` 的返回值容易改对，
-        真正要证明的是生产路径上 `reset_tool` 会被调到。
-        """
+        """走**真实入口**时超时必须真的 reset_tool（旧实现恒不执行）。"""
         from config import TOOL_CONFIG
         from models.llm import ToolCall
 

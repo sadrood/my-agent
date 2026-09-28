@@ -78,12 +78,7 @@ def test_emits_todo_event(tmp_path, monkeypatch):
 
 @pytest.mark.real_paths
 def test_todo_dir_is_anchored_to_project_root():
-    """清单目录必须是绝对路径。
-
-    原实现是硬编码相对路径 `memory/todos`，open() 按 cwd 解析——agent 在
-    output/qici_toonflow_ep1 下跑时清单就落到那儿去了，本机实测同一个会话的
-    待办被拆成三份（memory/todos、output/memory/todos、output/qici_.../memory/todos）。
-    """
+    """清单目录必须是绝对路径。"""
     import os
 
     import tools.todo as mod

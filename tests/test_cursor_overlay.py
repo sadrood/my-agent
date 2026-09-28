@@ -39,11 +39,7 @@ def test_touch_ripple_are_safe_noops_when_disabled(overlay_off):
 
 
 def test_stop_hides_instead_of_destroying():
-    """`stop()` 只隐藏（`_alive_until` 归零），不向线程投递销毁命令。
-
-    回归：旧实现投 "quit" → 线程里 `root.destroy()` → 跨线程拆 Tcl，随后任意时刻
-    整个进程无声消失（实测连 stdout 都不 flush）。
-    """
+    """`stop()` 只隐藏（`_alive_until` 归零），不向线程投递销毁命令。"""
     ov = CursorOverlay(idle_seconds=1)
     ov._alive_until = time.time() + 100
     ov.stop()
@@ -61,7 +57,7 @@ def test_computer_tool_uses_overlay_silently(overlay_off):
 
 
 def test_idle_seconds_come_from_config(overlay_on, monkeypatch):
-    """空闲隐藏秒数必须真的读配置（此前 docstring 承诺的那个变量在代码里不存在）。"""
+    """空闲隐藏秒数必须真的读配置（之前 docstring 承诺的那个变量在代码里不存在）。"""
     monkeypatch.setitem(COMPUTER_USE_CONFIG, "cursor_idle_seconds", 3)
     import tools.cursor_overlay as mod
     monkeypatch.setattr(mod, "_overlay", None)      # 单例已缓存时也要重建

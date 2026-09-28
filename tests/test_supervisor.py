@@ -1,13 +1,5 @@
 # -*- coding: utf-8 -*-
-"""任务监管者（Supervisor）测试。
-
-用户痛点原话："我让他写小说，它每写一章就来问我一次，不应该是写完所有的然后交接
-任务结果吗"。实测根因：单循环唯一的停止条件是"模型给出最终回答"，而唯一能拦住
-提前收尾的完成度闸门依赖 agent 自己的清单——**最近 8 次运行 todo_write 调用数全是 0**，
-闸门从未触发；也没有任何角色对照目标审完成度。
-
-监管者补的就是这个缺口：独立模型审"做完没有"，没做完就发**下一步指令**回循环。
-"""
+"""任务监管者（Supervisor）测试。"""
 import json
 from types import SimpleNamespace
 
@@ -22,13 +14,7 @@ from tools.tool_manager import ToolManager
 
 @pytest.fixture(autouse=True)
 def _supervisor_enabled(monkeypatch):
-    """本文件专门验证监管者本身 —— 覆盖 conftest 的默认关闭。
-
-    `tests/conftest.py` 的 `_isolate_heavy_runtime_switches` 默认把监管者关掉
-    （否则每个建 Agent 的测试都会真打外部 LLM API）。这里按那个 docstring 说的
-    方式显式打开。注意 `Supervisor.__init__` 会**拷贝**一份 config，所以夹具必须
-    在构造之前生效（autouse 夹具在测试体之前跑，满足）。
-    """
+    """本文件专门验证监管者本身 —— 覆盖 conftest 的默认关闭。"""
     from config import SUPERVISOR_CONFIG
     monkeypatch.setitem(SUPERVISOR_CONFIG, "enabled", True)
 
@@ -170,11 +156,7 @@ def _tool_call(i):
 
 
 class TestExecutorIntegration:
-    """核心场景：**只做了一部分就收尾 → 监管者把下一步指令推回来，任务继续做完**。
-
-    注意每次"收尾"前都先做两轮工具调用：监管者默认 min_turns=2（一问一答不值得
-    惊动它），测试要像真任务那样先干活再收尾。
-    """
+    """核心场景：**只做了一部分就收尾 → 监管者把下一步指令推回来，任务继续做完**。"""
 
     def _args(self):
         # 目标要够长（监管者对 <12 字的闲聊问答不审）

@@ -1,8 +1,5 @@
-"""
-agent/input_reader.py：多行粘贴读取 / 续行合并的单元测试。
-
-不依赖真实终端：prompt 用脚本化 callable，排干用注入的 fake stdin/drain。
-"""
+"""agent/input_reader.py：多行粘贴读取 / 续行合并的单元测试。
+不依赖真实终端：prompt 用脚本化 callable，排干用注入的 fake stdin/drain。"""
 import pytest
 
 from agent import input_reader

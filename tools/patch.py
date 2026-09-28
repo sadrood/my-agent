@@ -1,17 +1,4 @@
-"""
-精确编辑工具（EditTool，借鉴同类实现的 apply_patch / edit 工具）。
-
-动机：Agent 自我修改代码时，整文件覆盖写（file write）有两大问题：
-1. 大文件（如 agent.py 1.5 万+ token）超过单轮输出上限，根本写不出来；
-2. 重写整个文件极易引入无关改动，diff 不可控。
-
-EditTool 只发"改哪里"的增量：
-    edit(file_path, old_string, new_string, replace_all=False)
-- old_string 必须在文件中精确出现（默认要求恰好 1 次，多匹配报错并给出次数）
-- replace_all=True 时替换全部匹配
-- 换行差异自动兼容（CRLF/LF）
-- 修改前自动生成 .bak 备份（可选，默认开）
-"""
+"""精确编辑工具（EditTool，借鉴同类实现的 apply_patch / edit 工具）。"""
 import os
 import re
 from typing import Any, Dict
@@ -21,12 +8,7 @@ from tools.base import BaseTool, ToolResult
 
 def _kill_process_tree(proc) -> None:
     """连**子孙进程**一起杀。
-
-    `shell=True` 时 `proc` 是 shell 本身，直接 kill 只杀掉 shell，真正的测试进程
-    （孙进程）会活着并继续持有继承来的管道写端 —— 于是 `subprocess.run` 的
-    TimeoutExpired 分支里那句 `communicate()` 会一直等它，timeout 形同虚设
-    （2026-09-22 审计实测：`timeout=1` 的命令拖了 5.08s 才返回）。
-    """
+    （`timeout=1` 的命令拖了 5.08s 才返回）。"""
     import subprocess
     try:
         if os.name == "nt":
@@ -49,8 +31,7 @@ def _new_process_group_kwargs() -> dict:
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
 
-# metadata.old_text 截断上限：unified diff 渲染用的旧内容快照，
-# 超大文件截断（old_text_truncated=True），避免撑爆事件负载
+# metadata.old_text 截断上限：unified diff 渲染用的旧内容快照，超大文件截断（old_text_truncated=True），避免撑爆事件负载
 _OLD_TEXT_META_MAX = 100 * 1024
 
 
@@ -152,10 +133,7 @@ class EditTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
 
-        # 空 old_string 特例：Python 的 `str.count("")` 返回 len+1（每个字符间隙都算
-        # 一次匹配），于是 `replace_all=true` 会把文件打成 `XaXbXcX`，返回值却还是
-        # `success=True 已修改…替换 9 处`（2026-09-22 审计实测）。
-        # 唯一合理的空串用法是"往空文件里写内容"（count("")==1），保留。
+        # 空 old_string 特例：Python 的 `str.count("")` 返回 len+1（每个字符间隙都算一次匹配），于是 `replace_all=true` 会把文件打成 `XaXbXcX`
         if not old_string and (content or replace_all):
             return ToolResult(
                 success=False, output="",
@@ -164,13 +142,7 @@ class EditTool(BaseTool):
                        "要整文件重写请用 file write；要插入内容请给出插入点的原文。"),
             )
 
-        # 换行归一化：统一按 LF 匹配（兼容模型传来的 CRLF 旧文本）
-        # 原文件的换行风格：读的时候 universal newlines 已经把它统一成 LF，
-        # 写回与备份时都必须还原 —— 否则一次「只改一行」的编辑会把整个文件的行尾
-        # 从头翻掉（2026-09-22 审计：Windows 仓库里表现为整文件 diff，还会破坏
-        # agent/snapshot.py 的逐操作提交）。
-        # 必须看**原始字节**：上面那次读用的是 universal newlines，content 里的
-        # CRLF 已经变成 LF 了 —— 在 content 里找换行符永远是 False。
+        # 换行归一化：统一按 LF 匹配（兼容模型传来的 CRLF 旧文本）原文件的换行风格：读的时候 universal newlines 已经把它统一成 LF，写回与备份时都必须还原 —— 否则一次「只改一行」的编辑会把整个文件的行尾从头翻掉。
         try:
             with open(file_path, "rb") as _fb:
                 _had_crlf = b"\r\n" in _fb.read()
@@ -222,8 +194,7 @@ class EditTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"写入失败: {e}")
 
-        # 验证式应用（preflight）：EDIT_PREFLIGHT=true 且目标是 .py 代码时
-        # 跑测试命令，失败自动回滚（.bak 恢复）并把测试尾部回喂模型。
+        # 验证式应用（preflight）：EDIT_PREFLIGHT=true 且目标是 .py 代码时跑测试命令，失败自动回滚（.bak 恢复）并把测试尾部回喂模型。
         preflight_note = ""
         verdict = self._run_preflight(file_path, backup_path)
         if verdict is not None:
@@ -231,10 +202,7 @@ class EditTool(BaseTool):
                 return verdict
             preflight_note = " · " + verdict.output
 
-        # .bak 生命周期：备份只在回滚时有用，修改成功（preflight 通过或未启用）
-        # 即删除，避免成功路径堆积 .bak 垃圾；失败路径保留供排查/恢复。
-        # 旧内容快照改由 metadata.old_text 携带（截断保护），上层 unified diff
-        # 渲染不再依赖 .bak 文件。
+        # .bak 生命周期：备份只在回滚时有用，修改成功（preflight 通过或未启用）即删除，避免成功路径堆积 .bak 垃圾；失败路径保留供排查/恢复。
         old_text_meta = content[:_OLD_TEXT_META_MAX]
         if backup_path:
             try:
@@ -283,25 +251,7 @@ class EditTool(BaseTool):
             d = parent
 
     def _related_test_command(self, file_path: str, test_cmd: str) -> str:
-        """按被改文件推断**相关**测试目标，避免每次 edit 都跑全套测试。
-
-        背景：全套测试（600+ 个）耗时可达 3 分钟以上，超过 preflight 与
-        工具级超时，导致 edit 被误判失败（文件已改却报错）。改为只跑与
-        被改模块相关的测试文件，通常几秒到几十秒完成。
-
-        选择顺序（命中即用）：
-        1. tests/test_<模块名>.py      精确同名   如 agent/memory.py → test_memory.py
-        2. tests/test_<模块名>_*.py    同名前缀   如 models/llm.py    → test_llm_retry.py
-        3. tests/test_<所属目录>.py    同目录     如 tools/browser.py → test_tools.py
-        4. tests/test_<所属目录>_*.py  同目录前缀
-        5. tests/*_<模块名>.py         词级包含（最后手段）
-        6. 无匹配 → 返回原命令（保守：跑全套）
-
-        注：优先"同目录测试文件"而非宽泛子串匹配——后者易错配到无关模块
-        （如 tools/browser.py 曾被匹配到 dashboard 的 test_embedded_browser.py）。
-
-        配置 EDIT_PREFLIGHT_SCOPE=full 可强制始终跑全套。
-        """
+        """按被改文件推断**相关**测试目标，避免每次 edit 都跑全套测试。"""
         from config import TOOL_CONFIG
         if str(TOOL_CONFIG.get("edit_preflight_scope", "related")).lower() == "full":
             return test_cmd
@@ -345,13 +295,7 @@ class EditTool(BaseTool):
         return f"{base} {targets} -q" if base else f"pytest {targets} -q"
 
     def _run_preflight(self, file_path: str, backup_path: str):
-        """edit 成功后验证：EDIT_PREFLIGHT=true 且目标为 .py 代码时跑测试命令。
-
-        Returns:
-            None                      —— 跳过（未开启 / 非 .py / 无测试命令 / 会递归的 pytest 场景）
-            ToolResult(success=True)  —— 测试通过（output 为通过说明）
-            ToolResult(success=False) —— 测试失败，已自动回滚（error 含失败尾部）
-        """
+        """edit 成功后验证：EDIT_PREFLIGHT=true 且目标为 .py 代码时跑测试命令。"""
         from config import TOOL_CONFIG, TEST_CONFIG
         if not TOOL_CONFIG.get("edit_preflight"):
             return None
@@ -360,15 +304,11 @@ class EditTool(BaseTool):
         test_cmd = (TEST_CONFIG.get("command") or "").strip()
         if not test_cmd:
             return None
-        # 递归保护（关键）：pytest 运行期间若 preflight 命令本身也是 pytest，
-        # 会"测试→edit→再跑 pytest→再 edit"无限递归堆积进程。
-        # 判据：在 pytest 内（PYTEST_CURRENT_TEST 由 pytest 注入）且命令含 pytest。
-        # 测试里用 exit 0/1 等假命令替换时不受影响，仍可正常验证本功能。
+        # 递归保护（关键）：pytest 运行期间若 preflight 命令本身也是 pytest，会"测试→edit→再跑 pytest→再 edit"无限递归堆积进程。
         if "PYTEST_CURRENT_TEST" in os.environ and "pytest" in test_cmd.lower():
             return None
 
-        # 智能缩小测试范围：只跑与被改模块相关的测试（全套 600+ 个会超过
-        # preflight/工具超时，导致"文件已改却报失败"）
+        # 智能缩小测试范围：只跑与被改模块相关的测试（全套 600+ 个会超过 preflight/工具超时，导致"文件已改却报失败"）
         scoped_cmd = self._related_test_command(file_path, test_cmd)
         scope_note = ""
         if scoped_cmd != test_cmd:
@@ -381,12 +321,7 @@ class EditTool(BaseTool):
         import subprocess
         import tempfile
         timeout = int(TOOL_CONFIG.get("edit_preflight_timeout", 180))
-        # 输出**落临时文件**而不是走管道。这是超时能生效的关键：管道写端会被后代
-        # 进程继承，只要还有一个孙进程活着，`communicate()` / `run()` 就一直等它 ——
-        # `subprocess.run(timeout=)` 的 TimeoutExpired 分支里那句 communicate 正是
-        # 这么被拖住的（2026-09-22 审计实测：`timeout=1` 的命令拖了 5.09s 才返回，
-        # 而被改模块的测试只要留下一个常驻子进程，edit 就会挂到远超 180s）。
-        # 换成文件后 `proc.wait(timeout=)` 只看直接子进程，超时立刻返回。
+        # 输出**落临时文件**而不是走管道。这是超时能生效的关键：管道写端会被后代进程继承，只要还有一个孙进程活着。
         out_fd, out_path = tempfile.mkstemp(prefix="myagent_preflight_", suffix=".log")
         os.close(out_fd)
         timed_out = False
@@ -404,8 +339,7 @@ class EditTool(BaseTool):
                     proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    # 光返回不够：挂死的测试进程要真被杀掉，否则它会一直占着
-                    # 文件句柄/端口，下一次 preflight 照样受影响。
+                    # 光返回不够：挂死的测试进程要真被杀掉，否则它会一直占着文件句柄/端口，下一次 preflight 照样受影响。
                     _kill_process_tree(proc)
                     try:
                         proc.wait(timeout=10)
@@ -460,24 +394,10 @@ class EditTool(BaseTool):
     def _summarize_test_failure(combined: str, edited_file: str = "",
                                 tail_lines: int = 80) -> str:
         """把 pytest 输出压成"能判断该怪谁"的失败摘要。
-
-        为什么不只回喂尾部 N 行（早先做法，也是 agent 明确反馈过的坑）：
-        全套 pytest 失败时 FAILURES 段很长，固定行数窗口经常**只截到断言片段、
-        丢掉"哪个用例失败"**。实测后果是 agent 拿着 `assert 110 == 100` 全项目
-        搜不到对应测试名，把（并发改动引起的）失败误判成自己改坏了代码。
-
-        这里显式抽出四样东西：
-          1. 失败用例清单——取自 pytest 的 short test summary，不受窗口影响；
-          2. 每个用例的首个断言行——让模型不用猜是哪个断言；
-          3. 归因提示——失败用例与被改文件无关时明说，避免误回滚；
-          4. 截断告知——输出行数超过窗口时给出总行数，避免"没看到"当成"没有"。
-        """
+        搜不到对应测试名，把（并发改动引起的）失败误判成自己改坏了代码。"""
         lines = combined.splitlines()
 
-        # 1) 失败用例（去重保序）。pytest 的 short test summary 形如：
-        #      FAILED tests/test_x.py::test_y - AssertionError: ...
-        #    注意：按绝对路径跑时文件部分会是空的（`FAILED ::test_y`），
-        #    这时不能据此判断"与本次改动无关"（会误报），要从断言处的文件行补。
+        # 1) 失败用例（去重保序）。pytest 的 short test summary 形如： FAILED tests/test_x.py::test_y - AssertionError: ...注意：按绝对路径跑时文件部分会是空的
         failed, seen = [], set()
         for ln in lines:
             m = re.match(r"^(?:FAILED|ERROR)\s+(\S+)", ln.strip())
@@ -485,8 +405,7 @@ class EditTool(BaseTool):
                 seen.add(m.group(1))
                 failed.append(m.group(1))
 
-        # 2) 每个用例的断言行与所在文件（pytest 的 FAILURES 段）
-        #    分隔符随版本不同（下划线/横线/破折号），都认
+        # 2) 每个用例的断言行与所在文件（pytest 的 FAILURES 段）分隔符随版本不同（下划线/横线/破折号），都认
         _bar = r"[_\-\u2500\u2501]{3,}"
         _head = re.compile(r"^%s\s+(\S+)\s+%s$" % (_bar, _bar))
         info, headers, cur = {}, [], None
@@ -533,8 +452,7 @@ class EditTool(BaseTool):
             parts.append("未能从输出解析出失败用例（pytest 输出可能被参数裁剪）；"
                          "请看下方原始尾部自行判断。")
 
-        # 3) 归因：失败用例是否与被改文件相关。只有在**确实知道失败文件**时才下结论，
-        #    否则宁可不提示，也不误导模型去回滚无关改动。
+        # 3) 归因：失败用例是否与被改文件相关。只有在**确实知道失败文件**时才下结论，否则宁可不提示，也不误导模型去回滚无关改动。
         base = os.path.basename(edited_file or "")
         stem = base[:-3] if base.endswith(".py") else base
         if failed and stem:

@@ -1,9 +1,5 @@
-"""
-持久目标（参照上游同类 `goal` 机制）：按会话持久化的完成目标。
-
-每个会话（conversation id）一个目标，存 memory/goals/<session>.json。
-任务失败 / 重启后目标仍在：可 /goal 查看，重发即可续跑（上下文已保留）。
-"""
+"""持久目标（参照上游同类 `goal` 机制）：按会话持久化的完成目标。
+任务失败 / 重启后目标仍在：可 /goal 查看，重发即可续跑（上下文已保留）。"""
 import json
 import os
 
@@ -11,9 +7,8 @@ import re
 
 from config import resolve_under_root
 
-# 锚定项目根（理由同 agent/scheduler.py）：否则 /goal 存的目标会随 cwd 漂移，
-# 换个目录启动就查不到，模块 docstring 承诺的"失败/重启后目标仍在"失效
-# （2026-09-22 审计）。
+# 锚定项目根（理由同 agent/scheduler.py）：否则 /goal 存的目标会随 cwd 漂移，换个目录启动就查不到，模块 docstring 承诺的"失败/重启后目标仍在"失效
+
 _GOAL_DIR = resolve_under_root(os.path.join("memory", "goals"))
 
 

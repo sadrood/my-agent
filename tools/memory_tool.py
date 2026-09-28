@@ -1,16 +1,6 @@
 """记忆库管理工具（memory）：经验库体检 + 经验压缩。
-
-为什么单独一个工具：经验库是"越用越值钱"的资产，但它同时会越用越脏——实测某次
-体检发现 159 条里 117 条是同一类零散记录、37% 是一句话问答。这个工具让 **agent
-自己**也能定期做两件事：
-
-    memory status          经验库体检（条数/类别分布/噪音占比）
-    memory distill         把零散经验按类别总结成高层条目（**原始记录先归档**）
-    memory distill --dry-run  只预览会压成什么，不落盘
-
-安全：蒸馏前先把原始记录整份归档到 `experiences_raw_<时间>.json`，归档失败就
-放弃压缩——压缩绝不能以丢历史为代价。
-"""
+memory status          经验库体检（条数/类别分布/噪音占比）
+memory distill         把零散经验按类别总结成高层条目（**原始记录先归档**）"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult

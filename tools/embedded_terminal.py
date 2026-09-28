@@ -1,13 +1,5 @@
-"""
-嵌入式终端工具（桌面端"内置终端"）。
-
-与 EmbeddedBrowserTool 同思路：Electron 主进程在 8091 起 HTTP 桥
-（POST /terminal），Python Agent 的 terminal 命令经桥在桌面端执行并回显到
-内置终端面板——用户与 Agent 看到同一条命令流（所见即所跑）。
-
-CLI 场景（无桌面桥环境变量 / 探测失败）由 ToolManager 回退本地 TerminalTool，
-本模块只在桌面端生效。
-"""
+"""嵌入式终端工具（桌面端"内置终端"）。
+本模块只在桌面端生效。"""
 import json as _json
 import os
 import urllib.request as _urlreq
@@ -55,9 +47,7 @@ class EmbeddedTerminalTool(TerminalTool):
         # 后台任务管理命令走本地（后台进程本就跑在 Agent 机器上，无需桥接）
         if command.lower().startswith("bg "):
             return super().execute(command)
-        # 持久会话不支持：桥只跑单条命令。当 shell 命令发过去，用户只会看到
-        # "不是内部或外部命令"；而 execute_json 的 session_op 分支会走**本地** PTY，
-        # 命令不进桌面终端面板 —— 与模块承诺的"所见即所跑"相反（2026-09-22 审计）。
+        # 持久会话不支持：桥只跑单条命令。当 shell 命令发过去，用户只会看到"不是内部或外部命令"。
         if command.lower().startswith("session"):
             return ToolResult(
                 success=False, output="",
@@ -73,9 +63,7 @@ class EmbeddedTerminalTool(TerminalTool):
                 error=f"安全限制：命令 '{command[:100]}' 命中硬性黑名单，已拒绝执行。",
             )
 
-        # 沙箱模式：命令会经桌面桥交给 Electron 主进程执行，那条路径套不上
-        # AppContainer。放行等于绕过 SANDBOX_EXECUTION 承诺的 fail-closed
-        # （与 _session_run 同因，2026-09-22 审计）。
+        # 沙箱模式：命令会经桌面桥交给 Electron 主进程执行，那条路径套不上 AppContainer。
         from agent.sandbox import sandbox_enabled
         if sandbox_enabled():
             return ToolResult(

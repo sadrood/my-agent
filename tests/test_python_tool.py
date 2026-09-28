@@ -1,11 +1,6 @@
-"""
-Python 工具测试：受限命名空间必须"够用"（常规语法都能跑）且"够严"（黑名单模块与
+"""Python 工具测试：受限命名空间必须"够用"（常规语法都能跑）且"够严"（黑名单模块与
 eval/exec/globals 不可用）。
-
-背景：早期版本手写了一份几十个内置函数的迷你表，缺 __build_class__ / all / any 等，
-导致 Agent 写的普通代码（定义个类、用 all()）就 NameError——桌面端表现为
-"python 工具一直失败"。
-"""
+"python 工具一直失败"。"""
 import os
 
 from tools.python import PythonTool
@@ -115,7 +110,7 @@ def test_empty_code_rejected():
 
 
 class TestExecutionTimeout:
-    """回归：该工具体此前**没有任何超时**（description 却声称 30 秒），
+    """回归：该工具体之前**没有任何超时**（description 却声称 30 秒），
     模型写下 sleep 轮询/长循环时会一直挂到工具层 300s 硬超时才返回。"""
 
     def test_sleep_times_out_quickly(self, monkeypatch):

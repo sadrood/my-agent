@@ -1,11 +1,4 @@
-"""
-Dashboard FastAPI 服务器。
-
-启动方式:
-    python -m dashboard.server
-    或
-    uvicorn dashboard.server:app --reload --port 8080
-"""
+"""Dashboard FastAPI 服务器。"""
 import os
 import sys
 import json
@@ -94,11 +87,7 @@ def _mode_to_policy(mode: str) -> str:
 
 class ApprovalBroker:
     """交互式审批桥：把工作线程里的审批请求转成 hub 事件推给前端，
-    阻塞等待前端经 WebSocket（approval_response）或 /api/approve 返回决定。
-
-    用于 dashboard / desktop 等无 TTY 场景——ApprovalPolicy 内置的
-    input() 交互在服务器线程里会 EOF 直接拒绝，导致 ask 模式形同虚设。
-    """
+    input() 交互在服务器线程里会 EOF 直接拒绝，导致 ask 模式形同虚设。"""
 
     def __init__(self, timeout: float = 300.0):
         self.timeout = timeout
@@ -182,11 +171,7 @@ approval_broker = ApprovalBroker()
 
 
 class RunControl:
-    """按会话的运行停止控制：前端按「停止」→ 置位对应会话的 stop_event，
-    Agent/Executor 在下一个检查点优雅退出，TerminalTool 会强杀正在跑的子进程。
-
-    多标签 Agent：按 session_id 隔离，每个会话可独立运行、独立停止（互不干扰）。
-    """
+    """按会话的运行停止控制：前端按「停止」→ 置位对应会话的 stop_event，"""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -195,12 +180,7 @@ class RunControl:
         self._seq = 0
 
     def begin(self, session_id: str = "") -> threading.Event:
-        """任务开始时为指定会话注册一个 stop_event。
-
-        同一会话重复 begin 时，把**上一个** event 也置位：旧的 worker 还在跑，而
-        `stop()` 之后只拿得到新的那个 —— 不置位等于它永远停不下来，而
-        `running_count()` 还会误报（2026-09-22 审计）。
-        """
+        """任务开始时为指定会话注册一个 stop_event。"""
         ev = threading.Event()
         key = session_id or ""
         with self._lock:
@@ -218,9 +198,7 @@ class RunControl:
             if session_id:
                 ev = self._events.get(session_id)
             else:
-                # 不能靠 dict 的插入顺序：对已存在的 key 重新赋值**不改变它的位置**，
-                # 于是 `next(reversed(...))` 取到的是「最早开始」而不是「最近开始」，
-                # 点停止会停错会话（2026-09-22 审计）。用显式序号。
+                # 不能靠 dict 的插入顺序：对已存在的 key 重新赋值**不改变它的位置**，于是 `next(reversed(...))` 取到的是「最早开始」而不是「最近开始」，点停止会停错会话。用显式序号。
                 key = max(self._started, key=self._started.get, default=None)
                 ev = self._events.get(key) if key is not None else None
         if ev is None or ev.is_set():
@@ -341,20 +319,12 @@ if HAS_FASTAPI:
 
     @app.middleware("http")
     async def _block_dns_rebinding(request, call_next):
-        """Host 头白名单：挡 DNS rebinding（把恶意域名解析到 127.0.0.1）。
-
-        浏览器发起的跨站请求会带上攻击者的 Host，这里直接拒掉；
-        本机/桌面端用的都是 127.0.0.1 / localhost，不受影响。
-        """
+        """Host 头白名单：挡 DNS rebinding（把恶意域名解析到 127.0.0.1）。"""
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
         allowed = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
         allowed |= {h.strip().lower()
                     for h in os.getenv("DASHBOARD_ALLOWED_HOSTS", "").split(",") if h.strip()}
-        # 本机自己的网卡 IP 也要放行：`--host 0.0.0.0` 时 start_server 会打印
-        # 「局域网访问: http://<lan_ip>:<port>」，而那个地址此前必然 403 —— 打印出来的
-        # 用法根本不能用，且提示里完全没提还要另外配 DASHBOARD_ALLOWED_HOSTS
-        # （2026-09-22 审计）。DNS rebinding 挡的是"攻击者域名解析到 127.0.0.1"，
-        # 放行本机 IP 不影响这层防护，所以只在本机绑非回环地址时才加。
+        # 本机自己的网卡 IP 也要放行：`--host 0.0.0.0` 时 start_server 会打印「局域网访问: http://<lan_ip>:<port>」，而那个地址此前必然 403 —— 打印出来的用法根本不能用。
         if _binds_non_loopback():
             allowed |= _local_host_ips()
         if host not in allowed:
@@ -367,17 +337,7 @@ if HAS_FASTAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
-        # Origin 校验必须在这里自己做：上面两道防线**都只覆盖 http scope** ——
-        # `@app.middleware("http")` 用的 BaseHTTPMiddleware 和 CORSMiddleware 遇到
-        # websocket scope 都是直接透传，starlette 的 WebSocket 也不做 origin 检查。
-        # 漏掉的后果正是上面 CORS 注释要堵的"本地 RCE"：用户浏览器里任意一个页面
-        # `new WebSocket("ws://127.0.0.1:8090/ws")` 就能 ① 收到全部事件流（含审批
-        # 卡片的 id、工具命令原文、截图）；② 回发 approval_response 直接批准本该由
-        # 用户裁决的高危命令；③ 发 stop 停掉正在跑的任务（2026-09-22 审计）。
-        #
-        # 没有 Origin 的一律放行：浏览器发起 WebSocket 时**必然**带 Origin，能省掉它
-        # 的只有本机进程（curl / python / Electron 主进程），那些本来就有本地执行权，
-        # 拦它们没有意义。
+        # Origin 校验必须在这里自己做：上面两道防线**都只覆盖 http scope** —— `@app.middleware("http")` 用的 BaseHTTPMiddleware 和 CORSMiddleware 遇到 webso。
         origin = (websocket.headers.get("origin") or "").strip()
         if origin and origin not in _allowed_origins_set:
             print(f"[dashboard] 拒绝 WebSocket 连接：Origin '{origin}' 不在白名单"
@@ -460,8 +420,7 @@ if HAS_FASTAPI:
     async def get_screenshots():
         return {"count": len(hub._screenshots), "screenshots": hub._screenshots[-30:]}
 
-    # ---- 文件树（只读，绑定工作目录，不暴露系统盘）----
-    # 安全约束：所有路径必须解析到 WORKSPACE_ROOT 之内（realpath 防符号链接逃逸）。
+    # ---- 文件树（只读，绑定工作目录，不暴露系统盘）----安全约束：所有路径必须解析到 WORKSPACE_ROOT 之内（realpath 防符号链接逃逸）。
     WORKSPACE_ROOT = os.path.realpath(os.getcwd())
     _TREE_SKIP_DIRS = {
         ".git", "node_modules", ".venv", "venv", "__pycache__", "dist",
@@ -504,12 +463,7 @@ if HAS_FASTAPI:
         return node
 
     def _read_capped(path: str) -> bytes:
-        """读文件内容，上限 `_FILE_READ_MAX_BYTES + 1` 字节（多读 1 字节好判断截断）。
-
-        模块层函数是为了 `api_file` / `api_diff` 共用，并且能整体交给
-        `asyncio.to_thread` —— 事件循环里不做文件**内容** IO（2026-09-23 审计：
-        200KB 的读在慢盘/网络盘上足以让 `/ws` 推送与 `/api/stop` 排住）。
-        """
+        """读文件内容，上限 `_FILE_READ_MAX_BYTES + 1` 字节（多读 1 字节好判断截断）。"""
         with open(path, "rb") as f:
             return f.read(_FILE_READ_MAX_BYTES + 1)
 
@@ -523,11 +477,7 @@ if HAS_FASTAPI:
 
     @app.get("/api/skills")
     async def api_skills():
-        """可用技能包列表（SKILL.md），供桌面端能力面板展示。
-
-        只读枚举（agent.skills.SkillManager.discover），不做任何执行；
-        scripts 仅作「告知」渲染，执行仍走终端工具 → 审批门原样生效。
-        """
+        """可用技能包列表（SKILL.md），供桌面端能力面板展示。"""
         try:
             from agent.skills import SkillManager
             mgr = SkillManager()
@@ -583,23 +533,18 @@ if HAS_FASTAPI:
 
     @app.get("/api/diff")
     async def api_diff(path: str = ""):
-        """返回指定文件的修改前后对比（unified diff + 行级统计）。
-
-        多次修改展示"会话累计变更"（快照保留最旧版本）。
-        """
+        """返回指定文件的修改前后对比（unified diff + 行级统计）。"""
         abs_path = _safe_resolve(path)
         if abs_path is None:
             return {"ok": False, "error": "路径越界：仅允许访问工作目录内文件"}
         tracker = _get_tracker()
         rec = tracker.get(abs_path)
         if rec is None:
-            # change_tracker 只追踪 edit/file 工具的写入；python/terminal 改的文件
-            # 没有快照 → 回退到 git diff（文件在 git 仓库内才能对比）
+            # change_tracker 只追踪 edit/file 工具的写入；python/terminal 改的文件没有快照 → 回退到 git diff（文件在 git 仓库内才能对比）
             import subprocess as _sub
             try:
                 rel = os.path.relpath(abs_path, WORKSPACE_ROOT)
-                # 挪到线程里：大仓库上 git diff 最长 15s，同步跑会把事件循环连同
-                # /ws 推送一起冻住（2026-09-22 审计）。
+                # 挪到线程里：大仓库上 git diff 最长 15s，同步跑会把事件循环连同/ws 推送一起冻住。
                 proc = await asyncio.to_thread(
                     lambda: _sub.run(
                         ["git", "diff", "--no-color", "--unified=3", "HEAD", "--", rel],
@@ -649,8 +594,7 @@ if HAS_FASTAPI:
                 return {"ok": False, "error": f"读取失败: {e}"}
         if rec.old_content is None and not rec.is_new:
             return {"ok": False, "error": "修改前的文件过大或为二进制，未留存快照"}
-        # 换行归一化（对齐 EditTool 的 CRLF/LF 兼容策略），避免 Windows 上
-        # 快照(LF)与当前内容(CRLF)因行尾差异产生"全文替换"的假 diff
+        # 换行归一化（对齐 EditTool 的 CRLF/LF 兼容策略），避免 Windows 上快照(LF)与当前内容(CRLF)因行尾差异产生"全文替换"的假 diff
         old_lines = (rec.old_content or "").replace("\r\n", "\n").splitlines(keepends=True)
         new_lines = new_content.replace("\r\n", "\n").splitlines(keepends=True)
         diff_text = "".join(_difflib.unified_diff(
@@ -678,20 +622,11 @@ if HAS_FASTAPI:
 
     @app.post("/api/run")
     async def api_run(payload: dict = Body(...)):
-        """提交一个任务目标，后台线程执行；事件经 WebSocket 实时推送。
-
-        payload 支持（均可选，缺省用 .env / 默认值）：
-          goal: str                        任务目标（必填）
-          model / base_url / api_key: str  LLM 配置（覆盖 .env）
-          temperature / top_p / max_tokens: number  模型参数
-          permission_mode: str            auto / ask / block
-          sandbox_mode: str               read-only / workspace-write / danger-full-access
-        """
+        """提交一个任务目标，后台线程执行；事件经 WebSocket 实时推送。"""
         goal = str((payload or {}).get("goal", "")).strip()
         if not goal:
             return {"ok": False, "error": "goal 不能为空"}
-        # 注意：run_start 由 worker 线程里的 Agent/demo 流程统一 emit，
-        # 这里不再重复发送，避免前端收到两条 run_start。
+        # 注意：run_start 由 worker 线程里的 Agent/demo 流程统一 emit，这里不再重复发送，避免前端收到两条 run_start。
         kwargs = {
             "model": (payload or {}).get("model"),
             "base_url": (payload or {}).get("base_url"),
@@ -732,10 +667,7 @@ if HAS_FASTAPI:
     @app.post("/api/side-run")
     async def api_side_run(payload: dict = Body(...)):
         """辅助 Agent：独立完整 Agent（可调工具），会话按主会话隔离（side-<main_id>）。
-
-        与 /api/run 的区别：事件带 panel="side" 由前端路由到辅助面板；
-        完成后把摘要写入主会话记录并 emit side_complete。
-        """
+        与 /api/run 的区别：事件带 panel="side" 由前端路由到辅助面板；"""
         goal = str((payload or {}).get("goal", "")).strip()
         main_session_id = str((payload or {}).get("main_session_id", "")).strip()
         if not goal:
@@ -854,13 +786,10 @@ if HAS_FASTAPI:
         note = str((payload or {}).get("note", "") or "").strip()[:500]
         if rating not in ("up", "down"):
             return {"ok": False, "error": "rating 需要 up/down"}
-        # 路径锚定项目根（cwd 漂移会写到别处）；坏文件**不能**当空列表覆盖 ——
-        # 那是把用户全部历史反馈（唯一副本）静默清掉（2026-09-22 审计）。
+        # 路径锚定项目根（cwd 漂移会写到别处）；坏文件**不能**当空列表覆盖 ——那是把用户全部历史反馈（唯一副本）静默清掉。
         from config import resolve_under_root
         path = resolve_under_root(os.path.join("memory", "feedback.json"))
-        # 读-改-写整套搬进线程。分开挪会把"读到的内容"与"写回的内容"拆成两次线程
-        # 切换，中间态锁不住；同步跑则冻住事件循环（/ws 推送、/api/stop 一起排队）
-        # —— 2026-09-23 审计，与 api_file / api_diff 同一类。
+        # 读-改-写整套搬进线程。分开挪会把"读到的内容"与"写回的内容"拆成两次线程切换，中间态锁不住。
         def _append() -> dict:
             data = []
             if os.path.exists(path):
@@ -921,8 +850,7 @@ if HAS_FASTAPI:
             return b, s
 
         try:
-            # 同步 subprocess 会**卡住整个事件循环**（含 /ws 的事件推送），必须挪到线程里
-            # （2026-09-22 审计：主任务跑着时点一下 git 面板，前端就"停住"了）。
+            # 同步 subprocess 会**卡住整个事件循环**（含 /ws 的事件推送），必须挪到线程里（主任务跑着时点一下 git 面板，前端就"停住"了）。
             branch, status = await asyncio.to_thread(_collect)
         except Exception:
             return {"ok": False, "in_repo": False, "branch": "", "files": []}
@@ -961,11 +889,7 @@ if HAS_FASTAPI:
 
     @app.post("/api/browser")
     async def api_side_browser(payload: dict = Body(...)):
-        """侧栏辅助对话的只读浏览器通道。
-
-        payload: {"command": "goto|text|snapshot|title|url|status|refresh|close", "args": "..."}
-        白名单外的命令（click/type/js 等改动性操作）直接拒绝——侧栏只用来读网页。
-        """
+        """侧栏辅助对话的只读浏览器通道。"""
         command = str((payload or {}).get("command", "")).strip().lower()
         args = str((payload or {}).get("args", "") or "").strip()
         if command not in _SIDE_BROWSER_COMMANDS:
@@ -987,12 +911,7 @@ if HAS_FASTAPI:
 
     @app.post("/api/ask")
     async def api_ask(payload: dict = Body(...)):
-        """辅助对话：一次性 LLM 问答（不带工具、不占任务通道、不发事件）。
-
-        payload.messages: [{"role": "user"|"assistant", "content": str}, ...]
-        payload.browser_context: 可选，前端经 /api/browser 抓取的网页文本，
-        会作为 system 上下文注入（由前端维护历史，后端无状态）。
-        """
+        """辅助对话：一次性 LLM 问答（不带工具、不占任务通道、不发事件）。"""
         import re as _re
         from openai import OpenAI
         from config import LLM_CONFIG
@@ -1029,9 +948,7 @@ if HAS_FASTAPI:
             )
 
         try:
-            # 同步 LLM 调用（可能几秒到几十秒，且这里**没有超时**）会冻住整个事件循环：
-            # 主任务经 hub 推的事件全卡在队列里、/api/stop 与 /api/approve 也一起排队，
-            # 前端表现为"任务卡住"（2026-09-22 审计）。挪到线程。
+            # 同步 LLM 调用（可能几秒到几十秒，且这里**没有超时**）会冻住整个事件循环：主任务经 hub 推的事件全卡在队列里、/api/stop 与 /api/approve 也一起排队，前端表现为"任务卡住"。挪到线程。
             resp = await asyncio.to_thread(_call_llm)
         except Exception as e:
             return {"ok": False, "error": f"辅助对话调用失败: {str(e)[:200]}"}
@@ -1044,10 +961,7 @@ if HAS_FASTAPI:
     @app.post("/api/test-llm")
     async def api_test_llm(payload: Optional[dict] = Body(None)):
         """用给定（或当前）主 LLM 配置做一次最小真实调用验证连通性。
-
-        payload: {model, base_url, api_key} 均可选——提供即用（测试未保存的
-        表单值）；缺省回退 .env。用于设置页「测试连接」按钮诊断。
-        """
+        表单值）；缺省回退 .env。用于设置页「测试连接」按钮诊断。"""
         import time as _t
         from models.llm import LLM
         p = payload or {}
@@ -1100,10 +1014,7 @@ if HAS_FASTAPI:
     @app.post("/api/config/test-vision")
     async def api_config_test_vision(payload: Optional[dict] = Body(None)):
         """用视觉配置做一次真实调用验证连通性。
-
-        payload.vision 可选：提供 model/base_url/api_key 时优先用它们（测试未保存的
-        表单值）；否则用当前生效（含桌面端已下发覆盖）的配置。
-        """
+        表单值）；否则用当前生效（含桌面端已下发覆盖）的配置。"""
         import base64 as _b64
         from io import BytesIO
 
@@ -1141,10 +1052,7 @@ if HAS_FASTAPI:
     @app.post("/api/rollback")
     async def api_rollback(payload: dict = Body(...)):
         """回滚工作区到某个 checkpoint 提交的树状态。
-
-        不重写历史：差异文件恢复/移除后作为新提交落库，旧提交全部保留，
-        之后仍可回滚到更早的检查点。commit 必须是 HEAD 的祖先。
-        """
+        之后仍可回滚到更早的检查点。commit 必须是 HEAD 的祖先。"""
         from agent.snapshot import rollback_to
         commit = str((payload or {}).get("commit", "")).strip()
         if not commit:
@@ -1179,15 +1087,10 @@ if HAS_FASTAPI:
     @app.post("/api/sessions")
     async def api_session_create():
         """创建一个新会话（id 由后端生成 conv-YYYYMMDD-hex），落盘返回元信息。
-
-        桌面端「新对话」走后端生成 id：保证 id 格式统一、重启后能从后端恢复，
-        与 cmd 交互模式的会话命名空间一致。前端离线时可用本地兜底 id。
-        """
+        与 cmd 交互模式的会话命名空间一致。前端离线时可用本地兜底 id。"""
         from agent.session import SessionStore, generate_conversation_id
         conv_id = generate_conversation_id()
-        # 会话文件是**用户对话的唯一副本**，超限清理会静默删掉最旧的那些。
-        # 建新会话恰好会触发 _cleanup，所以这里把"删了什么"推给前端，别让
-        # 用户在不知情的情况下丢对话（2026-09-22 审计）。
+        # 会话文件是**用户对话的唯一副本**，超限清理会静默删掉最旧的那些。建新会话恰好会触发 _cleanup，所以这里把"删了什么"推给前端，别让用户在不知情的情况下丢对话。
         def _on_cleanup(paths):
             hub.emit("sessions_cleaned", {
                 "deleted": [os.path.basename(x) for x in paths],
@@ -1285,14 +1188,7 @@ def _apply_vision_overrides(tool_manager) -> None:
 
 
 def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
-    """后台线程执行一次 Agent 任务（供 /api/run 与 /api/side-run 调用）。
-
-    side_of 非空 = 辅助 Agent：会话命名空间 side-<main_session_id>、事件打
-    panel="side"、完成时把摘要写入主会话记录并 emit side_complete（主 Agent
-    下次运行恢复历史时能看到辅助 Agent 干了什么）。
-
-    kwargs: 前端传入的 LLM 配置 / 模型参数 / 权限模式（均可选）。
-    """
+    """后台线程执行一次 Agent 任务（供 /api/run 与 /api/side-run 调用）。"""
     kwargs = kwargs or {}
     is_side = bool(side_of)
 
@@ -1332,9 +1228,7 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
         from agent.memory import Memory
         from tools import ToolManager
 
-        # 权限模式：运行时实时可切换——policy 用可调用对象，每次工具审批都
-        # 重新读取该会话的当前模式（auto→never / ask→on-request / block→untrusted）；
-        # approver 恒定走审批桥，broker 在询问前也按当前模式裁决（auto 放行不打扰）。
+        # 权限模式：运行时实时可切换——policy 用可调用对象，每次工具审批都重新读取该会话的当前模式（auto→never / ask→on-request / block→untrusted）
         perm_mode = str(kwargs.get("permission_mode") or "").lower() or "ask"
         conv_id_y = str(kwargs.get("session_id") or "default")
         permission_modes.set(conv_id_y, perm_mode)
@@ -1370,8 +1264,7 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
         tool_manager = ToolManager()
         # 桌面端「设置」下发的视觉模型覆盖：应用到 see / computer 工具
         _apply_vision_overrides(tool_manager)
-        # 会话隔离（重要）：Memory 按 chat_id 分目录存储长期记忆/经验/失败模式。
-        # 辅助 Agent 用独立命名空间 side-<main_id>，与主对话互不污染。
+        # 会话隔离（重要）：Memory 按 chat_id 分目录存储长期记忆/经验/失败模式。辅助 Agent 用独立命名空间 side-<main_id>，与主对话互不污染。
         conv_id = str(kwargs.get("session_id") or "").strip()
         if is_side:
             main_id = str(side_of).strip()
@@ -1415,8 +1308,7 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
 
         stop_ev = (side_run_control if is_side else run_control).begin(conv_id)
         try:
-            # 恢复过会话历史 → 打开 keep_session：_run_loop 才会把之前的对话记录
-            # 注入上下文（否则 agent 每次都是裸奔上下文，对"没做完的任务"一无所知）
+            # 恢复过会话历史 → 打开 keep_session：_run_loop 才会把之前的对话记录注入上下文（否则 agent 每次都是裸奔上下文，对"没做完的任务"一无所知）
             result_text = agent.run(goal, keep_session=restored_conv, stop_event=stop_ev)
         finally:
             (side_run_control if is_side else run_control).end(conv_id)
@@ -1426,8 +1318,7 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
             try:
                 from agent.session import SessionStore
                 summary = (result_text or "")[:500]
-                # 用 append_messages：读→追加→写在 session 层**同一把锁**里完成，
-                # 不再由调用方分两步做（中间会被主 Agent 的全量重写切进去）。
+                # 用 append_messages：读→追加→写在 session 层**同一把锁**里完成，不再由调用方分两步做（中间会被主 Agent 的全量重写切进去）。
                 store.append_messages(main_id, [{
                     "role": "system",
                     "content": f"[辅助Agent] 完成子任务「{goal[:60]}」：" + chr(10) + summary,
@@ -1469,12 +1360,7 @@ def _run_scheduled_task(t):
 
 
 def _run_demo_worker(goal: str):
-    """演示模式：不调用真实 Agent/API，模拟一次完整任务的事件流，
-    让前端（聊天流 + 工作台）在无 LLM key 时也能完整演示。
-
-    事件序列与真实 Agent 一致（run_start → plan → step_start →
-    tool_call → tool_result ×N → answer → run_end），前端无需改动。
-    """
+    """演示模式：不调用真实 Agent/API，模拟一次完整任务的事件流，"""
     import time
     sleep = time.sleep
     try:
@@ -1560,8 +1446,7 @@ def start_server(host: str = "127.0.0.1", port: int = 8080):
     if not HAS_FASTAPI:
         print("[Dashboard] FastAPI/uvicorn 未安装，请运行: pip install fastapi uvicorn")
         return
-    # 用 127.0.0.1 而非 localhost：uvicorn 仅监听 IPv4，
-    # 浏览器解析 localhost 可能优先走 IPv6 (::1) 导致"打不开"
+    # 用 127.0.0.1 而非 localhost：uvicorn 仅监听 IPv4，浏览器解析 localhost 可能优先走 IPv6 (::1) 导致"打不开"
     print(f"\n  Dashboard: http://127.0.0.1:{port}")
     if host not in ("127.0.0.1", "localhost"):
         lan_ip = _get_lan_ip()

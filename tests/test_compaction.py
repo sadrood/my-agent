@@ -51,12 +51,7 @@ def test_no_compact_under_threshold():
 
 
 def test_estimate_tokens():
-    """估算改为 CJK 感知（英文≈4 字符/token）。
-
-    旧断言 `"a"*30 == 10` 编码的是"字符数/3"的老公式；该公式把中文低估 3~4 倍
-    （实测「你好世界」→1 vs 实际 4），会让压缩迟迟不触发、最终撞上游窗口 400。
-    现复用 agent/rollout.py 的估算：英文按 4 字符/token、中文按 1 字符/token。
-    """
+    """估算改为 CJK 感知（英文≈4 字符/token）。"""
     ex = _make(FakeLLM())
     assert ex._estimate_tokens([{"role": "user", "content": "a" * 40}]) == 10
     assert ex._estimate_tokens([{"role": "user", "content": "中" * 10}]) == 10
@@ -75,12 +70,7 @@ def test_summarize_failure_is_safe():
 
 class TestSystemPromptSurvivesCompaction:
     """压缩必须保留开头的 system 消息（执行器规则）。
-
-    实测故障（2026-09-22 审计）：`old_part = messages[:-keep]` 把 `messages[0]`
-    （执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）
-    一起压成摘要，压缩后第 0 条变成「## 之前的执行摘要」—— 之后所有 LLM 调用都不再
-    带执行器规则，而 `executor.py` 的单循环路径正是每步都用压缩后的 messages。
-    """
+    （执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）"""
 
     def _rollout(self):
         from agent.rollout import Rollout

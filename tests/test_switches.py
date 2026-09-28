@@ -1,14 +1,4 @@
-"""各"总开关"的生效性回归（此前一批开关是"定义了却没人读"）。
-
-实测故障（2026-09-22 审计）：
-- `IMAGE_GEN_ENABLED` / `VIDEO_GEN_ENABLED` / `TTS_ENABLED` / `VIDEO_EDIT_ENABLED`
-  只在 `models/*.py::is_configured()` 里被读，而那个函数**全仓库没有任何调用点**
-  —— 设成 false 也照样注册、模型照样调上游接口并计费；
-- `MCP_ENABLED` 定义了却无人读，用户在 .env 里关不掉 MCP；
-- `SANDBOX_EXECUTION` 没归一化，写 `OFF` 会因为大小写敏感比较被判成"开着"；
-- `--max-replans` 解析了却没接进 AgentConfig；`rollout_enabled=not args.no_rollout`
-  恒为 bool，把 `.env` 的 `ROLLOUT_ENABLED=false` / `MY_AGENT_MINIMAL=1` 顶掉。
-"""
+"""各"总开关"的生效性回归（之前一批开关是"定义了却没人读"）。"""
 import os
 import subprocess
 import sys
@@ -87,7 +77,7 @@ class TestApprovalModeNormalization:
 
 class TestMcpToggle:
     def test_disabled_skips_connecting(self, monkeypatch):
-        """MCP_ENABLED=false 必须真的不连服务器（此前是个死开关）。"""
+        """MCP_ENABLED=false 必须真的不连服务器（之前是个死开关）。"""
         from agent import Agent
         from config import MCP_CONFIG
 
@@ -132,7 +122,7 @@ class TestBuildConfigWiring:
         return SimpleNamespace(**base)
 
     def test_max_replans_is_wired(self):
-        """`--max-replans` 此前解析了却从未传进 AgentConfig。"""
+        """`--max-replans` 之前解析了却从未传进 AgentConfig。"""
         from main import build_config
         assert build_config(self._args(max_replans=9)).max_replans == 9
 

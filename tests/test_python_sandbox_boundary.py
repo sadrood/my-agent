@@ -1,17 +1,4 @@
-"""
-批次4/5 回归：python 工具"护栏而非沙箱"的边界。
-
-实测故障（2026-09-17 审计）：
-- `os.system('echo ...')` 与 `os.popen(...)` 能**直接执行系统命令**——它们是属性
-  调用而非 import，BLOCKED_IMPORTS 那套钩子完全拦不住；终端工具的黑名单
-  （格式化磁盘、del /s、git push -f…）在这里等于不存在。
-- 子进程输出直接写真实 fd 1，连工具的 stdout 捕获都被绕过。
-- 而模块文档/描述一直声称它"防止绕过 terminal 审批门执行系统命令"。
-
-同时用测试固定住**诚实的边界说明**：Python 层面不是真隔离，
-`().__class__.__base__.__subclasses__()` 仍可达 Popen（已实测），
-真正的隔离靠 OS 级沙箱与审批策略。
-"""
+"""批次4/5 回归：python 工具"护栏而非沙箱"的边界。"""
 import pytest
 
 from tools.python import PythonTool
@@ -56,16 +43,7 @@ class TestOSExecutionBlocked:
 
 
 class TestRealOSBackdoorClosed:
-    """护栏不能挂在实例属性上——`__getattr__` 对已存在的名字根本不触发。
-
-    实测（2026-09-22 审计）：旧的 `_RestrictedOS.__init__` 用
-    `object.__setattr__(self, "_real", real)` 存真实模块，而 `__getattr__` 只在
-    常规查找**失败**时才被调用——`_real` 就在实例 `__dict__` 里，查找成功，
-    于是 `os._real.system('...')` / `vars(os)['_real'].popen(...)` 直接执行了命令，
-    上面那批 `_DENIED` 入口形同虚设（连 stdout 捕获都被绕过）。
-
-    现在真实模块保存在闭包里、代理是 `__slots__ = ()` 的空壳。
-    """
+    """护栏不能挂在实例属性上——`__getattr__` 对已存在的名字根本不触发。"""
 
     @pytest.mark.parametrize("code", [
         "import os\nos._real.system('echo LEAK')",
@@ -98,10 +76,7 @@ class TestRealOSBackdoorClosed:
 
 
 class TestLowLevelOSModulesBlocked:
-    """nt / posix 是 os 的底层实现模块（`os.system` 就是它们的 `system`），
-    `_winapi` 直接给 CreateProcess。漏掉它们等于把 os 那层的封锁整个让开：
-    `import nt; nt.system(...)` 既不经 os 代理，也不经 terminal 的审批门。
-    """
+    """nt / posix 是 os 的底层实现模块（`os.system` 就是它们的 `system`），"""
 
     @pytest.mark.parametrize("mod", ["nt", "posix", "_winapi"])
     def test_blocked(self, tool, mod):

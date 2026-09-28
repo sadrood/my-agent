@@ -1,24 +1,4 @@
-"""
-OS 级沙箱模块（Windows AppContainer，BEST_PRACTICES「下一步优先级」第 3 项）。
-
-隔离原理（Windows 8+ AppContainer）：
-1. 为本 Agent 创建一个 AppContainer 配置档案（CreateAppContainerProfile），
-   得到容器 SID；进程以该 SID 的低特权令牌启动。
-2. 容器内进程默认对用户文件系统 / 注册表 / 网络全部不可访问（default-deny），
-   只能写显式授权的目录 —— 这里用 icacls 给工作区授予
-   ALL APPLICATION PACKAGES (S-1-15-2-1) 的 modify 权限。
-3. 通过 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES 属性启动 cmd.exe，
-   命令及其子进程都运行在容器内。
-
-设计约定：
-- **fail-closed**：容器创建或进程启动失败时返回错误，绝不静默回退到无沙箱执行。
-- 仅前台命令走沙箱（后台命令、bg 子系统保持原路径）。
-- 容器内默认无网络；需要联网的命令请关闭 SANDBOX_EXECUTION 或走审批流。
-- 黑名单 / 审批门 / Guardian 在沙箱之前仍然生效（纵深防御，沙箱是最后一层）。
-
-非 Windows 平台 appcontainer_available() 恒为 False，sandbox_enabled() 开启时
-终端返回明确错误而不是明文执行。
-"""
+"""OS 级沙箱模块（Windows AppContainer，BEST_PRACTICES「下一步优先级」第 3 项）。"""
 import os
 import shutil
 import subprocess
@@ -34,10 +14,7 @@ _STDERR_FILE = ".sandbox_stderr.tmp"
 
 
 def _kill_tree(pid: int) -> None:
-    """按 PID 杀整棵进程树（Windows：taskkill /T），失败再退回 TerminateProcess。
-
-    沙箱内跑的通常是 cmd.exe，只杀它自己会让孙进程活下来。
-    """
+    """按 PID 杀整棵进程树（Windows：taskkill /T），失败再退回 TerminateProcess。"""
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                        capture_output=True, timeout=15)
@@ -134,10 +111,7 @@ def _load_apis():
     kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
     advapi32 = ctypes.WinDLL("advapi32.dll", use_last_error=True)
 
-    # 签名来源: userenv.h（MSDN Learn）
-    # HRESULT CreateAppContainerProfile(PCWSTR name, PCWSTR display, PCWSTR desc,
-    #     PSID_AND_ATTRIBUTES pCapabilities, DWORD dwCapabilityCount,
-    #     PSID *ppSidAppContainerSid)
+    # 签名来源: userenv.h（MSDN Learn） HRESULT CreateAppContainerProfile(PCWSTR name, PCWSTR display, PCWSTR desc。
     userenv.CreateAppContainerProfile.argtypes = [
         wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
         ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
@@ -145,8 +119,6 @@ def _load_apis():
     userenv.DeleteAppContainerProfile.argtypes = [wintypes.LPCWSTR]
     userenv.DeleteAppContainerProfile.restype = ctypes.HRESULT
     # 网络 capability 用 well-known SID 常量 + ConvertStringSidToSidW 构造。
-    # 不用 DeriveCapabilitySidsFromName：MSDN 标注 userenv.dll，实测 Win11/Server
-    # 2025 该导出在 kernelbase.dll 且按文档签名调用直接 access violation，不可信。
     advapi32.ConvertStringSidToSidW.argtypes = [
         wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
     advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
@@ -183,13 +155,7 @@ def _load_apis():
 
 
 def _ensure_container_profile(api, profile_name: str):
-    """创建（或复用）AppContainer 配置档案，返回系统分配的容器 SID 指针。
-
-    ctypes 对 restype=HRESULT 的失败结果会自动抛 OSError（winerror 即
-    HRESULT 值），这里按 winerror 识别 ERROR_ALREADY_EXISTS：删除档案后
-    重建。工作区授权针对 ALL APPLICATION PACKAGES 组（含所有容器 SID），
-    重建不影响工作区访问。SID 指针由调用方负责 FreeSid。
-    """
+    """创建（或复用）AppContainer 配置档案，返回系统分配的容器 SID 指针。"""
     ctypes = api["ctypes"]
     userenv = api["userenv"]
 
@@ -227,21 +193,7 @@ def _grant_workspace_ace(workspace: str) -> None:
 
 
 def _grant_interpreter_aces(prefix=None, base_prefix=None, which_fn=None) -> list:
-    """给解释器安装目录授予 AppContainer 只读执行权限（best-effort）。
-
-    容器内进程默认读不到用户目录下安装的程序——不授权则终端在沙箱内
-    只能跑系统自带命令（实战验证发现）。用目录级 (OI)(CI)(RX) 授权靠
-    继承覆盖 python313.dll / Lib / DLLs / venv 全部内容；单文件授权
-    （icacls 对 .exe）实测会被拒。
-
-    Args:
-        prefix: 运行中解释器根目录（venv），缺省 sys.prefix
-        base_prefix: 基础解释器安装目录，缺省 sys.base_prefix
-        which_fn: 可注入的 shutil.which（测试用）
-
-    Returns:
-        授权成功的目录列表（失败/被拒的静默跳过，fail-open）
-    """
+    """给解释器安装目录授予 AppContainer 只读执行权限（best-effort）。"""
     import sys as _sys
     prefix = prefix or _sys.prefix
     base_prefix = base_prefix or _sys.base_prefix
@@ -276,11 +228,7 @@ def _grant_interpreter_aces(prefix=None, base_prefix=None, which_fn=None) -> lis
 
 
 def _grant_extra_dirs(dirs) -> list:
-    """给配置清单里的额外目录授予容器只读执行权限（icacls RX，best-effort）。
-
-    用于工作区之外的共享库 / 数据集等只读资源。工作区本身始终可写，
-    不应出现在此清单中。返回授权成功的目录。
-    """
+    """给配置清单里的额外目录授予容器只读执行权限（icacls RX，best-effort）。"""
     granted = []
     seen = set()
     for path in dirs:
@@ -304,8 +252,6 @@ def _grant_extra_dirs(dirs) -> list:
 
 
 # 容器网络 capability：MSDN well-known SID 常量（S-1-15-3-x）。
-# 不用 DeriveCapabilitySidsFromName——本机实测按文档签名调用直接 access
-# violation，ConvertStringSidToSidW 从字符串构造最稳。
 _NETWORK_CAPABILITY_SIDS = {
     "internetClient": "S-1-15-3-1",
     "internetClientServer": "S-1-15-3-2",
@@ -315,13 +261,7 @@ SE_GROUP_ENABLED = 0x00000004
 
 
 def _build_capabilities(api):
-    """
-    按 SANDBOX_EXEC_CONFIG 构建 capability 数组（当前仅网络开关）。
-
-    Returns:
-        (SID_AND_ATTRIBUTES 数组或 None, [sid 指针待 LocalFree 列表])
-        数组为 None 表示无 capability（默认全禁网络）。
-    """
+    """按 SANDBOX_EXEC_CONFIG 构建 capability 数组（当前仅网络开关）。"""
     if not SANDBOX_EXEC_CONFIG.get("allow_network", False):
         return None, []
     ctypes = api["ctypes"]
@@ -359,18 +299,7 @@ def _free_capabilities(api, keepalive) -> None:
 def run_appcontainer(command: str, workspace: str,
                      timeout: float = 120.0,
                      profile_name: str = "my_agent.sandbox") -> SandboxOutcome:
-    """
-    在 AppContainer 内执行一条 shell 命令（cmd /c）。
-
-    Args:
-        command: 待执行命令字符串（cmd 语义，与终端工具一致）
-        workspace: 工作区目录（容器内进程唯一可写目录，也是命令 cwd）
-        timeout: 硬超时秒数，超时终止进程
-        profile_name: AppContainer 档案名（确定性 GUID 由此派生）
-
-    Returns:
-        SandboxOutcome。error 非空 = 沙箱机制失败（调用方必须 fail-closed）。
-    """
+    """在 AppContainer 内执行一条 shell 命令（cmd /c）。"""
     if not _IS_WINDOWS:
         return SandboxOutcome(error="AppContainer 仅支持 Windows 平台。")
     if not os.path.isdir(workspace):
@@ -466,10 +395,7 @@ def run_appcontainer(command: str, workspace: str,
         wait_ms = int(max(0.0, timeout) * 1000)
         wait_rc = kernel32.WaitForSingleObject(pi.hProcess, wait_ms)
         if wait_rc == WAIT_TIMEOUT:
-            # 必须杀**整棵进程树**：`TerminateProcess` 只终止直接子进程，而沙箱里跑的
-            # 通常是 cmd.exe —— 它拉起的孙进程会活下来并继续持有文件/端口句柄，返回
-            # 文案却写着"沙箱内进程已终止"（2026-09-22 审计）。非沙箱路径用的是
-            # `taskkill /PID ... /T /F`（见 tools/terminal.py），这里对齐。
+            # 必须杀**整棵进程树**：`TerminateProcess` 只终止直接子进程，而沙箱里跑的通常是 cmd.exe —— 它拉起的孙进程会活下来并继续持有文件/端口句柄，返回文案却写着"沙箱内进程已终止"。
             _kill_tree(int(pi.dwProcessId))
             kernel32.WaitForSingleObject(pi.hProcess, 5000)
             return SandboxOutcome(
@@ -508,11 +434,8 @@ def run_appcontainer(command: str, workspace: str,
 
 
 def _open_inherit_handle(api, path: str, write: bool):
-    """
-    打开文件作为容器内进程的 std 流，返回 (可继承句柄, fd)。
-    句柄必须设置 HANDLE_FLAG_INHERIT，否则子进程拿到无效 std 句柄。
-    调用方负责成对关闭（先 CloseHandle 再 close fd）。
-    """
+    """打开文件作为容器内进程的 std 流，返回 (可继承句柄, fd)。
+    句柄必须设置 HANDLE_FLAG_INHERIT，否则子进程拿到无效 std 句柄。"""
     import msvcrt
     ctypes = api["ctypes"]
     kernel32 = api["kernel32"]

@@ -45,3 +45,6 @@ desktop/test-results/
 test-results/
 desktop/release/
 desktop/dist/
+
+# 用户自己的项目（本地保留，不入库）
+xianyu_smart_reply/

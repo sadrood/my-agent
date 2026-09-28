@@ -1,13 +1,4 @@
-"""
-待办清单工具（参照上游同类 `todo`：会话级任务清单，跨轮持久）。
-
-模型用 todo_write 维护当前会话的任务清单（增 / 进行中 / 勾掉），
-清单按会话 id 持久化到 memory/todos/<session>.json，同一会话的后续轮次
-可继续看到与更新；桌面端收到 `todo` 事件后常驻显示进度。
-
-- 会话隔离：key（会话 id）由 Agent 注入，缺失时落到 default（不跨会话污染）。
-- 每次变更 emit `todo` 事件（{todos:[...]}），供 UI 实时刷新。
-"""
+"""待办清单工具（参照上游同类 `todo`：会话级任务清单，跨轮持久）。"""
 import os
 import re
 import time
@@ -16,10 +7,7 @@ from typing import Any, Dict, List
 from tools.base import BaseTool, ToolResult
 from config import resolve_under_root
 
-# 必须锚定项目根：这是**硬编码的相对路径**，open() 按 cwd 解析——agent 在 output/xxx
-# 下跑时清单就落到那里去了。实测本机已被拆成三份（memory/todos、
-# 不同工作目录下各存一份），
-# 界面看到的进度和"完成度闸门"读到的都不是同一份。详见 config.resolve_under_root。
+# 必须锚定项目根：这是**硬编码的相对路径**，open() 按 cwd 解析——agent 在 output/xxx 下跑时清单就落到那里去了。
 _TODO_DIR = resolve_under_root(os.path.join("memory", "todos"))
 
 
@@ -34,9 +22,7 @@ class TodoTool(BaseTool):
 
     risk_level: str = "medium"
     approval: str = "auto"
-    # 这个工具会 makedirs + 写 memory/todos/*.json（见 _save），
-    # 旧元数据却按「只读」声明 —— read-only 沙箱下 0 >= 0 直接放行，
-    # 与「read-only 拒绝一切写入类操作」的约定不符（2026-09-22 审计）。
+    # 这个工具会 makedirs + 写 memory/todos/*.json（见 _save），旧元数据却按「只读」声明 —— read-only 沙箱下 0 >= 0 直接放行，与「read-only 拒绝一切写入类操作」的约定不符。
     min_sandbox_mode: str = "workspace-write"
 
     def __init__(self):
@@ -108,11 +94,7 @@ class TodoTool(BaseTool):
 
     def pending(self) -> List[dict]:
         """当前仍未完成的待办（status 不是 done 的都算）。
-
-        Executor 的"完成度闸门"用它判断模型是不是活儿没干完就想收尾
-        （清单里没有时间戳，时间维度的过滤由调用方用 id 快照做）。
-        读失败一律当空清单：闸门是加分项，不能因为它自己出错阻断正常收尾。
-        """
+        读失败一律当空清单：闸门是加分项，不能因为它自己出错阻断正常收尾。"""
         try:
             return [t for t in self._load()
                     if isinstance(t, dict)

@@ -98,13 +98,7 @@ def test_search_without_any_repo(monkeypatch, tmp_path):
 
 class TestDomainPathContainment:
     """domain 必须落在经验仓**之内**（路径穿越回归）。
-
-    实测漏洞（2026-09-22 审计）：旧实现是
-    `os.path.join(path, "experiences", domain.replace("/", os.sep))` ——
-    既不挡 `..`，也不挡绝对路径（`os.path.join` 遇绝对路径会丢弃前面的部分）。
-    `domain: "C:/Windows/Temp/pwn"` 能把文件写到仓外，而随后的 `git add` 因为
-    relpath 指向仓外而失败，工具报"保存失败"**却把文件留在了磁盘上**。
-    """
+    relpath 指向仓外而失败，工具报"保存失败"**却把文件留在了磁盘上**。"""
 
     @pytest.mark.parametrize("domain", [
         "../../../../tmp/pwn", "..", "../..", "/etc/passwd",
@@ -145,13 +139,7 @@ class TestDomainPathContainment:
 
 
 class TestSecretScanCoverage:
-    """密钥扫描必须覆盖 topic / domain，且认得带连字符的 key。
-
-    实测漏洞（2026-09-22 审计）：扫描串是 `body + tags`，**topic 与 domain 不扫**
-    —— 而 topic 会写进 frontmatter 和 git commit message，把 key 写在 topic 里就
-    明文推上远端仓；另外 `sk-[A-Za-z0-9]{16,}` 匹配不了 `sk-ant-api03-…` 这类
-    带连字符的形态。
-    """
+    """密钥扫描必须覆盖 topic / domain，且认得带连字符的 key。"""
 
     @pytest.mark.parametrize("field", ["topic", "domain"])
     def test_secret_in_topic_or_domain_rejected(self, lib_repo, field):

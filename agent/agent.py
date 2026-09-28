@@ -1,11 +1,4 @@
-"""
-Agent 核心模块（Computer Use + MCP 增强版）。
-完整的主循环：Think → Act → Observe → Compare(帧对比) → Anomaly(异常检测) → RePlan。
-支持：精确鼠标键盘操作、MCP 外部工具集成、视觉帧对比、异常检测。
-
-v3.1 起默认使用单循环执行模式（主循环式：一次对话完成目标），
-经典计划模式通过 exec_mode="plan" / --plan 使用。
-"""
+"""Agent 核心模块（Computer Use + MCP 增强版）。"""
 import sys
 import os
 import time as _time
@@ -34,15 +27,13 @@ from agent.rollout import clip_text
 
 
 # 未完成判定：结果/摘要里出现这些标记 = 任务没跑完（上限/停止/中断）
-INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务已停止", "已停止", "中断", "max_ops",
+INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务已停止", "已停止", "中断",
+                      "连续失败", "重试耗尽", "max_ops",
                       # 动态轮数预算：连续无进展被判定空转而提前停，同样是"没做完"
                       "没有进展")
 
 def compose_handoff(goal: str, reason: str, final: str, done_hint: str = "") -> str:
-    """无 LLM 可用的兜底交接文本（也用作 LLM 生成的统一外壳）。
-
-    目标是让下一轮/用户明确知道：没做完、做到哪、只续不重做。
-    """
+    """无 LLM 可用的兜底交接文本（也用作 LLM 生成的统一外壳）。"""
     parts = [
         "【任务进度交接｜未完成】",
         f"原因：{reason}",
@@ -59,11 +50,7 @@ def compose_handoff(goal: str, reason: str, final: str, done_hint: str = "") -> 
 
 def _resolve_compact_threshold(llm=None) -> int:
     """压缩触发阈值解析（供实例方法/无 llm 场景共用）。
-
-    显式 COMPACT_TOKEN_THRESHOLD >0 优先；否则委托 LLM 按网关报告窗口 ×
-    COMPACT_WINDOW_RATIO；llm 缺失/窗口不可知时兜底 240_000。
-    概览刻度与真实压缩点共用此值——显示与实际不再脱节。
-    """
+    COMPACT_WINDOW_RATIO；llm 缺失/窗口不可知时兜底 240_000。"""
     try:
         from config import COMPACT_CONFIG
         explicit = int(COMPACT_CONFIG.get("token_threshold") or 0)
@@ -89,7 +76,7 @@ class AgentConfig:
         enable_frame_compare: bool = True,
         enable_anomaly_detect: bool = True,
         mcp_servers: list = None,
-        # ---- v2：审批 / 沙箱 / 安全 ----
+        # 审批 / 沙箱 / 安全 ----
         approval_policy: str = None,
         sandbox_mode: str = None,
         approval_interactive: bool = None,
@@ -97,7 +84,7 @@ class AgentConfig:
         agent_name: str = None,       # 用户自定义名字（None=默认人格名「小悟」）
         guardian_enabled: bool = None,
         supervisor_enabled: bool = None,   # 任务监管者（独立模型复核完成度）；None=读配置
-        # ---- v2：指令 / 追踪 / 会话 ----
+        # 指令 / 追踪 / 会话 ----
         instructions_enabled: bool = None,
         rollout_enabled: bool = None,
         max_step_ops: int = None,
@@ -227,17 +214,7 @@ class AgentConfig:
 
 
 class Agent:
-    """
-    AI Agent 主类（Computer Use + MCP 增强版）。
-
-    增强的核心流程：
-    1. Think    → Planner 制定计划
-    2. Act      → Executor LLM 决策 → 工具调用
-    3. Compare  → 操作前后截图帧对比（验证效果）
-    4. Anomaly  → 异常检测（弹窗/错误/验证码）
-    5. Observe  → 判断成功/失败/继续
-    6. RePlan   → 失败时重规划
-    """
+    """AI Agent 主类（Computer Use + MCP 增强版）。"""
 
     def __init__(
         self,
@@ -251,9 +228,10 @@ class Agent:
         self._wire_llm_notifier()
         self.tool_manager = tool_manager or ToolManager()
         self.memory = memory or Memory()
+        self.llm_health = None       # 懒加载：只在真出现限流/切换时才落盘
 
         # ================================================================
-        # v2：审批策略 + Guardian + 指令 + 会话
+        # 审批策略 + Guardian + 指令 + 会话
         # ================================================================
         from agent.approval import ApprovalPolicy
         from agent.instructions import get_instructions_loader
@@ -266,8 +244,7 @@ class Agent:
             approver=self.config.approver,
         )
         self.guardian = self._build_guardian()
-        # 人工放行（Guardian 授权）：授权只能由人类输入写入，见 agent/consent.py。
-        # 无人值守（approval=never 或非交互）时不注入询问回调 → 拦截仍然是拦截。
+        # 人工放行（Guardian 授权）：授权只能由人类输入写入，见 agent/consent.py。无人值守（approval=never 或非交互）时不注入询问回调 → 拦截仍然是拦截。
         from agent.consent import ConsentStore
         from config import GUARDIAN_CONSENT_CONFIG
         self.consents = ConsentStore(
@@ -333,12 +310,7 @@ class Agent:
         return name or str(PERSONALITY.get("name", "小悟"))
 
     def _browser_session_note(self) -> str:
-        """当前浏览器会话摘要（供交接清单 / 续跑指令使用）。
-
-        为什么需要：达到轮数上限或中断后再续跑时，若不告知模型"浏览器仍在
-        运行、标签页还在"，模型可能为了"干净开始"而 close + launch 重开，
-        已打开的页面（乃至未持久化的站点状态）就丢了。
-        """
+        """当前浏览器会话摘要（供交接清单 / 续跑指令使用）。"""
         try:
             b = self.tool_manager.get_tool("browser")
             if b is None:
@@ -347,12 +319,7 @@ class Agent:
             if not pages:
                 return ""
             note = f"浏览器会话仍在运行（{len(pages)} 个标签页"
-            # 只在浏览器**确实存活**时才去取 URL。
-            # 踩过的坑：_pages 里可能只剩残留引用（底层连接早断了），此时
-            # execute("url") 会走 _ensure_page → _launch，等于"写一条交接备注
-            # 顺带把浏览器重新打开"——有头窗口弹出、占用用户 profile，
-            # 单元测试里也会因此真的拉起 Chromium（实测每次测试跑都污染
-            # memory/browser_profile，涨到 250MB）。
+            # 只在浏览器**确实存活**时才去取 URL。遇到过的坑：_pages 里可能只剩残留引用（底层连接早断了），此时 execute("url") 会走 _ensure_page → _launch。
             try:
                 alive = getattr(b, "_is_browser_alive", None)
                 if callable(alive) and not alive():
@@ -371,11 +338,30 @@ class Agent:
         except Exception:
             return ""
 
-    def _handoff_for_incomplete(self, goal: str, reason: str, final: str) -> str:
-        """未完成任务 → 结构化交接清单（LLM 总结；失败时兜底模板）。
+    @staticmethod
+    def _incomplete_reason(result: dict) -> str:
+        """按**真实停止原因**生成交接说明。
+        还让下一轮以为"调大上限就能继续"。"""
+        budget = result.get("budget") or {}
+        reason = str(result.get("stop_reason") or budget.get("stop_reason") or "")
+        used = result.get("ops") or budget.get("used") or 0
+        if reason == "interrupted":
+            err = str(budget.get("interrupt_error") or result.get("llm_error") or "").strip()
+            tail = f"（最后一次：{err[:80]}）" if err else ""
+            return f"模型服务中断：上游连续失败、重试耗尽后停止{tail}"
+        if reason == "stalled":
+            n = budget.get("spinning_turns") or 0
+            return f"原地打转：连续 {n} 轮无进展，已停止"
+        limit = budget.get("limit")
+        if reason == "exhausted" and limit:
+            ext = budget.get("extensions") or 0
+            return f"达到任务最大操作轮数（上限 {limit} 轮，已动态续期 {ext} 次）"
+        if used:
+            return f"任务未跑完（已跑 {used} 轮：轮数耗尽 / 原地打转 / 提前停止）"
+        return "任务未跑完（轮数耗尽 / 原地打转 / 提前停止）"
 
-        产出同时成为用户看到的最终文案与持久化摘要，供下一轮"继续"使用。
-        """
+    def _handoff_for_incomplete(self, goal: str, reason: str, final: str) -> str:
+        """未完成任务 → 结构化交接清单（LLM 总结；失败时兜底模板）。"""
         rule = "要求：后续继续本任务时只执行未完成部分并沿用既有成果，不要重新执行已完成的操作。"
         browser_note = self._browser_session_note()
         if browser_note:
@@ -423,15 +409,51 @@ class Agent:
         return LLM()
 
     def _wire_llm_notifier(self) -> None:
-        """把"正在等上游配额"接到 UI 与 rollout 上。
-
-        背景：models/llm.py 的限流提示只写 stderr——桌面端/内嵌 UI/dashboard 渲染的是
-        富文本 stdout，那行没人看得到；而且等待时长**没进 rollout**，事后复盘只知道
-        发生过 429、不知道一共等了多久（分析 run-20260918-163309 时卡在这里）。
-        """
+        """把"正在等上游配额"接到 UI 与 rollout 上。"""
         try:
             self.llm.retry_notifier = self._on_llm_rate_limit
+            self.llm.provider_notifier = self._on_llm_provider_switch
+            self.llm.health_notifier = self._on_llm_health
         except Exception:       # noqa: BLE001 — 自定义 llm 替身可能不允许设属性
+            pass
+
+    def _on_llm_health(self, event: dict) -> None:
+        """把 LLM 健康事件累计进 memory/llm_health.json（限流类型/等待/恢复耗时），
+        关键时刻另记一条 rollout——上游不公开 rpm/tpm，这些数据只能自己攒。"""
+        try:
+            if getattr(self, "llm_health", None) is None:
+                from agent.llm_health import LLMHealth
+                self.llm_health = LLMHealth()
+            self.llm_health.record(event)
+        except Exception:       # noqa: BLE001 — 遥测失败不能影响主流程
+            pass
+        if event.get("event") in ("quota_limited", "recovered", "switch"):
+            try:
+                if getattr(self, "rollout", None) is not None:
+                    self.rollout.emit("llm_health",
+                                      {k: v for k, v in event.items() if k != "message"})
+            except Exception:   # noqa: BLE001
+                pass
+
+    def _on_llm_provider_switch(self, info: dict) -> None:
+        """备用端点切换的可见反馈（一行）+ 记进 rollout——换了模型必须让人看得见。"""
+        label = str(info.get("label") or "")
+        reason = str(info.get("reason") or "")
+        try:
+            if info.get("primary"):
+                print_info(f"↩ 回到主端点 {label}（{reason}）", style="dim")
+            else:
+                print_info(f"⚠ 切到备用端点 {label}（{reason}）", style="dim")
+        except Exception:       # noqa: BLE001 — 渲染失败不影响主流程
+            pass
+        try:
+            if getattr(self, "rollout", None) is not None:
+                self.rollout.emit("llm_provider_switch", {
+                    "label": label, "model": info.get("model", ""),
+                    "index": info.get("index", 0), "primary": bool(info.get("primary")),
+                    "reason": reason,
+                })
+        except Exception:       # noqa: BLE001
             pass
 
     def _on_llm_rate_limit(self, seconds: float, attempt: int) -> None:
@@ -449,20 +471,13 @@ class Agent:
             pass
 
     def switch_model(self, model: str = None, base_url: str = None, api_key: str = None):
-        """
-        会话内临时切换主模型（/model 风格）：
-        未提供的参数沿用当前值；影响本次会话，不写入 .env。
-
-        Returns:
-            切换后的配置摘要
-        """
+        """会话内临时切换主模型（/model 风格）："""
         self.config.llm_model = model or self.config.llm_model
         self.config.llm_base_url = base_url or self.config.llm_base_url
         self.config.llm_api_key = api_key or self.config.llm_api_key
         self.llm = self._build_llm()
         self._wire_llm_notifier()
-        # 重建 LLM 后重接统计：否则 _record_usage 写进旧实例（或 None），
-        # token 统计/上下文水位全部归零（概览"运行 tokens 0"的根因）
+        # 重建 LLM 后重接统计：否则 _record_usage 写进旧实例（或 None），token 统计/上下文水位全部归零（概览"运行 tokens 0"的根因）
         if getattr(self, "metrics", None) is not None:
             self.llm.metrics = self.metrics
         # 同步给执行器 / 规划器 / Guardian（端点变化时重建）
@@ -478,12 +493,7 @@ class Agent:
             self.supervisor = self._build_supervisor()
         except Exception:
             pass
-        # Guardian / 监管者必须**同时**推给执行器：那道门是在 Executor 里执行的
-        # （`Executor.gate_tool_call` 读 `self.guardian`，监管复核读 `self.supervisor`），
-        # 而 Executor 用的是构造时注入的引用、没有 setter。
-        # 旧实现只改了 Agent 自己的属性，于是 `/model` 换端点后高风险操作仍打到
-        # **旧端点/旧模型**；旧端点不可用时按 Guardian 的 fail-open 默认放行 ——
-        # 等于切模型后 Guardian 被静默关掉，而界面照常显示"已审校"（2026-09-22 审计）。
+        # Guardian / 监管者必须**同时**推给执行器：那道门是在 Executor 里执行的（`Executor.gate_tool_call` 读 `self.guardian`，监管复核读 `self.supervisor`）
         if self.executor is not None:
             self.executor.guardian = self.guardian
             self.executor.supervisor = self.supervisor
@@ -493,12 +503,8 @@ class Agent:
         }
 
     def _build_guardian(self):
-        """
-        构建 Guardian（支持独立端点：GUARDIAN_API_KEY / GUARDIAN_BASE_URL）。
-
-        审校建议用快模型：主模型是慢速推理模型（如 stealth/ox-alpha）时，
-        若 Guardian 端点与主 LLM 相同则共用实例，否则用独立端点建新客户端。
-        """
+        """构建 Guardian（支持独立端点：GUARDIAN_API_KEY / GUARDIAN_BASE_URL）。
+        若 Guardian 端点与主 LLM 相同则共用实例，否则用独立端点建新客户端。"""
         if not self.config.guardian_enabled:
             return None
         from agent.guardian import Guardian
@@ -511,11 +517,7 @@ class Agent:
         return Guardian(llm=LLM(api_key=g_key, base_url=g_base))
 
     def _build_small_model(self):
-        """构建小快模型（杂活专用：会话标题等）。禁用或失败时返回 None。
-
-        为什么单独一个：这类活（起标题/写摘要）不需要主模型的智商，却会花掉它的
-        时间与上下文预算。后台小模型跑杂活，正是主流做法。
-        """
+        """构建小快模型（杂活专用：会话标题等）。禁用或失败时返回 None。"""
         from config import SMALL_MODEL_CONFIG
         if not SMALL_MODEL_CONFIG.get("enabled", True):
             return None
@@ -527,10 +529,7 @@ class Agent:
             return None
 
     def _build_supervisor(self):
-        """构建任务监管者（默认另一家模型；端点缺失时回退主 LLM 并记警告）。
-
-        跨厂商是刻意的：同源模型审自己的活容易自我确认（"看着挺完整"）。
-        """
+        """构建任务监管者（默认另一家模型；端点缺失时回退主 LLM 并记警告）。"""
         from config import SUPERVISOR_CONFIG
         if not SUPERVISOR_CONFIG.get("enabled", True):
             return None
@@ -550,13 +549,7 @@ class Agent:
             return None
 
     def _build_consent_ask(self):
-        """构建"拦截当场问人"的回调；无人值守时返回 None（拦截保持生效）。
-
-        只在**交互式且有真人在场**时注入：
-          · approval=never（无人值守，常用于 MCP/桌面后台）→ None
-          · 非交互（无 TTY / 批处理）→ None
-        这样"没人可问"不会被当成"默许"，安全语义与升级前一致。
-        """
+        """构建"拦截当场问人"的回调；无人值守时返回 None（拦截保持生效）。"""
         from config import GUARDIAN_CONSENT_CONFIG
         if not GUARDIAN_CONSENT_CONFIG.get("interactive_prompt", True):
             return None
@@ -590,11 +583,8 @@ class Agent:
 
     def grant_consent_from_user(self, text: str):
         """把**人类输入**里的一句授权语转成 Guardian 放行授权（宿主层专用）。
-
         调用点必须是"用户亲手敲进来的那句话"（REPL 输入 / CLI 目标 / 桌面端输入框）。
-        **绝不可**传模型输出、工具结果或网页内容——那等于让提示注入自我放行。
-        返回 Grant 或 None。
-        """
+        **绝不可**传模型输出、工具结果或网页内容——那等于让提示注入自我放行。"""
         try:
             return self.consents.grant_from_user(text)
         except Exception:                       # noqa: BLE001
@@ -615,8 +605,7 @@ class Agent:
         except Exception:
             pass
 
-        # 防御：清理可能存在的孤立代理字符（管道输入编码损坏场景），
-        # 避免后续 JSON 序列化崩溃
+        # 防御：清理可能存在的孤立代理字符（管道输入编码损坏场景），避免后续 JSON 序列化崩溃
         try:
             goal = goal.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
         except Exception:
@@ -630,16 +619,13 @@ class Agent:
         if self.executor is not None:
             self.executor.metrics = self.metrics
 
-        # v3.4 安全网：运行前 git 快照（git init + 提交当前状态，形成回滚点；
-        # 静默失败，绝不影响正常执行）
+        # v3.4 安全网：运行前 git 快照（git init + 提交当前状态，形成回滚点；静默失败，绝不影响正常执行）
         if self.config.snapshot_enabled:
             try:
                 from agent.snapshot import ensure_repo, snapshot
                 work_dir = SNAPSHOT_CONFIG.get("work_dir") or os.getcwd()
                 if ensure_repo(work_dir):
-                    # 逐工具 checkpoint 开启时用选择性快照（只提交暂存区）：
-                    # Agent 的每次修改已被 checkpoint 独立提交，全量 add -A
-                    # 只会把用户的并行未提交工作卷进 Agent 提交。
+                    # 逐工具 checkpoint 开启时用选择性快照（只提交暂存区）：Agent 的每次修改已被 checkpoint 独立提交，全量 add -A只会把用户的并行未提交工作卷进 Agent 提交。
                     snapshot(work_dir, goal,
                              full=not self.config.checkpoint_per_tool)
             except Exception:
@@ -756,9 +742,7 @@ class Agent:
         # 发送计划到 Dashboard
         self._emit("plan", {"steps": self.state.plan})
 
-        # 3. 预启动浏览器
-        # 只检查用户输入 goal 是否涉及浏览器操作，不检查 LLM 生成的 plan 文本
-        # （plan 文本可能包含"网页浏览"等能力描述词，会导致误判）
+        # 3. 预启动浏览器只检查用户输入 goal 是否涉及浏览器操作，不检查 LLM 生成的 plan 文本（plan 文本可能包含"网页浏览"等能力描述词，会导致误判）
         self._browser_launched = False
         self._browser_launch_reason = ""
         self._tools_used_this_run = set()
@@ -779,11 +763,7 @@ class Agent:
         errors_collected = []    # 收集所有错误（用于失败模式学习）
 
         while self.state.current_step < len(self.state.plan):
-            # 步骤上限判断必须放在循环体**开头**：旧实现放在体末，而那之前每条路径
-            # 都以 continue / break 收尾（执行成功 continue、重规划 continue、
-            # 重规划失败 break、超重规划 break），那句判断**永远执行不到** ——
-            # `--max-steps` 成了一个完全无效的开关（2026-09-22 审计实测：
-            # `--plan --max-steps 5` 配 10 步的计划会一路跑完，从不提示）。
+            # 步骤上限判断必须放在循环体**开头**：旧实现放在体末，而那之前每条路径都以 continue / break 收尾（执行成功 continue、重规划 continue、重规划失败 break、超重规划 break）
             if self.state.current_step >= self.config.max_steps:
                 print_warning(f"已达最大步骤数 ({self.config.max_steps})，终止。",
                               use_rich=self.config.verbose)
@@ -802,10 +782,6 @@ class Agent:
 
             step_context_parts = []
             # 默认**失败**：只有内层循环真的走到"成功"分支才置 True。
-            # 旧实现初值是 True，于是"重试次数用尽"（内层 while 因 step_retry_count
-            # 耗尽而退出，没走任何赋值分支）会被当成步骤成功 —— 不记错误、不重规划，
-            # 最终 task_success 还可能被算成成功并写进经验库污染召回
-            # （2026-09-22 审计实测：连续 max_step_retries 次 status="continue" 即触发）。
             step_success = False
 
             while step_retry_count < self.config.max_step_retries:
@@ -954,9 +930,7 @@ class Agent:
         failed_steps = [s for s in self.memory.step_history if s.get("status") == "failed"]
         task_success = len(self.memory.get_failed_steps()) == 0
 
-        # 写入侧质量门槛：一句话问答（"你能做什么""列出前 3 个文件"）不值得沉淀——
-        # 实测这类占了库里的 37%，召回时只会挤掉真正有用的经验。判断在 Memory 里，
-        # 失败的一律照记（失败模式靠它）。
+        # 写入侧质量门槛：一句话问答（"你能做什么""列出前 3 个文件"）不值得沉淀——这类占了库里的 37%，召回时只会挤掉真正有用的经验。判断在 Memory 里，失败的一律照记（失败模式靠它）。
         if self.memory.should_record_experience(goal, tool_usage, task_success,
                                                errors_collected):
             self.memory.save_experience(
@@ -1105,8 +1079,7 @@ class Agent:
 
     def _init_mcp_servers(self):
         """根据配置初始化 MCP 服务器连接。"""
-        # MCP_ENABLED 此前是个**死开关**：MCP_CONFIG["enabled"] 定义了却没有任何
-        # 读取点，用户在 .env 里关不掉 MCP（2026-09-22 审计）。
+        # MCP_ENABLED 之前是个**死开关**：MCP_CONFIG["enabled"] 定义了却没有任何读取点，用户在 .env 里关不掉 MCP。
         from config import MCP_CONFIG
         if not MCP_CONFIG.get("enabled", True):
             self._log("\n[MCP] 已在配置中关闭（MCP_ENABLED=false），跳过连接。")
@@ -1138,10 +1111,7 @@ class Agent:
     # ================================================================
 
     def _frame_compare_feedback(self, result: dict, current_step: str):
-        """
-        对工具执行进行前后帧对比，验证操作效果。
-        通过捕获操作前的截图（如果有）和操作后的截图进行对比。
-        """
+        """对工具执行进行前后帧对比，验证操作效果。"""
         # 尝试获取操作后截图进行快速异常检查
         try:
             screenshot_result = self.executor._take_screenshot_for_vision()
@@ -1155,8 +1125,7 @@ class Agent:
                     if compare.get("has_anomaly"):
                         print_warning(f"帧对比异常: {compare.get('type', '')} - {compare.get('description', '')[:100]}", use_rich=self.config.verbose)
                     elif compare.get("detect_failed"):
-                        # 检测失败 != 页面正常：不区分的话视觉模型挂掉时，
-                        # agent 会在"以为检查过了"的前提下继续操作（2026-09-22 审计）
+                        # 检测失败 != 页面正常：不区分的话视觉模型挂掉时，agent 会在"以为检查过了"的前提下继续操作
                         print_warning(f"帧对比未执行（视觉检测失败）: {compare.get('description', '')[:100]}",
                                       use_rich=self.config.verbose)
         except Exception:
@@ -1212,7 +1181,7 @@ class Agent:
             self._mcp_connected = False
 
     # ================================================================
-    # v2：Rollout / 会话 / 压缩 / 收尾
+    # Rollout / 会话 / 压缩 / 收尾
     # ================================================================
 
     def _summarize_for_compaction(self, messages: list) -> str:
@@ -1223,13 +1192,7 @@ class Agent:
             return ""
 
     def _load_session_if_requested(self):
-        """会话持久化：启动时恢复历史对话（全量记录），**只加载一次**。
-
-        幂等性：加载前先清空 memory，且每个 Agent 实例只加载一次
-        （_session_loaded 标记），防止每轮 run 反复 append 历史消息
-        导致 conversation_history 指数膨胀（曾出现 540 万条消息/7.6GB
-        内存的雪崩事故）。main.py 交互模式已自行加载过时，这里会跳过。
-        """
+        """会话持久化：启动时恢复历史对话（全量记录），**只加载一次**。"""
         if self._session_loaded:
             return
         self._session_loaded = True
@@ -1255,17 +1218,7 @@ class Agent:
             print_warning(f"会话恢复失败: {e}", use_rich=self.config.verbose)
 
     def _save_session_if_requested(self, final_summary: str):
-        """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。
-
-        `final_summary` 是本次运行的最终交付文本，必须真的落进 `last_summary`：
-        旧实现收下这个形参却**一次都没用过**，写盘的是 `self.last_execution_summary`，
-        而那个字段在 `_run_loop` 结尾被无条件覆盖成"使用了工具: …"（或"本轮未使用
-        工具"），于是 `_run_loop` 里的
-        `resume_unfinished = any(k in prev_summary for k in INCOMPLETE_MARKERS)`
-        恒为 False —— 未完成交接清单只进了当轮上下文，**没进会话文件**；
-        重开该对话续跑时，"只续不重做 + 扩大回忆窗口（30 条/600 字）"整套机制静默失效
-        （2026-09-22 审计）。形参名说明原意就是写它，是一次回归。
-        """
+        """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。"""
         name = self.config.session_name
         if not name:
             return
@@ -1286,13 +1239,9 @@ class Agent:
                 title_fn=self.small_model.title_for if getattr(self, "small_model", None) else None,
             )
             print_evolution(f"对话已保存: {name}（{len(messages)} 条记录）", use_rich=self.config.verbose)
-            # 体积告警：会话是**每轮整份重写**的（O(n²) 落盘），且这是对话的唯一
-            # 副本。历史上出现过单文件 3.5GB / 630 万条消息把进程拖垮的事故，
-            # 所以到阈值就明确提示用户压缩，而不是等它涨到不可收拾。
+            # 体积告警：会话是**每轮整份重写**的（O(n²) 落盘），且这是对话的唯一副本。历史上出现过单文件 3.5GB / 630 万条消息把进程拖垮的情况，所以到阈值就明确提示用户压缩，而不是等它涨到不可收拾。
             try:
-                # 必须走 SessionStore._path（含 sanitize_name）：写入用的是它，
-                # 这里裸拼 `{name}.json` 对含空格/冒号的名字会指向不存在的文件 ——
-                # size 恒为 0，那条针对 3.5GB 事故的告警永远不响（2026-09-22 审计）。
+                # 必须走 SessionStore._path（含 sanitize_name）：写入用的是它，这里裸拼 `{name}.json` 对含空格/冒号的名字会指向不存在的文件 —— size 恒为 0，那条针对 3.5GB 情况的告警永远不响。
                 path = self.session_store._path(name)
                 size_mb = os.path.getsize(path) / 1048576 if os.path.exists(path) else 0
                 limit = float(SESSION_CONFIG.get("warn_size_mb", 20))
@@ -1308,12 +1257,7 @@ class Agent:
 
     def _restore_conversation_model(self, data: dict):
         """恢复对话时自动切回其绑定的模型（一个对话一个模型）。
-
-        尊重用户的显式配置：若用户通过环境变量/.env 显式指定了默认模型
-        （MY_AGENT_MODEL / ANTHROPIC_MODEL / LLM_DEFAULT_MODEL），
-        说明用户有全局模型偏好，恢复对话**不**覆盖当前模型（只提示）；
-        仅当用户未显式配置（用程序默认值）时，才自动切回对话绑定模型。
-        """
+        仅当用户未显式配置（用程序默认值）时，才自动切回对话绑定模型。"""
         model = data.get("model") or ""
         if not model or model == self.llm.default_model:
             return
@@ -1359,8 +1303,7 @@ class Agent:
 
         self._save_session_if_requested(result_text)
 
-        # 统计行（轮数/步数/LLM 耗时/工具耗时/首 token/速率/缓存命中/token 用量 + 策略）
-        # 桌面端统计卡：无论 verbose 与否都发 metrics 事件（hub 广播给 WS）；verbose 时同时打印。
+        # 统计行（轮数/步数/LLM 耗时/工具耗时/首 token/速率/缓存命中/token 用量 + 策略）桌面端统计卡：无论 verbose 与否都发 metrics 事件（hub 广播给 WS）；verbose 时同时打印。
         metrics = getattr(self, "metrics", None)
         if metrics is not None and metrics.has_data():
             try:
@@ -1378,8 +1321,7 @@ class Agent:
                     "llm_seconds": round(metrics.llm_seconds, 1),
                     "tool_seconds": round(metrics.tool_seconds, 1),
                     "first_token_avg": round(metrics.first_token_avg, 2) if metrics.first_token_seconds else None,
-                    # None = 无法可靠计算（非流式路径没有首 token 数据），
-                    # 前端应显示"—"而不是把它当成 0 吞吐
+                    # None = 无法可靠计算（非流式路径没有首 token 数据），前端应显示"—"而不是把它当成 0 吞吐
                     "tokens_per_sec": (round(metrics.tokens_per_sec, 1)
                                        if metrics.tokens_per_sec is not None else None),
                     "model": getattr(getattr(self, "llm", None), "default_model", None)
@@ -1399,9 +1341,7 @@ class Agent:
             except Exception:
                 pass
 
-        # 「用时 X分XX秒」+ 完成时刻 —— 放在最显眼的位置单独一行。
-        # 用户关心的是"这次等了多久"（墙钟），而不是 LLM/工具的分项之和；
-        # 两者的差额就是那些看不见的等待（退避/审批/快照/压缩）。
+        # 「用时 X分XX秒」+ 完成时刻 —— 放在最显眼的位置单独一行。用户关心的是"这次等了多久"（墙钟），而不是 LLM/工具的分项之和；两者的差额就是那些看不见的等待（退避/审批/快照/压缩）。
         if metrics is not None and self.config.verbose:
             try:
                 from agent.metrics import humanize_duration_cn
@@ -1425,11 +1365,7 @@ class Agent:
     # ================================================================
 
     def _render_skills_prompt(self, goal: str) -> str:
-        """渲染 Skills 技能包注入文本（技能包式能力扩展）。
-
-        未启用 / 无技能 / 任何异常时返回空串（静默，不影响主流程）。
-        独立成方法便于测试直接调用渲染路径。
-        """
+        """渲染 Skills 技能包注入文本（技能包式能力扩展）。"""
         if not self.config.skills_enabled:
             return ""
         try:
@@ -1453,17 +1389,7 @@ class Agent:
     @staticmethod
     def _history_without_current_goal(recent: list, goal: str) -> list:
         """从历史窗口里剔除「本轮 goal 本身」（仅当它已被写进 memory）。
-
-        计划模式在 run() 开头就 add_message(goal)，因此历史窗口的最后一条
-        是本轮消息，需要剔除。
-
-        但**默认的单循环模式不是这样**：run() 在 482 行就直接 return
-        _run_loop()，goal 要到本次 run 结束才 add_message 进 memory。此时
-        最后一条是**真实历史**，无脑 recent[:-1] 会把它删掉。实测后果：
-        历史恰好以「上一轮没人回应的用户请求」结尾，模型于是回去答那个旧
-        问题，完全无视用户刚发的新目标——用户侧表现为"粘贴一大堆文字它
-        根本看不见"。所以这里只在最后一条确实等于本轮 goal 时才剔除。
-        """
+        根本看不见"。所以这里只在最后一条确实等于本轮 goal 时才剔除。"""
         if not recent:
             return recent
         last = recent[-1]
@@ -1474,20 +1400,11 @@ class Agent:
 
     def _run_loop(self, goal: str, keep_session: bool = False,
                   event_sink=None, stop_event=None) -> str:
-        """
-        单循环模式：一轮持续对话完成整个目标。
-
-        与计划模式的区别：
-        - 没有独立的规划 / 逐步执行 / 总结三层 LLM 调用
-        - 整个任务共享一条消息线程，模型能看到此前每一步真实的工具调用与结果
-        - 最终回答直接来自循环的最后一轮输出
-        """
+        """单循环模式：一轮持续对话完成整个目标。"""
         from agent.rollout import Rollout
         from models.prompts import LOOP_SYSTEM_PROMPT, APPROVAL_NOTICE_TEMPLATE
 
-        # 0. 极简启动：
-        #    - 交互模式（keep_session）：零头部——用户消息已在 "> " 提示行可见
-        #    - 单次执行：仅回显一行 "> 目标"，不重复状态行/分隔线
+        # 0. 极简启动：- 交互模式（keep_session）：零头部——用户消息已在 "> " 提示行可见- 单次执行：仅回显一行 "> 目标"，不重复状态行/分隔线
         from agent.ui_theme import print_goal_echo
         if not keep_session:
             print_goal_echo(goal, use_rich=self.config.verbose)
@@ -1509,18 +1426,12 @@ class Agent:
 
         self._tools_used_this_run = set()
 
-        # 1. 记忆召回（经验 + 失败模式 + 策略建议）
-        # 轻量相似度排序（不调 LLM，避免主模型慢速拖累每次启动）；
-        # 用 use_llm_rank=True 可显式开启语义排序。
-        # 注入条数不写死在这里：由 LEARN_MAX_RECALL 决定（Memory 自己读配置）。
+        # 1. 记忆召回（经验 + 失败模式 + 策略建议）轻量相似度排序（不调 LLM，避免主模型慢速拖累每次启动）；用 use_llm_rank=True 可显式开启语义排序。
         experience_context = self.memory.recall_experiences(goal, llm=self.llm)
         failure_warnings = self.memory.get_failure_warnings(goal)
         task_category = self.memory._classify_task(goal)
         strategy_hints = self.memory.get_best_strategies(task_category)
-        # 可视反馈：让用户看到记忆在起作用（只读一行，不刷屏）
-        # 注意：print_info 用模块级导入；此处禁止再局部 import——
-        # 局部导入会把 print_info 变成整个函数的局部名，
-        # 本分支不执行时下面的意图识别 print_info 会触发 UnboundLocalError
+        # 可视反馈：让用户看到记忆在起作用（只读一行，不刷屏）注意：print_info 用模块级导入。
         if experience_context and self.config.verbose:
             try:
                 n_exp = experience_context.count("### 经验")
@@ -1572,8 +1483,7 @@ class Agent:
                     ctx_lines.append(
                         "⚠️ 上一轮任务未完成：你只允许执行「未完成清单」中的事项并继续断点；"
                         "已完成项视为已交付，不得重新执行；若用户新目标与上轮明显不同则以新目标为准。")
-                    # 浏览器会话连续性：续跑时最容易踩的坑是"为了干净开始"
-                    # 而 close + launch 重开，导致已打开页面/会话丢失。
+                    # 浏览器会话连续性：续跑时最容易踩的坑是"为了干净开始"而 close + launch 重开，导致已打开页面/会话丢失。
                     bn = self._browser_session_note()
                     if bn:
                         ctx_lines.append(
@@ -1633,8 +1543,7 @@ class Agent:
             )
         if self.instructions_text:
             system_prompt += f"\n\n## 项目指令（必须遵守）\n{self.instructions_text}"
-        # Skills 技能包（技能包式能力扩展）：放在 AGENTS.md 指令之后；
-        # 未启用 / 无技能 / 异常时静默，不影响主流程。
+        # Skills 技能包（技能包式能力扩展）：放在 AGENTS.md 指令之后；未启用 / 无技能 / 异常时静默，不影响主流程。
         try:
             skills_prompt = self._render_skills_prompt(planning_goal)
         except Exception:
@@ -1680,9 +1589,7 @@ class Agent:
                 self.config.exec_mode = "plan"
                 return self.run(goal, keep_session, event_sink, stop_event)
             final = f"执行过程中出现错误：{e}"
-            # 保留已完成的工具成果（旧实现把 tool_calls 重置成 []，一次异常就让
-            # 用户看不到"刚才到底做到了哪一步"；执行器自己的 llm_error 分支就
-            # 会用 _render_partial_progress 保留进度，这里对齐）。
+            # 保留已完成的工具成果（旧实现把 tool_calls 重置成 []，一次异常就让用户看不到"刚才到底做到了哪一步"；执行器自己的 llm_error 分支就会用 _render_partial_progress 保留进度，这里对齐）。
             partial = ""
             try:
                 partial = self.executor._render_partial_progress([], [str(e)]) or ""
@@ -1693,22 +1600,15 @@ class Agent:
         self._stop_turn_spinner()
 
         final = result.get("output", "").strip() or "任务执行完毕（无文字总结）。"
-        # A. 未完成交接：停止/达到最大轮数 → 生成结构化进度清单，
-        #    替换原收尾文案（同时成为下一轮注入的 last_summary 与用户可见总结）
+        # A. 未完成交接：停止/达到最大轮数 → 生成结构化进度清单，替换原收尾文案（同时成为下一轮注入的 last_summary 与用户可见总结）
         incomplete_reason = None
         if result.get("stopped"):
             incomplete_reason = "任务被停止/中断"
         elif not result.get("success"):
-            # 用 INCOMPLETE_MARKERS 统一判定，而不是只硬编码"已达到任务最大操作轮数"
-            # 那一句。打转停止的文案是"已有 N 轮在原地打转（原样重复调用或空回复），
-            # 已停止以免空转"，既不含那一句、也没用上专为它准备的 "没有进展" marker
-            # —— 于是模型连续打转被停掉后**不生成交接清单**，用户只看到一句原始停止
-            # 文案，下一轮续跑也无从"只续不重做"（2026-09-22 审计）。
+            # 用 INCOMPLETE_MARKERS 统一判定，而不是只硬编码"已达到任务最大操作轮数"那一句。
             haystack = f"{final}\n{result.get('errors') or ''}"
             if any(k in haystack for k in INCOMPLETE_MARKERS):
-                ops = result.get("ops")
-                incomplete_reason = (f"达到任务最大操作轮数（{ops}）" if ops
-                                     else "任务未跑完（轮数耗尽 / 原地打转 / 提前停止）")
+                incomplete_reason = self._incomplete_reason(result)
         if incomplete_reason and self.rollout is not None:
             # 交接收尾也进 rollout，日志可复盘
             try:
@@ -1771,8 +1671,7 @@ class Agent:
             status = "stopped"
         else:
             status = "completed" if result.get("success") else "failed"
-        # 完整最终答案以 answer 事件推送（供桌面/Web 前端渲染，不截断），
-        # run_end 仍带 summary 供日志/状态用
+        # 完整最终答案以 answer 事件推送（供桌面/Web 前端渲染，不截断），run_end 仍带 summary 供日志/状态用
         self._emit("answer", {"output": final, "status": status})
         self._emit("run_end", {"status": status, "summary": final[:500]})
         self._finalize_run(status, final)
@@ -1802,14 +1701,7 @@ class Agent:
             self._turn_spinner = None
 
     def _on_stream_delta(self, kind: str, text: str):
-        """
-        流式增量渲染（主流风格）：
-        - reasoning → 灰色"✻ 思考"块逐字输出（推理过程）
-        - text     → "✻ 小悟"前缀后经流式 Markdown 渲染（**加粗**实时生效）
-
-        同时把增量推送到 Dashboard（stream_delta 事件），供桌面/Web 前端
-        实时渲染回答正文（终端 verbose 关闭时也推送）。
-        """
+        """流式增量渲染（主流风格）："""
         # 推送到前端（即使非 verbose / 非 TTY 也发）
         self._emit("stream_delta", {"kind": kind, "text": text})
         if not self.config.verbose:
@@ -1833,12 +1725,7 @@ class Agent:
                 console.print(text, end="", markup=False, soft_wrap=True)
 
     def _status_text(self) -> str:
-        """构造常驻状态栏聚合文本（token 计数/沙箱等级/审批策略）。
-
-        终端与 Dashboard turn_start 事件共用同一份状态文本：
-        终端直接打印，事件侧放进 data["status_text"] 供桌面端状态条展示。
-        任何异常 / metrics 缺失时返回空串（静默）。
-        """
+        """构造常驻状态栏聚合文本（token 计数/沙箱等级/审批策略）。"""
         try:
             from agent.sandbox import sandbox_enabled
             metrics = getattr(self, "metrics", None)
@@ -1873,18 +1760,9 @@ class Agent:
             pass
 
     def _loop_tool_event(self, event_type: str, data: dict):
-        """
-        单循环模式事件回调：转发 Dashboard + 主流风格终端渲染。
-
-        turn_start  → 附带 status_text（token/沙箱/策略聚合文本）转发 Dashboard，
-                      并刷新常驻状态栏（verbose 时）
-        tool_call   → 打印 `⏺ tool(args)`
-        tool_result → 打印 `⎿ 结果`（失败红色）
-        """
+        """单循环模式事件回调：转发 Dashboard + 主流风格终端渲染。"""
         if event_type == "turn_start":
-            # 桌面端状态条联动：把 token 计数/沙箱/策略聚合文本挂到事件上再转发。
-            # 同时携带结构化累计值（每轮实时），供概览面板精确动态更新
-            # （不再依赖文本解析）。
+            # 桌面端状态条联动：把 token 计数/沙箱/策略聚合文本挂到事件上再转发。同时携带结构化累计值（每轮实时），供概览面板精确动态更新（不再依赖文本解析）。
             try:
                 data = dict(data)
                 data["status_text"] = self._status_text()
@@ -1950,9 +1828,7 @@ class Agent:
                 return
             args = data.get("arguments") or {}
             if tool == "edit" and data.get("success"):
-                # unified diff（红-绿+上下文灰+@@ 行号）：
-                # 优先读 .bak 备份；成功路径 .bak 已即时清理，退回 metadata.old_text；
-                # 都没有时回退参数内 old/new 简式
+                # unified diff（红-绿+上下文灰+@@ 行号）：优先读 .bak 备份；成功路径 .bak 已即时清理，退回 metadata.old_text；都没有时回退参数内 old/new 简式
                 meta = data.get("metadata") or {}
                 backup = meta.get("backup_path", "")
                 old_text = new_text = None
@@ -2069,8 +1945,7 @@ class Agent:
                         t.set_emit(self._emit)
                     except Exception:
                         pass
-            # 记忆库工具要拿到**当前会话**的 Memory：经验库是按会话分文件的
-            # （memory/<chat_id>/experiences.json），不注入就会整理到 default 那份。
+            # 记忆库工具要拿到**当前会话**的 Memory：经验库是按会话分文件的（memory/<chat_id>/experiences.json），不注入就会整理到 default 那份。
             try:
                 mt = self.tool_manager.get_tool("memory")
                 if mt is not None:

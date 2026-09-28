@@ -1,8 +1,5 @@
-"""
-插件安装器测试（InstallerTool：技能包 / MCP 插件）。
-技能包复用 SkillPackManager 安全边界；MCP 持久化写用户级配置。
-全部不依赖网络。
-"""
+"""插件安装器测试（InstallerTool：技能包 / MCP 插件）。
+全部不依赖网络。"""
 import json
 import os
 

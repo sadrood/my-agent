@@ -1,14 +1,5 @@
-"""
-回归测试：单循环路径的上下文压缩不能切出"孤立的 tool 消息"。
-
-背景（2026-09-17 审计）：`agent/executor.py` 的 `_maybe_compact` 用
-`messages[-keep:]` 盲切，而单循环每一轮会追加 1 条 assistant(tool_calls) + N 条
-tool 消息，切点有 N/(N+2) 的概率落在 tool 中间 → 保留区以孤立 tool 开头 →
-上游 400 "Messages with role 'tool' must be a response to a preceding message
-with 'tool_calls'"，无参数可赖、重试 3 次后整轮任务失败（长任务最容易触发）。
-
-同一修法此前已在 `agent/rollout.py` 落地，这里是默认路径上的漏网副本。
-"""
+"""回归测试：单循环路径的上下文压缩不能切出"孤立的 tool 消息"。
+with 'tool_calls'"，无参数可赖、重试 3 次后整轮任务失败（长任务最容易触发）。"""
 import pytest
 
 from agent.executor import Executor
@@ -130,12 +121,7 @@ class TestTokenEstimate:
         )
 
     def test_cjk_counted_near_one_token_per_char(self):
-        """中文一字≈1 token，不能被"字符数/3"低估。
-
-        实测：旧实现把「你好世界」估成 1（实际 4，低估 4 倍），36 字中文句子
-        低估 3.1 倍。压缩阈值是窗口的 0.75，低估会让压缩迟迟不触发，
-        真触发时上下文早已超过上游窗口 → 直接 400（长中文会话必踩）。
-        """
+        """中文一字≈1 token，不能被"字符数/3"低估。"""
         assert Executor._estimate_tokens([{"role": "user", "content": "你好世界"}]) == 4
         assert Executor._estimate_tokens([{"role": "user", "content": "中" * 100}]) >= 90
 

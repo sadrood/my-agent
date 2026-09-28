@@ -1,9 +1,4 @@
-"""打包后的后端入口：等价 `python -m dashboard.server`，但可静音控制台日志。
-
-PyInstaller onefile 以本文件为入口（windowed 模式无控制台）：
-- 通过子进程环境变量传入端口（MY_AGENT_BACKEND_PORT）
-- MY_AGENT_QUIET=1 时把 uvicorn 日志降到 warning，避免无控制台时刷屏
-"""
+"""打包后的后端入口：等价 `python -m dashboard.server`，但可静音控制台日志。"""
 import os
 import sys
 

@@ -1,12 +1,5 @@
-"""
-file 工具 v3 测试：补齐被提示词承诺却从未实现的操作。
-
-背景（2026-09-15 漫剧任务实测）：
-- schema 与 executor 提示词一直教模型「写大文件用 file append 分段追加」，
-  但 action_map 里没有 append，模型照做只会拿到「未知操作」。
-- 模型想复制 5 张产物图片时：shutil 被 python 工具黑名单正确拦下，
-  而 file 工具只有 write（纯文本覆盖），于是无路可走、连续 3 轮瞎猜。
-"""
+"""file 工具 v3 测试：补齐被提示词承诺却从未实现的操作。
+而 file 工具只有 write（纯文本覆盖），于是无路可走、连续 3 轮瞎猜。"""
 import os
 
 import pytest
@@ -207,14 +200,7 @@ def test_copy_preserves_mtime(tool, tmp_path):
 # ----------------------------------------------------------------------
 
 class TestPathsWithSpaces:
-    """路径含空格时绝不能写错文件。
-
-    实测故障（2026-09-17 审计）：execute_json 曾把结构化参数拼成
-    "write <path> <content>" 再交给字符串解码按空格切分，于是
-    {"path": "...\\My Documents\\notes.txt", "content": "hi"} 实际写出一个
-    名为 `My` 的文件、内容是 "Documents\\notes.txt hi"，**并且返回 success=True**。
-    静默写错文件比直接报错危险得多。
-    """
+    """路径含空格时绝不能写错文件。"""
 
     def test_write_with_space_in_path(self, tool, tmp_path):
         d = tmp_path / "My Documents"
@@ -286,11 +272,7 @@ class TestPathsWithSpaces:
 
 
 class TestWriteDoesNotTranslateNewlines:
-    """`file write/append` 不能做隐式换行翻译，否则与 `edit` 策略相反。
-
-    实测故障（2026-09-22 审计）：文本模式在 Windows 上把 LF 自动翻成 CRLF，而
-    `edit` 保留文件原有风格 —— 两个写工具交替使用会把整个文件的行尾来回翻。
-    """
+    """`file write/append` 不能做隐式换行翻译，否则与 `edit` 策略相反。"""
 
     def test_write_keeps_lf(self, tool, tmp_path):
         p = tmp_path / "a.txt"

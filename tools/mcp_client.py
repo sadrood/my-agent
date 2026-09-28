@@ -1,16 +1,4 @@
-"""
-MCP (Model Context Protocol) 客户端模块。
-让 Agent 能够连接外部 MCP 服务器，动态发现和调用远程工具。
-
-支持传输方式：
-- stdio: 启动子进程通信
-- SSE (Server-Sent Events): HTTP 流式传输
-
-设计原则：
-- MCP 工具自动注册到 ToolManager，Agent 像使用本地工具一样使用 MCP 工具
-- 自动重连机制
-- 支持多 MCP 服务器同时连接
-"""
+"""MCP (Model Context Protocol) 客户端模块。"""
 import json
 import os
 import shutil
@@ -25,14 +13,7 @@ from tools.base import BaseTool, ToolResult
 
 
 def _resolve_argv(command: str, args: list) -> tuple:
-    """把 MCP 启动命令解析成可 Popen 的 (argv_or_string, use_shell)。
-
-    Windows 下 CreateProcess 不能直接跑 .cmd/.bat（npx 实际是 npx.cmd），
-    必须经 cmd.exe 执行。这里用 shell=True + list2cmdline 引号化字符串，
-    交给 cmd.exe /c 处理——比手动拼 ['cmd.exe','/d','/s','/c',cmdline]
-    更稳（后者会因反斜杠转义引号而报"不是内部或外部命令"）。
-    list2cmdline 对参数正确引号化，参数侧无注入风险。
-    """
+    """把 MCP 启动命令解析成可 Popen 的 (argv_or_string, use_shell)。"""
     if os.name != "nt":
         return [command] + list(args), False
     resolved = shutil.which(command) or command
@@ -97,9 +78,7 @@ class MCPTool(BaseTool):
                 return ToolResult(success=True, output="\n".join(texts) or str(result))
 
         if result is None:
-            # 旧代码在这里返回 success=True, output="None" —— 超时/进程崩溃/
-            # JSON-RPC 报错/管道断全都被伪装成"成功"，模型拿到一个字面量
-            # "None" 完全无法判断发生了什么（本仓库反复踩过的"无用报错"坑）。
+            # 旧代码在这里返回 success=True, output="None" —— 超时/进程崩溃/JSON-RPC 报错/管道断全都被伪装成"成功"，模型拿到一个字面量"None" 完全无法判断发生了什么（本仓库反复遇到过的"无用报错"坑）。
             return ToolResult(
                 success=False, output="",
                 error=("MCP 工具无响应：请求超时、服务器未连接或已崩溃。"
@@ -110,9 +89,7 @@ class MCPTool(BaseTool):
 
     def execute(self, input_str: str) -> ToolResult:
         """旧文本协议入口：input 为 JSON 对象字符串或 key=value 逗号分隔，转 execute_json。
-
-        BaseTool 抽象方法要求实现（此前缺失导致 MCPTool 无法实例化、工具注册崩溃）。
-        """
+        BaseTool 抽象方法要求实现（之前缺失导致 MCPTool 无法实例化、工具注册崩溃）。"""
         try:
             if not input_str.strip():
                 return ToolResult(success=False, output="", error="参数为空。")
@@ -157,15 +134,7 @@ class MCPTool(BaseTool):
 
 
 class MCPClient:
-    """
-    MCP 协议客户端。
-    
-    用法:
-        client = MCPClient()
-        client.connect_stdio("my-server", "python", ["server.py"])
-        tools = client.list_tools()
-        result = client.call_tool("tool_name", {"arg": "value"})
-    """
+    """MCP 协议客户端。"""
 
     def __init__(self, tool_manager=None):
         self._servers: Dict[str, Dict[str, Any]] = {}
@@ -188,18 +157,7 @@ class MCPClient:
 
     def connect_stdio(self, server_name: str, command: str, args: list = None,
                       env: dict = None) -> bool:
-        """
-        通过 stdio 连接 MCP 服务器。
-        
-        Args:
-            server_name: 服务器别名
-            command: 启动命令（如 "python" / "node" / "npx"）
-            args: 命令参数列表
-            env: 额外环境变量
-        
-        Returns:
-            连接是否成功
-        """
+        """通过 stdio 连接 MCP 服务器。"""
         args = args or []
         
         try:
@@ -209,14 +167,10 @@ class MCPClient:
                 shell=use_shell,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                # stderr 必须给 DEVNULL：stdio MCP 服务器（尤其 npx/node 系）
-                # 打日志很勤，管道只开不读的话，写满 ~64KB 缓冲区后子进程会
-                # 永久阻塞在 write 上，此后每个请求都超时——表现为"工具返回
-                # None"这种毫无线索的失败。
+                # stderr 必须给 DEVNULL：stdio MCP 服务器（尤其 npx/node 系）打日志很勤，管道只开不读的话，写满 ~64KB 缓冲区后子进程会永久阻塞在 write 上。
                 stderr=subprocess.DEVNULL,
                 text=True,
-                # 关键：MCP 走 UTF-8 JSON-RPC；Windows 下 text=True 默认 cp936，
-                # 不指定会把手套帧解成乱码导致握手失败（此前 playwright-mcp 连不上）
+                # 关键：MCP 走 UTF-8 JSON-RPC；Windows 下 text=True 默认 cp936，不指定会把手套帧解成乱码导致握手失败（之前 playwright-mcp 连不上）
                 encoding="utf-8",
                 errors="replace",
                 env={**os.environ, **(env or {})},
@@ -230,8 +184,7 @@ class MCPClient:
             "process": process,
             "command": command,
             "args": args,
-            # 每台服务器各自一把锁：此前所有服务器共用实例级 _lock，
-            # 一台慢服务器会把其它服务器的请求一起卡住（最长 15s/次）
+            # 每台服务器各自一把锁：之前所有服务器共用实例级 _lock，一台慢服务器会把其它服务器的请求一起卡住（最长 15s/次）
             "name": server_name,
             "lock": threading.Lock(),
         }
@@ -259,8 +212,7 @@ class MCPClient:
         # 发现工具
         found = self._discover_tools(server_name)
         if found is None:
-            # 连上了但 tools/list 没成功：不能报"已连接"就完事 —— 安装器会据此把这条
-            # 配置写进持久化、重启后自动重连，而实际一个工具都没有（2026-09-22 审计）。
+            # 连上了但 tools/list 没成功：不能报"已连接"就完事 —— 安装器会据此把这条配置写进持久化、重启后自动重连，而实际一个工具都没有。
             print(f"[MCP] 已建立连接，但 tools/list 失败：服务器 '{server_name}' 的工具未注册。")
             return False
         print(f"[MCP] 已连接服务器 '{server_name}' ({command} {' '.join(args)})")
@@ -268,14 +220,7 @@ class MCPClient:
         return True
 
     def connect_sse(self, server_name: str, url: str, headers: dict = None) -> bool:
-        """
-        通过 SSE 连接 MCP 服务器（实验性）。
-        
-        Args:
-            server_name: 服务器别名
-            url: SSE 端点 URL
-            headers: 额外 HTTP 头
-        """
+        """通过 SSE 连接 MCP 服务器（实验性）。"""
         try:
             import urllib.request
 
@@ -332,12 +277,7 @@ class MCPClient:
     # ================================================================
 
     def _discover_tools(self, server_name: str):
-        """发现并注册工具。返回注册数量；`tools/list` **调用失败**时返回 None。
-
-        调用方据此区分「服务器本来就没有工具」和「根本没调通」—— 旧实现两者都只是
-        静默 `return`，`connect_stdio` 照样打印「已连接」并返回 True，安装器据此
-        写进持久化配置，用户以为接上了、实际 0 个工具（2026-09-22 审计）。
-        """
+        """发现并注册工具。返回注册数量；`tools/list` **调用失败**时返回 None。"""
         result = self._send_request(server_name, "tools/list", {})
         if result is None:
             return None
@@ -366,20 +306,8 @@ class MCPClient:
         return registered
 
     def call_tool(self, tool_full_name: str, arguments: dict) -> Any:
-        """
-        调用 MCP 工具。
-        
-        Args:
-            tool_full_name: 完整工具名（mcp_<server>_<tool>）
-            arguments: 工具参数
-        """
-        # 从工具名提取服务器名。
-        # ⚠️ 不能简单按第一个 `_` 切：服务器名本身可能含下划线，而工具的注册名是
-        # `mcp_{server}_{tool}`。旧写法 `tool_full_name[4:].split("_", 1)` 对
-        # `mcp_my_fs_read_file` 得到 `["my", "fs_read_file"]` → 服务器名解成 "my"
-        # 查不到、`_send_request` 返回 None，调用方只看到"MCP 工具无响应"，
-        # 与超时/崩溃无法区分（2026-09-22 审计）。改为在**已连接的服务器名**里
-        # 找最长前缀匹配。
+        """调用 MCP 工具。"""
+        # 从工具名提取服务器名。⚠️ 不能简单按第一个 `_` 切：服务器名本身可能含下划线，而工具的注册名是 `mcp_{server}_{tool}`。
         if not tool_full_name.startswith("mcp_"):
             return {"isError": True,
                     "content": [{"text": f"无效的 MCP 工具名: {tool_full_name}"}]}
@@ -454,12 +382,7 @@ class MCPClient:
                 print(f"[MCP] 发送通知失败: {e}")
 
     def _stdio_request(self, server: dict, request: dict, timeout: float = 15.0) -> Optional[dict]:
-        """通过 stdio 发送请求并获取响应。
-
-        健壮性（此前 playwright-mcp 等连不上的根因）：
-        - 跳过服务器启动横幅/日志等非 JSON 行，直到读到合法 JSON-RPC 响应；
-        - 读响应带超时（首次 npx 下载包 / 服务器慢时不再无限阻塞）。
-        """
+        """通过 stdio 发送请求并获取响应。"""
         process = server.get("process")
         if process is None or process.poll() is not None:
             print("[MCP] stdio 进程已退出")
@@ -477,10 +400,7 @@ class MCPClient:
                 while time.time() < deadline:
                     line = self._readline_timeout(process.stdout, deadline)
                     if line is None:
-                        # 超时即判定该服务器已不可用并断开：
-                        # 读者线程仍阻塞在 readline 上并持有管道，若不断开，
-                        # 迟到的响应会被这个已废弃的请求吃掉，下一个请求
-                        # 永远等不到自己的回包（协议错位）。
+                        # 超时即判定该服务器已不可用并断开：读者线程仍阻塞在 readline 上并持有管道，若不断开，迟到的响应会被这个已废弃的请求吃掉，下一个请求永远等不到自己的回包（协议错位）。
                         print(f"[MCP] 等待响应超时（{timeout}s），断开该服务器")
                         self._mark_dead(server)
                         return None
@@ -491,8 +411,7 @@ class MCPClient:
                         msg = json.loads(line.strip())
                     except json.JSONDecodeError:
                         continue                         # 启动横幅/日志，跳过
-                    # 只认"回的是我们这条请求"的响应；服务器推送的通知（无 id）
-                    # 或其它消息一律跳过，否则 tools/list 会被通知吃成空结果
+                    # 只认"回的是我们这条请求"的响应；服务器推送的通知（无 id）或其它消息一律跳过，否则 tools/list 会被通知吃成空结果
                     if msg.get("id") != request_id:
                         continue
                     if msg.get("error"):
@@ -523,10 +442,7 @@ class MCPClient:
     @staticmethod
     def _readline_timeout(stream, deadline: float) -> Optional[str]:
         """带截止时间的 readline：后台线程读取 + 队列等待，超时返回 None。
-
-        Windows 管道没有非阻塞 readline，只能用读者线程；MCP 请求串行
-        （受 _lock 保护），超时后由上层 disconnect 清理，避免协议错位。
-        """
+        （受 _lock 保护），超时后由上层 disconnect 清理，避免协议错位。"""
         q = queue.Queue(maxsize=1)
 
         def _read():

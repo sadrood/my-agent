@@ -1,20 +1,5 @@
-"""
-视频剪辑与合成模块（ffmpeg）。
-
-用于"图 + 运镜 + 配音"路线（漫剧/短视频）：
-    kenburns   静态图 → 带推拉摇移的短视频（零视频配额消耗）
-    concat     多段视频 → 拼接为一个完整视频
-    add_audio  给视频叠配音/BGM（并可选补齐时长差）
-    trim       裁剪片段
-    probe      读取时长/分辨率（用于对齐画面与配音）
-    subtitle   烧录字幕（可选）
-
-统一输出规格（保证片段可直接拼接，无需重编码）：
-    分辨率 1280x720（可配）、25fps、libx264、yuv420p、aac。
-
-依赖：ffmpeg / ffprobe（PATH 或 FFMPEG_PATH 环境变量）。
-配置：config.VIDEO_EDIT_CONFIG（环境变量 VIDEO_EDIT_*）。
-"""
+"""视频剪辑与合成模块（ffmpeg）。
+依赖：ffmpeg / ffprobe（PATH 或 FFMPEG_PATH 环境变量）。"""
 import glob
 import json
 import os
@@ -31,13 +16,7 @@ _STATIC_BIN_CACHE: dict = {}
 
 
 def _find_binary(name: str) -> Optional[str]:
-    """定位 ffmpeg/ffprobe，按可靠性依次尝试：
-
-    1. 显式配置（FFMPEG_PATH 环境变量 / VIDEO_EDIT_CONFIG.ffmpeg_path）
-    2. PATH
-    3. static-ffmpeg（pip 包，自带二进制；winget 在受限网络下常卡住，这是可靠回退）
-    4. winget 安装目录（Gyan.FFmpeg）
-    """
+    """定位 ffmpeg/ffprobe，按可靠性依次尝试："""
     explicit = os.getenv("FFMPEG_PATH", "") or VIDEO_EDIT_CONFIG.get("ffmpeg_path", "")
     if explicit:
         cand = os.path.join(explicit, name + (".exe" if os.name == "nt" else ""))
@@ -189,10 +168,7 @@ class VideoEditor:
 
     def extract_frames(self, video: str, count: int = 6, max_width: int = 768,
                        out_dir: str = None) -> List[str]:
-        """等间隔抽 count 帧存成 jpg，返回按时间顺序排列的路径列表。
-
-        out_dir 默认新建系统临时目录，**调用方负责清理**。
-        """
+        """等间隔抽 count 帧存成 jpg，返回按时间顺序排列的路径列表。"""
         if not video or not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
         # 显式的 0 按文档收敛到 1：`count or 6` 会把它当成"没给"
@@ -228,14 +204,7 @@ class VideoEditor:
 
     def kenburns(self, image: str, duration: float = 4.0,
                  motion: str = "zoom_in", output: str = None) -> dict:
-        """把一张静态图变成带推拉摇移的短视频。
-
-        这是"图 + 运镜"路线的核心：不消耗视频生成配额，成本近乎为零，
-        且画面完全由你（图像模型 + 参考图）控制，角色一致性更好。
-
-        motion: zoom_in / zoom_out / pan_left / pan_right / pan_up /
-                pan_down / static
-        """
+        """把一张静态图变成带推拉摇移的短视频。"""
         if not os.path.exists(image):
             raise VideoEditError(f"图片不存在: {image}")
         motion = (motion or "zoom_in").strip().lower()
@@ -249,8 +218,7 @@ class VideoEditor:
 
         fps = self.fps
         frames = max(2, int(duration * fps))
-        # 按输入图方向自动选输出规格：竖图→竖屏（720x1280），横图→默认（1280x720）。
-        # 之前写死 self.width x self.height，竖图会被压扁/裁切成横屏（漫剧全是 9:16）。
+        # 按输入图方向自动选输出规格：竖图→竖屏（720x1280），横图→默认（1280x720）。之前写死 self.width x self.height，竖图会被压扁/裁切成横屏（漫剧全是 9:16）。
         w, h = self.width, self.height
         try:
             info = self.probe(image)
@@ -355,16 +323,8 @@ class VideoEditor:
                   bgm: str = None, bgm_volume: float = 0.25,
                   keep_original: bool = False) -> dict:
         """给视频合成音轨：配音（+ 可选 BGM），默认**丢弃原视频声音**。
-
-        2026-09-17 修复三处实测问题：
-        - 层次可控（原「混音混入原声」）：`audio` 是主层，`bgm` 是背景层；
-          原视频音轨默认丢弃，只有 replace=False 或 keep_original=True 才混入。
-          漫剧因此可以「只混配音 + BGM 两层」，不再出现原声/环境音糊在一起。
-        - 时长以画面为准（原「音轨长于画面 → 容器被拉长、末尾冻帧」）：
-          统一 `-t <画面时长>`；音轨更短且 pad_audio=True 时补静音。
-        - 采样统一（原「混音后降级成 24k 单声道」）：所有音轨先
-          `aformat=44100/立体声`，输出 `-ar 44100`，避免被 TTS 的 24kHz 单声道拖累。
-        """
+        原视频音轨默认丢弃，只有 replace=False 或 keep_original=True 才混入。
+        `aformat=44100/立体声`，输出 `-ar 44100`，避免被 TTS 的 24kHz 单声道拖累。"""
         if not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
         if not os.path.exists(audio):
@@ -454,7 +414,7 @@ class VideoEditor:
     # ------------------------------------------------------------
     # 字幕：SRT → 自建 ASS → ass 滤镜烧录
     # ------------------------------------------------------------
-    # 为什么不用 `subtitles` 滤镜直接烧 SRT（2026-09-17 实测结论）：
+    # 为什么不用 `subtitles` 滤镜直接烧 SRT（结论）：
     #   SRT 没有 PlayRes，libass 按默认 288 高度基准解释 force_style 的 FontSize，
     #   在 1280 高的视频上 FontSize=41 会被放大到约 350px 高、飘到屏幕中间
     #   （正是"竖屏字幕占半屏"）；且 original_size 对 force_style 无效。
@@ -516,13 +476,7 @@ class VideoEditor:
                  font_size: int = None, font_name: str = "SimHei",
                  margin_v: int = None, font_size_percent: float = 0.032,
                  outline: int = 2) -> dict:
-        """烧录字幕（SRT）。
-
-        - 自建 ASS（PlayRes = 视频尺寸），字号/边距即真实像素：横竖屏观感一致
-        - `font_size` 缺省按视频高度百分比换算（默认 3.2%）：720x1280≈41px、1280x720≈23px
-        - `margin_v` 缺省为高度 6%（贴底居中，不压画面主体）
-        - 字体名带空格导致失败时自动回退去空格字体，并在返回值里记录
-        """
+        """烧录字幕（SRT）。"""
         if not os.path.exists(video):
             raise VideoEditError(f"视频不存在: {video}")
         if not os.path.exists(srt):

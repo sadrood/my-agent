@@ -1,20 +1,5 @@
-"""
-Hooks 机制：工具调用前后回调（fail-open，最小可用实现）。
-
-用法：
-    from agent.hooks import get_hook_manager, reset_hook_manager
-
-    mgr = get_hook_manager()                 # 单例，按 HOOKS_CONFIG 配置
-    mgr.on_pre_tool_use("edit", {...})       # 工具执行前
-    mgr.on_post_tool_use("edit", result)     # 工具执行后
-
-hooks_file 指定的 Python 模块可定义（均为可选）：
-    def on_pre_tool_use(tool_name: str, arguments: dict) -> None
-    def on_post_tool_use(tool_name: str, result) -> None
-
-任何回调异常只记录 warning，绝不阻断主流程（fail-open）；
-文件不存在/加载失败同样静默降级。
-"""
+"""Hooks 机制：工具调用前后回调（fail-open，最小可用实现）。
+文件不存在/加载失败同样静默降级。"""
 
 import hashlib
 import importlib.util

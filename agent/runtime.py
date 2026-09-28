@@ -1,10 +1,4 @@
-"""
-外部 Agent Runtime：把外部 CLI / 自定义命令当作执行引擎（多 Runtime 思路借鉴同类实现）。
-
-桌面端 /api/run 派发到所选 runtime；外部 CLI 以子进程启动，
-stdout 逐行桥接为 stream_delta 事件，结束时 emit answer + run_end。
-内置 Agent（myagent）不在这里——那是 Python 单循环，走原有路径。
-"""
+"""外部 Agent Runtime：把外部 CLI / 自定义命令当作执行引擎（多 Runtime 思路借鉴同类实现）。"""
 import os
 import shutil
 import subprocess
@@ -73,9 +67,7 @@ def run_external(runtime: str, goal: str, cwd: str | None, on_event,
                  stop_event=None, cfg: dict | None = None) -> str:
     """启动外部 CLI 执行任务，把输出桥接为事件。返回最终文本。"""
     if runtime == "claude-acp":
-        # 完整 ACP 协议：与外部 agent 双向结构化通信（文本/思考/工具/审批）。
-        # 模型默认用网关实际服务的默认模型（避免网关
-        # 未知模型 503）；可用 MY_AGENT_ACP_MODEL 或 runtime_config.model 覆盖。
+        # 完整 ACP 协议：与外部 agent 双向结构化通信（文本/思考/工具/审批）。模型默认用网关实际服务的默认模型（避免网关未知模型 503）；可用 MY_AGENT_ACP_MODEL 或 runtime_config.model 覆盖。
         from agent.acp import run_acp_session
         model = (cfg or {}).get("model") or os.getenv("MY_AGENT_ACP_MODEL") or "deepseek-flash"
         return run_acp_session(goal, cwd or os.getcwd(), on_event, stop_event, model=model)

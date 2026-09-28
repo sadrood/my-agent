@@ -33,12 +33,7 @@ def test_resume_budget_keys_present():
 
 
 class TestBrowserSessionContinuity:
-    """轮数上限/中断后**续跑不能丢浏览器会话**。
-
-    现象：达到轮数上限后让 agent 继续，它为了"干净开始"而 close + launch
-    重开浏览器，已打开的页面/会话全丢。修复：把浏览器会话状态注入
-    交接清单与续跑指令，并明确"勿关闭、勿重启"。
-    """
+    """轮数上限/中断后**续跑不能丢浏览器会话**。"""
 
     def _agent(self):
         from agent.agent import Agent, AgentConfig
@@ -62,13 +57,7 @@ class TestBrowserSessionContinuity:
         assert "仍在运行" in note
 
     def test_note_does_not_launch_browser(self, monkeypatch):
-        """回归：写交接备注绝不能顺手把浏览器拉起来。
-
-        实测故障：`_pages` 里只剩残留引用（底层连接已断）时，取 URL 会走
-        `_ensure_page → _launch`，于是这条只读备注真的开出一个**有头** Chromium
-        并占用用户 profile——单测跑一次就往 memory/browser_profile 里塞十几 MB
-        （该目录实测已涨到 250MB）。
-        """
+        """回归：写交接备注绝不能顺手把浏览器拉起来。"""
         a = self._agent()
         b = a.tool_manager.get_tool("browser")
         b._pages = [object()]
@@ -112,3 +101,41 @@ class TestBrowserSessionContinuity:
         monkeypatch.setattr(a.llm, "chat", lambda *args, **kw: "")
         text = a._handoff_for_incomplete("改代码", "已达到任务最大操作轮数（80）", "未完成")
         assert "不要 close" not in text
+
+
+class TestIncompleteReasonFromStopReason:
+    """交接原因必须来自真实 stop_reason：上限报上限，中断报中断。"""
+
+    def _reason(self, result):
+        from agent.agent import Agent
+        return Agent._incomplete_reason(result)
+
+    def test_interrupted_reason_mentions_upstream_not_round_cap(self):
+        text = self._reason({
+            "stop_reason": "interrupted", "ops": 20,
+            "budget": {"stop_reason": "interrupted", "used": 20, "limit": 30, "hard_cap": 0,
+                       "interrupt_error": "Error code: 429 - tpm exhausted"},
+        })
+        assert "模型服务中断" in text
+        assert "达到任务最大操作轮数" not in text
+        assert "429" in text
+
+    def test_exhausted_reason_reports_the_limit(self):
+        text = self._reason({
+            "stop_reason": "exhausted", "ops": 12,
+            "budget": {"stop_reason": "exhausted", "used": 12, "limit": 80, "extensions": 5},
+        })
+        assert "达到任务最大操作轮数" in text
+        assert "上限 80 轮" in text and "续期 5 次" in text
+
+    def test_stalled_reason_reports_spinning_turns(self):
+        text = self._reason({
+            "stop_reason": "stalled", "ops": 7,
+            "budget": {"stop_reason": "stalled", "used": 7, "spinning_turns": 5},
+        })
+        assert "原地打转" in text and "5 轮" in text
+
+    def test_unknown_reason_labels_used_not_cap(self):
+        text = self._reason({"ops": 9, "budget": {}})
+        assert "已跑 9 轮" in text
+        assert "达到任务最大操作轮数" not in text

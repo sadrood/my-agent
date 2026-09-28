@@ -1,8 +1,4 @@
-"""
-Computer Use 模块。
-提供精确的鼠标、键盘、拖拽操作，让 Agent 能够像人类一样精确操控电脑。
-这些命令作为 BrowserTool 的扩展命令集成。
-"""
+"""Computer Use 模块。"""
 import base64
 import ctypes
 import os
@@ -15,24 +11,14 @@ from tools.cursor_overlay import get_overlay
 
 
 class ComputerUseMixin:
-    """
-    Computer Use 混入类，为 BrowserTool 添加精确鼠标/键盘操作能力。
-    
-    设计原则：
-    - 坐标系统：相对于视口的像素坐标，(0,0) 为左上角
-    - 所有操作都是"一步到位"，Agent 描述意图，模块执行
-    - 支持拖拽、组合键、精确定位点击等高级操作
-    """
+    """Computer Use 混入类，为 BrowserTool 添加精确鼠标/键盘操作能力。"""
 
     # ================================================================
     # 鼠标精确操作
     # ================================================================
 
     def _mousemove(self, args: str) -> ToolResult:
-        """
-        移动鼠标到指定坐标。
-        格式: mousemove <x> <y>
-        """
+        """移动鼠标到指定坐标。"""
         coords = self._parse_coords(args)
         if coords is None:
             return ToolResult(success=False, output="", 
@@ -52,11 +38,7 @@ class ComputerUseMixin:
             return ToolResult(success=False, output="", error=f"鼠标移动失败: {str(e)}")
 
     def _clickat(self, args: str) -> ToolResult:
-        """
-        在指定坐标处点击鼠标。
-        格式: clickat <x> <y> [button]
-        button: left(默认) / right / middle
-        """
+        """在指定坐标处点击鼠标。"""
         coords, button = self._parse_coords_with_button(args)
         if coords is None:
             return ToolResult(success=False, output="", 
@@ -76,10 +58,7 @@ class ComputerUseMixin:
             return ToolResult(success=False, output="", error=f"坐标点击失败: {str(e)}")
 
     def _dblclickat(self, args: str) -> ToolResult:
-        """
-        在指定坐标处双击鼠标。
-        格式: dblclickat <x> <y>
-        """
+        """在指定坐标处双击鼠标。"""
         coords = self._parse_coords(args)
         if coords is None:
             return ToolResult(success=False, output="", 
@@ -103,12 +82,7 @@ class ComputerUseMixin:
     # ================================================================
 
     def _drag(self, args: str) -> ToolResult:
-        """
-        从起点拖拽到终点。
-        格式: drag <x1> <y1> <x2> <y2> [steps]
-        steps: 可选，移动步数（默认10，越多越平滑）
-        示例: drag 100 200 500 600 20
-        """
+        """从起点拖拽到终点。"""
         parts = args.strip().split()
         if len(parts) < 4:
             return ToolResult(success=False, output="",
@@ -153,16 +127,7 @@ class ComputerUseMixin:
     # ================================================================
 
     def _keycombo(self, args: str) -> ToolResult:
-        """
-        按下键盘组合键。
-        格式: keycombo <键1>+<键2>[+<键3>]
-        示例: keycombo Control+A   (全选)
-              keycombo Control+C   (复制)
-              keycombo Control+V   (粘贴)
-              keycombo Shift+Tab   (反向切换)
-              keycombo Alt+F4      (关闭窗口)
-        支持: Control/Shift/Alt/Meta + 任意键
-        """
+        """按下键盘组合键。"""
         args = args.strip()
         if not args:
             return ToolResult(success=False, output="", 
@@ -229,12 +194,7 @@ class ComputerUseMixin:
     # ================================================================
 
     def _mousescroll(self, args: str) -> ToolResult:
-        """
-        在指定位置滚动鼠标滚轮。
-        格式: mousescroll <x> <y> <delta_x> <delta_y>
-        delta_y 正数向下，负数向上
-        示例: mousescroll 500 400 0 -300   (在500,400处向上滚300)
-        """
+        """在指定位置滚动鼠标滚轮。"""
         parts = args.strip().split()
         if len(parts) < 2:
             return ToolResult(success=False, output="",
@@ -271,11 +231,7 @@ class ComputerUseMixin:
     # ================================================================
 
     def _type_direct(self, args: str) -> ToolResult:
-        """
-        直接在当前焦点位置输入文本（无需选择器）。
-        格式: typedirect <文本>
-        适用场景：已经点击或聚焦到输入框后直接输入。
-        """
+        """直接在当前焦点位置输入文本（无需选择器）。"""
         args = args.strip()
         if not args:
             return ToolResult(success=False, output="", error="输入文本为空。")
@@ -382,10 +338,7 @@ _LAST_SYNTHETIC_MS = 0.0
 
 
 def _now_ms() -> int:
-    """与 GetLastInputInfo 同基准的毫秒时钟（GetTickCount，开机起算）。
-
-    time.time() 是纪元毫秒，基准不同会让"多久没输入"永远算错。
-    """
+    """与 GetLastInputInfo 同基准的毫秒时钟（GetTickCount，开机起算）。"""
     try:
         import ctypes
         return int(ctypes.windll.kernel32.GetTickCount()) & 0xFFFFFFFF
@@ -417,11 +370,7 @@ def _get_last_input_ms() -> int:
 
 def should_yield_to_user(last_synthetic_ms: float, last_input_ms: int,
                          now_ms: int, threshold_ms: int = 700) -> bool:
-    """是否应让路给用户（纯函数，便于单测）。
-
-    - 最近 threshold 内有输入，且该输入**不是**我们刚注入的 → 用户在操作 → 让路
-    - 处理 32 位 tick 回绕
-    """
+    """是否应让路给用户（纯函数，便于单测）。"""
     if not last_input_ms:
         return False
     age = (now_ms - last_input_ms) & 0xFFFFFFFF
@@ -461,11 +410,7 @@ def _os_click(x: int, y: int, button: str = "left", double: bool = False) -> boo
 
 
 def _release_all_inputs() -> None:
-    """兜底释放：左右中键抬起 + 修饰键抬起。
-
-    Agent 操作被中断（用户停止/取消/异常）时，OS 里可能残留按下的鼠标键或
-    Ctrl/Alt/Shift，表现为"鼠标失灵/一直在拖拽"。每个动作前后各调一次即可自愈。
-    """
+    """兜底释放：左右中键抬起 + 修饰键抬起。"""
     try:
         u = _user32()
         for flag in (0x0004, 0x0010, 0x0040):       # LEFTUP / RIGHTUP / MIDDLEUP
@@ -726,9 +671,7 @@ class DesktopTool(BaseTool):
             return ToolResult(success=False, output="",
                               error=f"未知 action: {action}。可用: {', '.join(handlers)}")
         try:
-            # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，
-            # 让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。
-            # 用户优先：检测到用户正在动鼠标/敲键盘 → 等待其停下；仍不停则放弃本次动作
+            # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。用户优先：检测到用户正在动鼠标/敲键盘 → 等待其停下；仍不停则放弃本次动作
             if _yield_enabled() and action in ("click", "type", "key", "scroll"):
                 wait_ms = int(os.getenv("COMPUTER_YIELD_WAIT_MS", "5000"))
                 waited = 0
@@ -761,8 +704,7 @@ class DesktopTool(BaseTool):
         title = _active_window_title()
         question = str(args.get("question", "") or "").strip() or _COMPUTER_SCREEN_QUESTION
 
-        # 视觉模型不可用/失败时降级到本地 OCR：桌面截图的价值大半就是"屏幕上写了什么"，
-        # 因为一次多模态调用超时就整个放弃（用户痛点）是不可接受的。
+        # 视觉模型不可用/失败时降级到本地 OCR：桌面截图的价值大半就是"屏幕上写了什么"，因为一次多模态调用超时就整个放弃（用户痛点）是不可接受的。
         def _ocr_fallback(why: str) -> Optional[ToolResult]:
             try:
                 from models.ocr import auto_fallback_enabled, recognize_image

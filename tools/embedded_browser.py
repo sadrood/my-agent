@@ -1,15 +1,4 @@
-"""
-内嵌浏览器工具：Agent 的 browser 命令转发到桌面端侧栏的 Electron <webview>。
-
-桌面端模式下，Electron 主进程会给后端注入环境变量
-MY_AGENT_EMBEDDED_BROWSER_URL（HTTP 桥地址，仅 127.0.0.1 可达），
-ToolManager 检测到后用本工具替代独立 Playwright 浏览器：
-Agent 操控的页面就是用户在侧栏「浏览器」标签里看到的页面——所见即所控。
-
-- 命令协议与 BrowserTool 完全一致（对 Agent 透明，提示词无需改动）；
-- 不支持多标签/弹窗类命令（单标签 webview），返回引导性错误；
-- 桥不可达时（纯 CLI 场景误启用）报错并提示检查桌面端是否在运行。
-"""
+"""内嵌浏览器工具：Agent 的 browser 命令转发到桌面端侧栏的 Electron <webview>。"""
 import json as _json
 import time
 import urllib.request
@@ -20,23 +9,15 @@ from config import BROWSER_CONFIG
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8091/browser"
 
-# 探测结果缓存：桥离线时每次探测都要等连接超时(~0.8s)，而 ToolManager 会被
-# 反复创建（每个测试、每次工具管理器重建）→ 累积拖慢启动与测试套件。
-# TTL 内直接复用上次结果。桌面端场景不依赖探测（运行时注入
-# MY_AGENT_EMBEDDED_BROWSER_URL 直接走内嵌分支），故 TTL 取较长值。
+# 探测结果缓存：桥离线时每次探测都要等连接超时(~0.8s)，而 ToolManager 会被反复创建（每个测试、每次工具管理器重建）→ 累积拖慢启动与测试套件。 TTL 内直接复用上次结果。
 _PROBE_CACHE = {"at": 0.0, "ok": False}
 _PROBE_TTL = 60.0
 
 
 def probe_bridge(timeout: float = 0.8, use_cache: bool = True) -> bool:
     """探测桌面端内嵌浏览器桥是否在线（健康检查，快速失败）。
-
-    ToolManager 建浏览器工具时调用：桥在线 → 一律用内嵌浏览器，
     外部 Playwright 浏览器被禁用；离线（纯 CLI）→ 才允许外部浏览器。
-
-    use_cache=True 时在 TTL 内复用上次结果（避免反复等待连接超时）；
-    显式探测请传 use_cache=False。
-    """
+    use_cache=True 时在 TTL 内复用上次结果（避免反复等待连接超时）；"""
     import time as _time
     now = _time.time()
     if use_cache and (now - _PROBE_CACHE["at"]) < _PROBE_TTL:
@@ -72,12 +53,7 @@ class EmbeddedBrowserTool(BrowserTool):
 
     @property
     def description(self) -> str:
-        """在基类描述后补一句**实际能力**。
-
-        基类描述宣传的 newtab/switchtab/closetab/alert/elementinfo/drag 桥一律拒绝，
-        而桥真正支持的 open/switch 又不在枚举里 —— 模型按描述调 newtab 只会拿到
-        "内嵌浏览器不支持命令"，能用的命令它无从得知（2026-09-22 审计）。
-        """
+        """在基类描述后补一句**实际能力**。"""
         return (super().description
                 + chr(10) + "注意：桌面端内嵌浏览器是**单标签页、无弹窗**，" 
                   "只支持这些命令：" + "、".join(sorted(self._BRIDGE_COMMANDS)))

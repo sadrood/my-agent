@@ -1,18 +1,6 @@
-"""
-工具基类模块（v2：JSON Schema + 审批元数据，借鉴同类框架工具设计）。
-
-设计要点（与主流开源 agent 框架实现对齐）：
-1. 每个工具通过 ``schema`` 暴露 JSON Schema（function calling 格式），
-   LLM 以结构化参数调用，而不是解析自由文本。
-2. ``ToolResult`` 支持截断标记（truncated），超大输出只回喂摘要，节省 token。
-3. 每个工具声明审批元数据：
-   - risk_level: low / medium / high / blocked（风险等级，供 Guardian 与审批门使用）
-   - approval: auto / on-request（auto = 由审批策略统一决定；on-request = 工具主动要求批准）
-   - min_sandbox_mode: 该工具要求的最低沙箱等级（read-only / workspace-write / danger-full-access）
-
-向后兼容：所有旧工具仍然实现 ``execute(input_str)``（字符串接口）；
-新接口 ``execute_json(arguments)`` 默认把结构化参数转为字符串调用 ``execute``。
-"""
+"""工具基类模块：JSON Schema + 审批元数据。
+每个工具用 schema 暴露 function calling 参数，并声明 risk_level / approval / min_sandbox_mode。
+旧接口 execute(input_str) 保留；execute_json(arguments) 默认把结构化参数转成字符串。"""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict
@@ -27,7 +15,7 @@ RISK_LEVELS = {"low": 0, "medium": 1, "high": 2, "blocked": 3}
 
 @dataclass
 class ToolResult:
-    """工具执行结果（v2：支持截断标记）。"""
+    """工具执行结果：支持截断标记。"""
 
     success: bool
     output: str
@@ -61,17 +49,8 @@ class ApprovalRequest:
 
 
 class BaseTool(ABC):
-    """
-    工具基类（v2）。
-    所有工具（Terminal、File、Python、Browser 等）都需要继承此类。
-
-    子类必须实现：
-    - name / description
-    - execute(input_str)（旧字符串接口，保留兼容）
-    可选覆盖：
-    - schema（JSON Schema；默认基于 description 的占位 schema）
-    - execute_json(arguments)（结构化入口，默认转字符串）
-    - risk_level / approval / min_sandbox_mode（审批元数据）
+    """工具基类：所有工具都继承它。
+    子类必须实现 name / description / execute(input_str)；schema、execute_json、审批元数据可选覆盖。
     """
 
     # ---- 审批元数据（子类按需覆盖） ----
@@ -108,28 +87,17 @@ class BaseTool(ABC):
 
     @abstractmethod
     def execute(self, input_str: str) -> ToolResult:
-        """
-        执行工具（旧字符串接口，保留兼容）。
-
-        Args:
-            input_str: 工具输入参数（自然语言或结构化字符串）。
-
-        Returns:
-            ToolResult 对象。
-        """
+        """执行工具（旧字符串接口，保留兼容）。"""
         ...
 
     # ================================================================
-    # v2：JSON Schema 与结构化调用
+    # JSON Schema 与结构化调用
     # ================================================================
 
     @property
     def schema(self) -> dict:
-        """
-        工具的 JSON Schema（function calling 的 parameters 字段）。
-        子类应覆盖此属性提供精确 schema。
-
-        默认实现：接受一个可选的 "input" 字符串参数（向后兼容）。
+        """工具的 JSON Schema（function calling 的 parameters）；子类应覆盖。
+        默认接受一个可选 "input" 字符串参数（向后兼容）。
         """
         return {
             "type": "object",
@@ -143,12 +111,7 @@ class BaseTool(ABC):
         }
 
     def execute_json(self, arguments: Dict[str, Any]) -> ToolResult:
-        """
-        结构化入口：接收 LLM 传入的 JSON 参数，转为字符串调用 execute。
-
-        默认实现：把 arguments 序列化为字符串（或取 "input" 字段）。
-        子类应覆盖以生成精确的命令字符串。
-        """
+        """结构化入口：把 LLM 传入的 JSON 参数转成字符串调用 execute；子类应覆盖。"""
         if "input" in arguments:
             input_str = str(arguments["input"])
         elif arguments:
@@ -170,14 +133,9 @@ class BaseTool(ABC):
         }
 
     def build_approval_request(self, arguments: Dict[str, Any]) -> ApprovalRequest:
-        """根据结构化参数生成审批请求（子类可覆盖以细化风险/描述）。
-
-        注意**必须带上 `approval` 元数据**：`ApprovalPolicy.decide` 第 3 步判的是
-        `request.approval == "on-request"`，漏传就等于这个分支永不触发 ——
-        `DesktopTool`（`approval="on-request"`，操控真实鼠标键盘）因此被静默降级成
-        零确认执行（2026-09-22 审计）。子类覆写本方法时同样要带上；工具层还有 8 份
-        覆写，统一由 `ToolManager.build_approval_request` 兜底补全。
-        """
+        """根据结构化参数生成审批请求；子类覆写时必须带上 approval 元数据。
+        ApprovalPolicy.decide 判的是 request.approval == "on-request"，漏传等于该分支永不触发，
+        approval="on-request" 的工具会被静默降级成零确认执行。"""
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
@@ -188,14 +146,8 @@ class BaseTool(ABC):
         )
 
     def cancel(self) -> None:
-        """
-        Interrupt the currently running call (e.g. terminate a stuck
-        subprocess when the user presses "Stop").
-
-        Called by Executor from another thread once stop is requested;
-        default is a no-op. Subclasses that spawn external processes or
-        block for a long time should override this to free resources
-        promptly. Must be thread-safe: cancel() may enter concurrently.
+        """中断正在执行的调用（如用户按"停止"时终止卡住的子进程）。
+        默认空实现；会起外部进程或长时间阻塞的子类应覆盖，且必须线程安全。
         """
         return None
 
@@ -212,16 +164,7 @@ class BaseTool(ABC):
 
 
 def truncate_output(output: str, max_chars: int) -> tuple:
-    """
-    截断工具输出，返回 (截断后文本, 是否截断, 原始长度)。
-
-    Args:
-        output: 原始输出文本
-        max_chars: 最大字符数
-
-    Returns:
-        (text, truncated, original_length)
-    """
+    """截断工具输出，返回 (截断后文本, 是否截断, 原始长度)。"""
     if output is None:
         return "", False, 0
     original_length = len(output)

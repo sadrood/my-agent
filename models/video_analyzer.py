@@ -18,11 +18,7 @@ class VideoFrameAnalyzer:
 
     def compare_frames(self, before_base64: str, after_base64: str,
                        expected_action: str = "") -> str:
-        """对比操作前后两张截图的变化。
-
-        修过的坑：此前只把 before 图发给模型，却让模型"对比这两张截图"——
-        after 被静默丢弃，模型只能凭空编造变化（审计发现）。现在两张都发。
-        """
+        """对比操作前后两张截图的变化。"""
         if self.vision_model is None:
             return "视觉模型不可用。"
         images = [i for i in (before_base64, after_base64) if i]
@@ -49,10 +45,7 @@ class VideoFrameAnalyzer:
     def detect_anomaly(self, screenshot_base64: str, context: str = "") -> dict:
         """检测页面异常状态（弹窗、错误、加载失败等）。"""
         if self.vision_model is None:
-            # 检测**失败**必须能和"检测过、确实没问题"区分开：两者 has_anomaly 都是
-            # False，而调用方只看这个字段 —— 于是视觉模型挂掉时，agent 会在完全没做过
-            # 页面检查的情况下继续操作，用户和 rollout 里都看不到任何痕迹
-            # （2026-09-22 审计）。加一个显式标记让上层能说出来。
+            # 检测**失败**必须能和"检测过、确实没问题"区分开：两者 has_anomaly 都是 False，而调用方只看这个字段 —— 于是视觉模型挂掉时，agent 会在完全没做过页面检查的情况下继续操作。
             return {"has_anomaly": False, "type": "detect_failed",
                     "description": "视觉模型不可用", "detect_failed": True}
         question = (

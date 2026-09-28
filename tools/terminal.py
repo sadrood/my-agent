@@ -1,6 +1,6 @@
 import re
 """
-终端工具模块（v2：JSON Schema + 风险分级 + 后台任务）。
+终端工具模块：JSON Schema + 风险分级 + 后台任务。
 
 v2 变化：
 - schema 提供结构化参数 {"command": string, "background": bool}
@@ -22,8 +22,7 @@ from tools.terminal_session import TerminalSessionManager
 
 _IS_WINDOWS = platform.system() == "Windows"
 
-# 沙箱（AppContainer）内「程序/资源不可访问」类失败的识别特征：
-# 命中即回喂引导文案，避免模型在沙箱限制下反复盲试同一类命令
+# 沙箱（AppContainer）内「程序/资源不可访问」类失败的识别特征：命中即回喂引导文案，避免模型在沙箱限制下反复盲试同一类命令
 _SANDBOX_DENIED_MARKERS = (
     "拒绝访问", "access is denied", "access denied", "winerror 5", "0x80070005",
 )
@@ -95,7 +94,7 @@ def _win_unix_shim(command: str) -> str:
         pat, path = m.group(2), m.group(3)
         return "powershell -NoProfile -Command \"Select-String -Path '%s' -Pattern '%s'\"" % (path.replace("'", "''"), pat.replace("'", "''"))
 
-    # ---- 管道形式的 tail/head（此前未处理，是最高频的失败来源）----
+    # ---- 管道形式的 tail/head（之前未处理，是最高频的失败来源）----
     # 例：pytest tests -q 2>&1 | tail -15
     # cmd.exe 没有 tail/head，必须以管道结尾的形式识别。
     # 做法：内层仍用 `cmd /c` 执行原命令（保留 && / cd /d / 2>&1 等 cmd 语法），
@@ -122,9 +121,7 @@ def _win_unix_shim(command: str) -> str:
         return ("powershell -NoProfile -Command \"cmd /c '%s' 2>&1 | Select-Object -First 10\""
                 % inner.replace("'", "''"))
 
-    # `... | more [±N]`：cmd 内建分页在非交互管道里会让上游进程提前收到断管
-    # （pytest 因此报错退出、命令整体 ok=False，日志只剩前若干行）。
-    # 非交互执行不需要分页，直接去掉该管道，输出由工具层截断展示。
+    # `... | more [±N]`：cmd 内建分页在非交互管道里会让上游进程提前收到断管（pytest 因此报错退出、命令整体 ok=False，日志只剩前若干行）。非交互执行不需要分页，直接去掉该管道，输出由工具层截断展示。
     m = re.search(r"\|\s*more\b[^|]*$", cmd, re.IGNORECASE)
     if m:
         return cmd[:m.start()].rstrip()
@@ -166,10 +163,7 @@ class TerminalTool(BaseTool):
 
     def terminate_current(self) -> bool:
         """终止当前正在运行的前台命令（含其子进程树）。无可终止进程时返回 False。
-
-        先杀进程组（Windows 用 taskkill /T /F，POSIX 用 killpg），
-        失败降级 proc.terminate()，超时再 proc.kill()。
-        """
+        失败降级 proc.terminate()，超时再 proc.kill()。"""
         with self._proc_lock:
             proc = self._active_proc
         if proc is None or proc.poll() is not None:
@@ -267,10 +261,7 @@ class TerminalTool(BaseTool):
             return self._session_op(session_op)
         if session:
             return self._session_run(command)
-        # bg 子命令（list/output/kill）：function calling 路径此前缺少这条分支，
-        # 导致 `bg output job-xxx` 被当 shell 命令执行（"'output' 不是内部或
-        # 外部命令"），而 _start_background 的提示文本却在教模型这么用。
-        # 与字符串入口 execute() 保持一致。
+        # bg 子命令（list/output/kill）：function calling 路径之前缺少这条分支，导致 `bg output job-xxx` 被当 shell 命令执行（"'output' 不是内部或外部命令"）
         if command.lower().startswith("bg "):
             return self._bg_dispatch(command[3:].strip())
         return self._run_command(command, background=background)
@@ -346,9 +337,6 @@ class TerminalTool(BaseTool):
 
     def _session_run(self, command: str) -> ToolResult:
         # 安全检查与 _run_command 对齐（黑名单先于翻译，防止翻译产物绕过审查）。
-        # 此前这条路径两道复查都没有：既不过 CommandSafety.classify，也不进沙箱，
-        # 而 `session` 是 schema 里公开给模型的参数 —— 等于模型可以单方面放弃
-        # sandbox.py 承诺的 fail-closed（2026-09-22 审计）。
         from agent.approval import CommandSafety
         from agent.sandbox import sandbox_enabled
         if CommandSafety.classify(command) == "blocked":
@@ -358,9 +346,7 @@ class TerminalTool(BaseTool):
                 error=f"安全限制：命令 '{command[:100]}' 命中硬性黑名单，已拒绝执行。",
             )
         if sandbox_enabled():
-            # 持久会话是一个长驻 shell 进程，单条命令没法事后套 AppContainer；
-            # 放行就等于在"仅工作区可写、默认无网络"的承诺上开一个明文后门。
-            # fail-closed：宁可拒绝，让模型改用会正常进沙箱的普通前台命令。
+            # 持久会话是一个长驻 shell 进程，单条命令没法事后套 AppContainer；放行就等于在"仅工作区可写、默认无网络"的承诺上开一个明文后门。fail-closed：宁可拒绝，让模型改用会正常进沙箱的普通前台命令。
             return ToolResult(
                 success=False, output="",
                 error=("沙箱模式（SANDBOX_EXECUTION）下不支持持久终端会话：会话是长驻进程，"
@@ -391,15 +377,12 @@ class TerminalTool(BaseTool):
                 output="",
                 error=f"安全限制：命令 '{command[:100]}' 命中硬性黑名单，已拒绝执行。",
             )
-        # Windows：unix 单命令 → PowerShell 等价翻译（head/tail/sleep/grep，
-        # bg 前缀与尾 ' &' 剥离），覆盖前台/后台与会话路径，减少
-        # 「不是内部或外部命令」类失败
+        # Windows：unix 单命令 → PowerShell 等价翻译（head/tail/sleep/grep，bg 前缀与尾 ' &' 剥离），覆盖前台/后台与会话路径，减少「不是内部或外部命令」类失败
         if _IS_WINDOWS:
             command = _win_unix_shim(command)
         if background:
             return self._start_background(command)
-        # OS 级沙箱（可选，SANDBOX_EXECUTION=appcontainer）：前台命令进
-        # Windows AppContainer 执行；fail-closed，沙箱失败不回退明文执行。
+        # OS 级沙箱（可选，SANDBOX_EXECUTION=appcontainer）：前台命令进 Windows AppContainer 执行；fail-closed，沙箱失败不回退明文执行。
         from agent.sandbox import sandbox_enabled
         if sandbox_enabled():
             return self._run_in_sandbox(command)
@@ -434,8 +417,7 @@ class TerminalTool(BaseTool):
 
     def _run_foreground(self, command: str) -> ToolResult:
         try:
-            # Popen + 轮询：执行期间可响应停止信号（terminate_current）。
-            # 进程组隔离确保 shell=True 时子进程树能被整棵杀掉。
+            # Popen + 轮询：执行期间可响应停止信号（terminate_current）。进程组隔离确保 shell=True 时子进程树能被整棵杀掉。
             popen_kwargs = dict(
                 shell=True,
                 stdout=subprocess.PIPE,
@@ -450,8 +432,7 @@ class TerminalTool(BaseTool):
             with self._proc_lock:
                 self._active_proc = proc
 
-            # 增量读取：reader 线程逐行收集输出并推给回调（实时流），
-            # 主线程保留原有轮询（响应停止信号/超时），不再用结尾 communicate
+            # 增量读取：reader 线程逐行收集输出并推给回调（实时流），主线程保留原有轮询（响应停止信号/超时），不再用结尾 communicate
             stdout_chunks: list = []
             stderr_chunks: list = []
             cb = self._output_callback
@@ -580,8 +561,7 @@ class TerminalTool(BaseTool):
                     start_new_session=True,
                 )
         except Exception as e:
-            # Popen 抛错时句柄既不 close、也没进 `_jobs`（后续 _prune_jobs 永远碰不到它）
-            # —— 每失败一次就漏一个句柄 + 一个空日志文件（2026-09-22 审计）。
+            # Popen 抛错时句柄既不 close、也没进 `_jobs`（后续 _prune_jobs 永远碰不到它）—— 每失败一次就漏一个句柄 + 一个空日志文件。
             if f_out is not None:
                 try:
                     f_out.close()
@@ -635,12 +615,7 @@ class TerminalTool(BaseTool):
         return ToolResult(success=True, output="后台任务:\n" + "\n".join(lines))
 
     def _prune_jobs(self, max_jobs: int = 20):
-        """淘汰已结束的老任务：关掉日志句柄并删除临时日志。
-
-        旧实现把 Popen（连带打开的日志文件句柄）永久留在 self._jobs 里：
-        每起一个后台任务就泄漏一个文件句柄，%TEMP%\\my_agent_bg_*.log 也永不删除，
-        长会话下句柄和磁盘都会一直涨。只淘汰**已结束**的任务，运行中的不动。
-        """
+        """淘汰已结束的老任务：关掉日志句柄并删除临时日志。"""
         if len(self._jobs) < max_jobs:
             return
         finished = [(jid, j) for jid, j in self._jobs.items()
@@ -662,12 +637,7 @@ class TerminalTool(BaseTool):
 
     @classmethod
     def _finish_job(cls, job: dict):
-        """任务收尾：关句柄 + 删临时日志（幂等）。
-
-        注意"已经跑完"的任务也必须走这里——`echo` 这类短命令几乎总是
-        在 `bg kill` 之前就结束了，旧实现在"已结束"分支直接 return，
-        于是句柄和日志一直留着（最常见的泄漏路径）。
-        """
+        """任务收尾：关句柄 + 删临时日志（幂等）。"""
         cls._release_job(job)
         path = job.get("out_path")
         if path:
@@ -684,8 +654,7 @@ class TerminalTool(BaseTool):
                 success=False, output="",
                 error=f"后台任务不存在: {job_id or '（空）'}（用 bg list 查看）",
             )
-        # 只读末尾：旧实现 f.readlines() 会把整个日志读进内存，
-        # 一个刷屏的后台任务（几万行/上百 MB）足以把内存打满。
+        # 只读末尾：旧实现 f.readlines() 会把整个日志读进内存，一个刷屏的后台任务（几万行/上百 MB）足以把内存打满。
         try:
             with open(job["out_path"], "rb") as f:
                 f.seek(0, os.SEEK_END)
@@ -739,9 +708,7 @@ class TerminalTool(BaseTool):
             proc.wait(timeout=10)
         except Exception:
             pass
-        # 关闭日志句柄（修掉"每个后台任务泄漏一个 fd"），但**保留日志文件**：
-        # 杀掉任务后往往还要看输出排查原因。真正占地方的临时日志由
-        # _prune_jobs 在任务表超限时连同文件一起清掉（总量因此有界）。
+        # 关闭日志句柄（修掉"每个后台任务泄漏一个 fd"），但**保留日志文件**：杀掉任务后往往还要看输出排查原因。真正占地方的临时日志由_prune_jobs 在任务表超限时连同文件一起清掉（总量因此有界）。
         self._release_job(job)
         return ToolResult(
             success=True,

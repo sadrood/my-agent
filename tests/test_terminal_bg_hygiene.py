@@ -1,11 +1,4 @@
-"""
-批次2 回归：后台任务的文件句柄与临时日志不再泄漏。
-
-实测故障（2026-09-17 审计）：`_start_background` 打开的日志文件句柄只由
-`self._jobs` 里的 Popen 间接持有，`_bg_kill` 从不关闭，`%TEMP%\\my_agent_bg_*.log`
-也永不删除；且 `self._jobs` 无上限、`_bg_output` 用 `readlines()` 全量读入
-（一个刷屏任务能把内存打满）。
-"""
+"""批次2 回归：后台任务的文件句柄与临时日志不再泄漏。"""
 import glob
 import os
 import tempfile
@@ -90,11 +83,7 @@ class TestBackgroundJobHygiene:
 
 class TestBackgroundStartFailureCleansUp:
     """Popen 抛错时必须关句柄、删日志。
-
-    实测故障（2026-09-22 审计）：`_start_background` 先 open 日志再 Popen，异常分支
-    只 return —— 句柄不 close、文件也没进 `_jobs`（后续 `_prune_jobs` 永远碰不到它），
-    每失败一次就漏一个句柄 + 一个空日志文件。
-    """
+    每失败一次就漏一个句柄 + 一个空日志文件。"""
 
     def test_failed_spawn_leaves_no_handle_or_file(self, monkeypatch, tmp_path):
         import glob

@@ -1,16 +1,5 @@
-"""
-语音合成模块（配音：多供应商）。
-
-用途：漫剧/短视频配音——把每镜台词合成音频，再与画面合成完整视频。
-
-供应商（config.TTS_CONFIG["provider"]）：
-- ``edge``       在线免费语音：免 key、中文多音色，作为兜底。
-- ``openrouter`` OpenRouter 的 ``/api/v1/audio/speech``（兼容协议端点），
-  可挂克隆音色模型等 TTS 模型。按字符计费，``:free`` 变体 0 元。
-  支持**声音克隆**（input_references）的模型可传参考音频。
-
-工具层是同步调用，这里的异步（本地兜底 TTS）包成同步。
-"""
+"""语音合成模块（配音：多供应商）。
+工具层是同步调用，这里的异步（本地兜底 TTS）包成同步。"""
 import base64
 import mimetypes
 import os
@@ -32,8 +21,7 @@ ZH_VOICES = {
 
 SUPPORTED_PROVIDERS = ("edge", "openrouter")
 
-# 角色声线库 → edge 兜底音色（openrouter 限流/失败降级时按角色走对应音色，
-# 避免整片降级成同一个默认女声）。key 与 reference_dir 里的角色文件名一致。
+# 角色声线库 → edge 兜底音色（openrouter 限流/失败降级时按角色走对应音色，避免整片降级成同一个默认女声）。key 与 reference_dir 里的角色文件名一致。
 ROLE_FALLBACK_VOICES = {
     "narration": ("yunjian", "+0%"),    # 旁白：沉稳解说感
     "linshen": ("yunxi", "+0%"),        # 林深：年轻克制的男声
@@ -68,10 +56,7 @@ def resolve_voice(name: str) -> str:
 
 
 def _timestamp() -> str:
-    """毫秒精度时间戳。
-
-    旧实现用 [:17] 只保留微秒第 1 位，同一秒内两次合成会得到同名文件互相覆盖。
-    """
+    """毫秒精度时间戳。"""
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:21]
 
 
@@ -105,8 +90,6 @@ class TTSModel:
                 f"未知 TTS 供应商 '{self.provider}'，可选: "
                 + " / ".join(SUPPORTED_PROVIDERS))
         # edge 需要把别名解析成完整音色名；openrouter 的音色由模型决定。
-        # 关键：openrouter 不能用 TTS_VOICE——那是 edge 的音色别名，
-        # 直接透传会被上游拒绝（上游报 "Invalid voice 'xiaoxiao'"）。
         if self.provider == "edge":
             raw_voice = voice or cfg.get("voice")
             self.voice = resolve_voice(raw_voice)
@@ -138,12 +121,7 @@ class TTSModel:
 
     @staticmethod
     def _sanitize_openrouter_voice(name: str):
-        """剔除误填的 edge 音色（那是另一套供应商的命名空间）。
-
-        返回 (可用音色, 被忽略的音色)。edge 的 xiaoxiao / zh-CN-XXXNeural 送给
-        OpenRouter 只会换来 "Invalid voice" 硬失败；这里直接忽略并留痕，
-        让请求按模型默认音色走通，同时把事实回传给调用方，不静默。
-        """
+        """剔除误填的 edge 音色（那是另一套供应商的命名空间）。"""
         v = (name or "").strip()
         if not v:
             return "", ""
@@ -163,12 +141,7 @@ class TTSModel:
 
     def synthesize(self, text: str, voice: str = None, rate: str = None,
                    volume: str = None, output: str = None) -> dict:
-        """把文字合成为音频文件。
-
-        Returns:
-            {"path": 本地音频路径, "voice": 音色/模型, "chars": 字数,
-             "text": 原文, "provider": 实际使用的供应商}
-        """
+        """把文字合成为音频文件。"""
         text = (text or "").strip()
         if not text:
             raise ValueError("合成文本为空")
@@ -179,9 +152,7 @@ class TTSModel:
             except Exception as e:
                 if not self.fallback_edge:
                     raise
-                # 在线免费档"不保证生产可用性"，失败时兜底到本地 TTS，
-                # 但按角色走对应兜底音色，避免整片降级成同一个默认女声；
-                # 降级事实如实回传，不静默掩盖。
+                # 在线免费档"不保证生产可用性"，失败时兜底到本地 TTS，但按角色走对应兜底音色，避免整片降级成同一个默认女声；降级事实如实回传，不静默掩盖。
                 fv, fr = self._role_fallback_voice(voice)
                 r = self._synth_edge(text, voice=fv, rate=fr or rate,
                                      volume=volume, output=output)
@@ -217,11 +188,7 @@ class TTSModel:
     # ------------------------------------------------------------
 
     def _resolve_reference(self, voice: str):
-        """角色声线库：voice=角色名 → ``reference_dir/{角色名}.wav|mp3``。
-
-        返回 (参考音频路径, 参考文字稿)。找不到返回 ("", "")。
-        同一角色永远命中同一份参考样本 → 音色恒定不偏移。
-        """
+        """角色声线库：voice=角色名 → ``reference_dir/{角色名}.wav|mp3``。"""
         ref_dir = (self.reference_dir or "").strip()
         v = (voice or "").strip()
         if not ref_dir or not v:
@@ -234,11 +201,7 @@ class TTSModel:
 
     @staticmethod
     def _role_fallback_voice(voice: str):
-        """openrouter 降级到 edge 时，按角色名选兜底音色。
-
-        返回 (edge 音色, 语速)；角色不在表里返回 (None, None)，
-        由调用方走默认音色/原语速。
-        """
+        """openrouter 降级到 edge 时，按角色名选兜底音色。"""
         v = (voice or "").strip().lower()
         if v in ROLE_FALLBACK_VOICES:
             return ROLE_FALLBACK_VOICES[v]
@@ -259,12 +222,10 @@ class TTSModel:
             if ref_text:
                 refs.append({"type": "text", "text": ref_text})
             payload["input_references"] = refs
-            # 有克隆参考时音色由样本决定：角色名只是库里的索引，不当作
-            # voice 透传（部分上游对未知 voice 名会报 Invalid voice）
+            # 有克隆参考时音色由样本决定：角色名只是库里的索引，不当作 voice 透传（部分上游对未知 voice 名会报 Invalid voice）
             payload["_role_ref"] = ref_audio
             return payload
-        # 音色：只有显式指定才带。克隆类模型没有预设音色目录，
-        # 文档要求"仅在提供方有默认音色时才可省略 voice"——它的默认音色即内置。
+        # 音色：只有显式指定才带。克隆类模型没有预设音色目录，文档要求"仅在提供方有默认音色时才可省略 voice"——它的默认音色即内置。
         v = voice if voice is not None else self.voice
         if v:
             payload["voice"] = v

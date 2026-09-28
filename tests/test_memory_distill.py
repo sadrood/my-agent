@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 """经验压缩（memory distill）测试：把零散记录总结成高层经验，**原始记录不丢**。
-
-设计底线（干跑时踩到过真 bug）：
-- 只有**真的提炼出条目**的类别才允许替换；解析失败/调用失败的类别必须原样保留
-  （第一版按"尝试过的类别"替换，7 类里 4 类解析失败时 159 条会变成 5 条）；
-- 归档失败就整个放弃压缩——压缩不能以丢历史为代价；
-- dry-run 一个字节都不写。
-"""
+（第一版按"尝试过的类别"替换，7 类里 4 类解析失败时 159 条会变成 5 条）；"""
 import json
 import os
 import shutil
@@ -97,7 +91,7 @@ class TestDistill:
         shutil.rmtree(tmp)
 
     def test_truncated_json_is_salvaged(self):
-        """真机踩到：模型回了数组但被 max_tokens 截断 → 逐个对象抢救。"""
+        """真机遇到：模型回了数组但被 max_tokens 截断 → 逐个对象抢救。"""
         m, tmp = _mem()
         _add(m, "coding 任务", "coding", 4)
         truncated = ('[\n {"title": "第一条", "do": "做法一", "dont": "坑一"},\n'
@@ -136,13 +130,7 @@ class TestDistill:
 
     def test_rerun_keeps_previous_distilled_entries(self):
         """重跑压缩不能删掉上一轮提炼出来的高层条目。
-
-        实测故障（2026-09-22 审计）：`keep` 按 task_category 一刀切，凡是本轮处理过的
-        类别，**该类别全部条目**都被清掉（含上一轮 `plan_steps=["distilled"]` 的成果），
-        只留本轮结果 —— 与 `_is_distilled` 那条"已蒸馏的不再回炉"的设计自相矛盾。
-        实测：5 条 coding 记录第 1 轮提炼出 1 条，再来 3 条新记录做第 2 轮后，第 1 轮
-        那条消失了（只在归档文件里）。
-        """
+        那条消失了（只在归档文件里）。"""
         m, tmp = _mem()
         _add(m, "coding 任务", "coding", 4)
         m.distill_experiences(FakeLLM(script={"coding": _OK}), min_group=3)
@@ -305,7 +293,7 @@ class TestDistillModelSelection:
 
 
 class TestNoValueGroupsAndFailFast:
-    """两件实测出来的事：①"这堆记录没干货"是合法结论；②配额挂了要快速失败。"""
+    """两件出来的事：①"这堆记录没干货"是合法结论；②配额挂了要快速失败。"""
 
     def test_explicit_empty_array_drops_the_group(self):
         """模型回 `[]` = 这批没可复用经验 → 丢弃（归档里有，不算丢数据）。"""
@@ -331,7 +319,7 @@ class TestNoValueGroupsAndFailFast:
         shutil.rmtree(tmp)
 
     def test_quota_block_fails_fast(self, monkeypatch):
-        """连续两组拿不到内容 = 上游配额问题，别磨完全部类别（实测白等 8 分钟）。"""
+        """连续两组拿不到内容 = 上游配额问题，别磨完全部类别（白等 8 分钟）。"""
         monkeypatch.setattr("time.sleep", lambda *_: None)
 
         class AllEmpty:
@@ -353,7 +341,7 @@ class TestNoValueGroupsAndFailFast:
         shutil.rmtree(tmp)
 
     def test_quota_error_aborts_immediately(self, monkeypatch):
-        """429 是账号级问题：第一组就中止，不该再去试其它类别（实测白等 266 秒）。"""
+        """429 是账号级问题：第一组就中止，不该再去试其它类别（白等 266 秒）。"""
         monkeypatch.setattr("time.sleep", lambda *_: None)
 
         class QuotaBoom:

@@ -1,18 +1,4 @@
-"""
-文件变更追踪器（diff 视图的数据底座）。
-
-动机：桌面端/仪表盘的"透明可控"体验需要回答"Agent 到底改了什么"，
-而不只是"哪个文件被改了"。写文件工具（file write / edit）在成功落盘前
-把旧内容快照到这里，dashboard 的 /api/diff 据此生成修改前后对比。
-
-设计要点：
-- 同一路径多次修改只保留**最旧的快照**——diff 展示的是
-  "本次会话累计改了什么"，而不是最后一次增量（更符合审计直觉）。
-- 内存上限保护：路径数、单文件快照大小都有硬上限，超限静默降级
-  （该文件不再追踪，不影响写操作本身）。
-- 线程安全：工具在 worker 线程执行，API 在事件循环线程读取。
-- 快照是内存态，不写磁盘——重启即清空，不引入新的持久化安全面。
-"""
+"""文件变更追踪器（diff 视图的数据底座）。"""
 import os
 import threading
 import time
@@ -86,13 +72,7 @@ class ChangeTracker:
 
     def record_with_old(self, path: str, tool: str, old_content: Optional[str],
                         existed: Optional[bool] = None) -> None:
-        """调用方已持有修改前内容时直接登记（edit / file 工具场景）。
-
-        `existed` 必须由调用方显式给出：`old_content is None` 有两种含义 ——
-        「文件本来不存在」和「文件存在但太大/是二进制、快照拿不到」。旧实现一律
-        当后者是新建，于是对 >200KB 的既有文件做 write，diff 视图会谎报"本次新建"
-        （2026-09-22 审计）。不给时退回旧行为。
-        """
+        """调用方已持有修改前内容时直接登记（edit / file 工具场景）。"""
         abs_path = self._norm(path)
         with self._lock:
             rec = self._records.get(abs_path)

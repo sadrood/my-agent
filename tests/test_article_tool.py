@@ -237,12 +237,7 @@ class TestErrorHandling:
 
 
 class TestRouting:
-    """用户只说"校对"时，模型能不能自己想到用这个工具。
-
-    真正的路由信号是**工具描述里的触发词**（随产品提交，任何机器都生效）；
-    本机还额外装了 skills/article-check 技能包做二次强化（skills/ 不入库，
-    所以在没有该技能包的机器上这条自动跳过）。
-    """
+    """用户只说"校对"时，模型能不能自己想到用这个工具。"""
 
     def test_description_tells_the_model_when_to_use_it(self):
         d = ArticleTool().description

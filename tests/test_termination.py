@@ -1,11 +1,4 @@
-"""
-子进程终止联动测试：停止信号必须能真正杀掉正在运行的前台命令。
-
-覆盖三层：
-1. TerminalTool：stop_event 置位 / terminate_current() 直接调用 → 慢命令快速退出
-2. ToolManager：bind_stop_event 注入 + cancel_active_tools 兜底
-3. Executor：循环执行慢命令期间置位 stop_event → 整体快速返回 stopped
-"""
+"""子进程终止联动测试：停止信号必须能真正杀掉正在运行的前台命令。"""
 import threading
 import time
 

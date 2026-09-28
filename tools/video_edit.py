@@ -1,17 +1,4 @@
-"""
-视频剪辑工具（VideoEditTool）：ffmpeg 合成能力。
-
-"图 + 运镜 + 配音"路线的执行者——用静态图做漫剧/短视频，不消耗
-视频生成配额。与 video_gen（AI 生成视频）职责分离：本工具只管剪辑合成。
-
-命令：
-    kenburns  图片 → 运镜短视频（推拉摇移）
-    concat    多段视频 → 拼接
-    add_audio 视频 + 配音 → 合成
-    trim      裁剪片段
-    probe     读取时长/分辨率（对齐画面与配音）
-    subtitle  烧录字幕
-"""
+"""视频剪辑工具（VideoEditTool）：ffmpeg 合成能力。"""
 import os
 from typing import Any, Dict, List
 
@@ -19,13 +6,7 @@ from tools.base import BaseTool, ToolResult
 
 
 def _num(value, default: float) -> float:
-    """把参数转成 float；None / 空串才回落默认值。
-
-    不能写 `float(x or default)`：那样 **0 也会被顶掉**（`0 or 1.0` → `1.0`），
-    而 0 在这里是合法值 —— "只要人声、BGM 静音"就是 volume / bgm_volume 传 0。
-    旧实现在这两种取值下静默用回默认值，命令无效还不报错
-    （2026-09-22 审计实测：传 0 拿到的是 1.0 / 0.25）。
-    """
+    """把参数转成 float；None / 空串才回落默认值。"""
     if value is None or value == "":
         return float(default)
     try:
@@ -317,17 +298,12 @@ class VideoEditTool(BaseTool):
                 motion = (motions[i] if i < len(motions)
                           else (arguments.get("motion")
                                 or default_motion_cycle[i % len(default_motion_cycle)]))
-                # output 必须转发：其他命令（concat / add_audio / trim / subtitle）都传了，
-                # 只有这里漏 —— 于是 schema 里文档化的 output 对 kenburns 完全无效，产物被
-                # 强制丢进根目录 generated_videos/，模型随后按 output/ 路径拼接就"文件不存在"
-                # （2026-09-22 审计实测：传给 editor 的 kwargs 里没有 output）。
+                # output 必须转发：其他命令（concat / add_audio / trim / subtitle）都传了，只有这里漏 —— 于是 schema 里文档化的 output 对 kenburns 完全无效。
                 results.append(editor.kenburns(
                     img, duration=duration or 4.0, motion=motion,
                     output=arguments.get("output") or None))
         except Exception as e:
-            # 中途失败必须收拾干净：旧实现让前面已落盘的片段原样留在 generated_videos/
-            # 里，既不上报也不删，模型重试一次就再留一批 —— 26 镜漫剧重试几轮就是几十个
-            # 几百 MB 的孤儿文件（2026-09-22 审计，违反 AGENTS.md 的中间产物清理纪律）。
+            # 中途失败必须收拾干净：旧实现让前面已落盘的片段原样留在 generated_videos/里，既不上报也不删，模型重试一次就再留一批 —— 26 镜漫剧重试几轮就是几十个几百 MB 的孤儿文件
             cleaned = []
             for r in results:
                 path = (r or {}).get("path") if isinstance(r, dict) else None

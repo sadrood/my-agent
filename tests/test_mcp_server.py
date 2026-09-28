@@ -29,15 +29,7 @@ def test_list_agent_tools():
 
 
 class TestSandboxModeClamp:
-    """宿主不能靠 run_agent 的参数给自己提权到 danger-full-access。
-
-    实测漏洞（2026-09-22 审计）：`run_agent` 的 `sandbox_mode` 是**宿主 LLM 自己填的**
-    普通参数，而 `danger-full-access` 是唯一能解锁硬黑名单的取值 ——
-    `agent/approval.py` 的 `decide()` 在 `risk == "blocked"` 时只在这一种组合下放行：
-    `sandbox_mode == "danger-full-access" and mode == "never"`（MCP 默认就是 never）。
-    于是宿主一句 `run_agent(goal, sandbox_mode="danger-full-access")` 就能执行
-    mkfs / diskpart / format c: / rm -rf / 这类"任何情况下均被拒绝"的命令。
-    """
+    """宿主不能靠 run_agent 的参数给自己提权到 danger-full-access。"""
 
     @pytest.mark.parametrize("requested", [
         "danger-full-access",            # 唯一能解锁硬黑名单的值
@@ -83,10 +75,7 @@ def test_run_agent_mcp_config_built():
     assert cfg.approval_policy == "never"
     assert cfg.approval_interactive is False
     assert cfg.guardian_enabled is False
-    # 不能硬断言 True：该字段默认值来自 ROLLOUT_CONFIG，而它读的是 .env
-    # （ROLLOUT_ENABLED / MY_AGENT_MINIMAL）——实测在 ROLLOUT_ENABLED=false 或
-    # MY_AGENT_MINIMAL=1 的环境下这条会失败，属于"测试依赖开发者环境"。
-    # 这里断言的是"显式传入的值被尊重"，与 .env 无关。
+    # 不能硬断言 True：该字段默认值来自 ROLLOUT_CONFIG。
     from config import ROLLOUT_CONFIG
     assert cfg.rollout_enabled == ROLLOUT_CONFIG["enabled"]
     assert AgentConfig(rollout_enabled=True).rollout_enabled is True

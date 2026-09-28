@@ -1,15 +1,5 @@
 """OCR 语言映射与视觉异常检测的"失败可区分"回归。
-
-实测故障（2026-09-22 审计）：
-- `models/ocr.py` 的 tesseract 后端用 `l.split("-")[0]` 把默认配置
-  `zh-Hans-CN,en-US` 切成 `zh,en`，而 tesseract 语言包叫 `chi_sim`/`eng`
-  —— 这个后端按默认配置**必然失败**，报错还把人引向"去装语言包"（用户其实装了）；
-  分隔符也错了（pytesseract 要 `+`）。旧兜底 `langs or "chi_sim+eng"` 因为
-  langs 非空永远不生效。
-- `models/video_analyzer.py` 在视觉模型失败时返回 `has_anomaly=False`，与
-  "检测过、确实没问题"无法区分；调用方只看这个字段 → agent 会在**完全没做过
-  页面检查**的情况下继续操作，用户和 rollout 里都看不到痕迹。
-"""
+—— 这个后端按默认配置**必然失败**，报错还把人引向"去装语言包"（用户其实装了）；"""
 import pytest
 
 import models.ocr as ocr_mod

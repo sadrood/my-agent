@@ -1,16 +1,6 @@
-"""
-文生视频工具（VideoGenTool）。
-
-视频生成是**异步任务**，与文生图（同步返回）不同：
-    generate → POST /videos 创建任务 → 轮询等待 → 完成下载 mp4
-    status   → 查询已有任务（等待超时/长任务稍后取结果）
-
-超时不会丢任务：返回 task_id，模型可稍后用 status 取回
+"""文生视频工具（VideoGenTool）。
 （VIDEO_GEN_MAX_WAIT 默认 240s，需小于工具级硬超时 300s）。
-
-依赖：models.video_gen.VideoGenModel。
-配置：VIDEO_GEN_*（.env），端点与模型均在 .env 里指定。
-"""
+依赖：models.video_gen.VideoGenModel。"""
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
@@ -27,15 +17,11 @@ class VideoGenTool(BaseTool):
     risk_level: str = "low"
     approval: str = "auto"
     min_sandbox_mode: str = "workspace-write"   # 需写入视频文件
-    # 输出唯一命名（vid-<时间戳>-<task_id>.mp4）故可并行：模型常一轮发 4-5 个镜头，
-    # 串行会把大部分时间耗在等视频；执行器侧有并发上限 max_parallel_tools（默认 4）。
+    # 输出唯一命名（vid-<时间戳>-<task_id>.mp4）故可并行：模型常一轮发 4-5 个镜头，串行会把大部分时间耗在等视频；执行器侧有并发上限 max_parallel_tools（默认 4）。
     parallel_safe: bool = True
 
     def __init__(self, video_model=None):
-        """
-        Args:
-            video_model: VideoGenModel 实例（None 时延迟创建；测试注入用）
-        """
+        """Args:"""
         self._model = video_model
 
     @property
@@ -120,8 +106,7 @@ class VideoGenTool(BaseTool):
         prompt = str(args.get("prompt") or "").strip()
         task_id = str(args.get("task_id") or "").strip()
 
-        # 容错：模型常把整段提示词塞进 command 而漏掉 prompt；直接回"未知命令"
-        # 会让它重做一次、白等一轮。按意图纠正，与宽松的 execute() 保持一致。
+        # 容错：模型常把整段提示词塞进 command 而漏掉 prompt；直接回"未知命令"会让它重做一次、白等一轮。按意图纠正，与宽松的 execute() 保持一致。
         low = cmd.lower()
         if low in ("", "generate", "gen", "create"):
             cmd = "generate"
@@ -218,9 +203,7 @@ class VideoGenTool(BaseTool):
                 f"状态: {status}（暂无结果；任务已创建并计费）。"
                 f"稍后用 video_gen(command=\"status\", task_id=\"{vid}\") 取结果。")
 
-        # `wait=false`（schema 推荐的"超长视频"用法）时任务刚 queued，local/url 必然都
-        # 任务已经创建就该算成功：报失败会让 executor 丢掉 output（含 task_id），
-        # 模型只能重建任务、重复烧配额。与上面的 timed_out 分支保持一致。
+        # `wait=false`（schema 推荐的"超长视频"用法）时任务刚 queued，local/url 必然都任务已经创建就该算成功：报失败会让 executor 丢掉 output（含 task_id），模型只能重建任务、重复烧配额。
         return ToolResult(
             success=bool(local or url or vid),
             output="\n".join(lines),
