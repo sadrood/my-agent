@@ -121,8 +121,9 @@ class TestSiblingResetProtection:
         ex._leave_tool_call("slowtool")
         assert ex._sibling_calls_in_flight("slowtool") is False
 
-    def test_timeout_resets_tool_on_real_entry(self, monkeypatch):
-        """走**真实入口**时超时必须真的 reset_tool（旧实现恒不执行）。"""
+    def test_timeout_resets_tool_after_zombie_exits(self, monkeypatch):
+        """走**真实入口**时超时必须真的 reset_tool（旧实现恒不执行），
+        但现在要等僵尸线程退出之后才重置 —— 提前重置会与它争抢同一实例。"""
         from config import TOOL_CONFIG
         from models.llm import ToolCall
 
@@ -134,7 +135,11 @@ class TestSiblingResetProtection:
                             lambda name: resets.append(name))
 
         ex._execute_one_tool_call(ToolCall("1", "slowtool", {}), "目标")
-        assert resets == ["slowtool"], "超时后没重置工具（把自己当成兄弟了）"
+        assert resets == [], "僵尸线程还在跑，不能立刻重置"
+        deadline = time.time() + 5
+        while time.time() < deadline and not resets:
+            time.sleep(0.05)
+        assert resets == ["slowtool"], "僵尸退出后必须补上重置"
 
     def test_reset_skipped_while_sibling_running(self, monkeypatch):
         """回归：兄弟调用在飞时不得 reset_tool（会把它排队的任务吞掉）。"""

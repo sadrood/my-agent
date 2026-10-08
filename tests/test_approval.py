@@ -374,6 +374,22 @@ class TestSecurityCriticalApprovalFlow:
         d = p.decide(self._edit("config.py"))
         assert d.allowed is True and d.required_approval is True
         assert asked and asked[0].risk_level == "high", "必须走人工确认，不能自动放行"
+        assert p.decision_log[-1]["risk"] == "high"
+
+    def test_interactive_prompt_allow_is_recorded(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda *a, **kw: "y")
+        p = ApprovalPolicy(mode="on-failure", sandbox_mode="workspace-write", interactive=True)
+        d = p.decide(self._edit("config.py"))
+        assert d.allowed is True and d.required_approval is True
+        logged = p.decision_log[-1]
+        assert logged["tool"] == "edit" and logged["decision"] == "allow"
+
+    def test_interactive_prompt_can_deny(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda *a, **kw: "n")
+        p = ApprovalPolicy(mode="on-failure", sandbox_mode="workspace-write", interactive=True)
+        d = p.decide(self._edit("agent/consent.py"))
+        assert d.allowed is False
+        assert p.decision_log[-1]["decision"] == "deny"
 
     def test_never_policy_rejects(self):
         p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)

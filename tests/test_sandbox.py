@@ -129,13 +129,15 @@ class TestTerminalIntegration:
         assert "返回码: 2" in result.error
         assert "boom" in result.output
 
-    def test_background_commands_bypass_sandbox(self, monkeypatch):
-        """后台任务不进沙箱（保持原路径），便于 bg 子系统管理。"""
+    def test_background_commands_refused_when_sandbox_enabled(self, monkeypatch):
+        """后台走裸 Popen、进不了 AppContainer → 沙箱模式下必须拒绝（fail-closed）。"""
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
         tool = self._make_tool()
-        monkeypatch.setattr(tool, "_start_background", lambda cmd: _ok())
+        monkeypatch.setattr(tool, "_start_background",
+                            lambda cmd: pytest.fail("沙箱下不该起后台进程"))
         result = tool._run_command("echo hi", background=True)
-        assert result.success is True
+        assert result.success is False
+        assert "沙箱" in result.error
 
 
 class TestUnsandboxablePathsFailClosed:

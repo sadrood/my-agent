@@ -722,3 +722,118 @@ class TestSecurityCriticalEdit:
         from agent.approval import ApprovalPolicy
         p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
         assert p.decide(self._req("agent/approval.py")).allowed is False
+
+
+class _HalfSuccessEdit:
+    """假 edit 工具：可模拟"改了盘却返回失败"（半成功）。"""
+
+    name = "edit"
+    description = "测试用假 edit"
+    risk_level = "medium"
+    approval = "auto"
+    min_sandbox_mode = "workspace-write"
+
+    def __init__(self, path=None, success=False):
+        self._path = path
+        self._success = success
+
+    def execute_json(self, arguments):
+        from tools.base import ToolResult
+        if self._path:
+            with open(self._path, "w", encoding="utf-8") as fh:
+                fh.write("changed\n")
+        return ToolResult(success=self._success, output="",
+                          error="" if self._success else "写入后校验失败（半成功）")
+
+    def execute(self, input_str):
+        return self.execute_json({})
+
+
+class _NoLLM:
+    def chat(self, messages, **kwargs):
+        return ""
+
+    def chat_with_tools(self, messages, tools, **kwargs):
+        return None
+
+
+class TestHalfSuccessCheckpoint:
+    """工具"半成功"（已改盘却返回失败）也必须落 checkpoint：磁盘与回滚点不能脱节。"""
+
+    def _executor(self, tmp_path, monkeypatch, tool, calls):
+        import agent.snapshot as snapshot_mod
+        from agent.approval import ApprovalPolicy
+        from agent.executor import Executor
+
+        monkeypatch.setattr(snapshot_mod, "checkpoint",
+                            lambda *a, **kw: calls.append({"args": a, "kwargs": kw}) or "cafe1234")
+        tm = ToolManager()
+        tm.register(tool)
+        return Executor(
+            tool_manager=tm, llm=_NoLLM(),
+            approval_policy=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                           interactive=False),
+            guardian=None, rollout=None, snapshot_checkpoints=True,
+            snapshot_dir=str(tmp_path), max_step_ops=5, llm_retry_delay=0)
+
+    def test_failed_tool_that_changed_file_still_checkpoints(self, tmp_path, monkeypatch):
+        target = tmp_path / "a.py"
+        target.write_text("old\n", encoding="utf-8")
+        calls = []
+        ex = self._executor(tmp_path, monkeypatch, _HalfSuccessEdit(str(target), success=False), calls)
+
+        result, blocked = ex._dispatch_tool_call(
+            "edit", {"file_path": str(target), "old_string": "old", "new_string": "new"}, "目标")
+
+        assert result.success is False and blocked == ""
+        assert target.read_text(encoding="utf-8") == "changed\n", "前置条件：盘已被改"
+        assert calls, "半成功也必须落 checkpoint，否则磁盘已改、回滚点缺失"
+        assert calls[0]["kwargs"].get("changed_file") == str(target)
+
+    def test_failed_tool_without_change_still_silent(self, tmp_path, monkeypatch):
+        calls = []
+        ex = self._executor(tmp_path, monkeypatch, _HalfSuccessEdit(None, success=False), calls)
+        result, _ = ex._dispatch_tool_call(
+            "edit", {"file_path": str(tmp_path / "nope.py")}, "目标")
+        assert result.success is False and "半成功" in result.error
+        assert calls, "条件里不再看 success：无改动时由 checkpoint 自己 no-op"
+
+    def test_success_path_still_checkpoints(self, tmp_path, monkeypatch):
+        target = tmp_path / "b.py"
+        target.write_text("old\n", encoding="utf-8")
+        calls = []
+        ex = self._executor(tmp_path, monkeypatch, _HalfSuccessEdit(str(target), success=True), calls)
+        result, _ = ex._dispatch_tool_call(
+            "edit", {"file_path": str(target), "old_string": "old", "new_string": "new"}, "目标")
+        assert result.success is True and calls
+
+    @pytest.mark.skipif(not _git_available(), reason="git 不可用")
+    def test_real_checkpoint_commits_the_changed_file(self, tmp_path):
+        """真 repo + 真 checkpoint：半成功也要留下新快照（而不是只在内存里"想提交"）。"""
+        from agent.snapshot import ensure_repo, list_snapshots
+
+        assert ensure_repo(str(tmp_path)) is True
+        target = tmp_path / "c.py"
+        target.write_text("old\n", encoding="utf-8")
+        before = len(list_snapshots(str(tmp_path)))
+
+        tool = _HalfSuccessEdit(str(target), success=False)
+        tm = ToolManager()
+        tm.register(tool)
+        from agent.approval import ApprovalPolicy
+        from agent.executor import Executor
+        ex = Executor(
+            tool_manager=tm, llm=_NoLLM(),
+            approval_policy=ApprovalPolicy(mode="never", sandbox_mode="workspace-write",
+                                           interactive=False),
+            guardian=None, rollout=None, snapshot_checkpoints=True,
+            snapshot_dir=str(tmp_path), max_step_ops=5, llm_retry_delay=0)
+
+        result, _ = ex._dispatch_tool_call(
+            "edit", {"file_path": str(target), "old_string": "old", "new_string": "new"}, "目标")
+
+        assert result.success is False
+        snaps = list_snapshots(str(tmp_path))
+        assert len(snaps) == before + 1, "半成功没有留下快照"
+        tree = _snapshot_files(str(tmp_path), snaps[0][1])
+        assert "c.py" in tree, "快照里应包含本次被改的文件"

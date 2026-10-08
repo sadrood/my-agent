@@ -108,6 +108,9 @@ class Executor:
         # 在飞工具调用计数（按工具名）：并行批里决定超时后能否安全 reset_tool
         self._inflight: dict = {}
         self._inflight_lock = threading.Lock()
+        # 超时移交：token = 这次调用的 inflight 由 watcher 回收；工具名 = 僵尸退出后要 reset
+        self._handoff_tokens: set = set()
+        self._pending_reset: set = set()
         self._checkpoint_warned = False           # 检查点失败只告警一次
         self._hooks = None                       # HookManager（首次工具调用时延迟获取）
 
@@ -1190,9 +1193,17 @@ class Executor:
         失败安全：总结失败/未超阈值则原样返回，不破坏对话。"""
         threshold = self._compact_threshold()
         keep = int(COMPACT_CONFIG.get("keep_last", 20))
-        if len(messages) <= keep + 2 or self._estimate_tokens(messages) < threshold:
+        # 开头的 system 消息（含项目指令注入）必须原样保留，不能被压进摘要
+        head_msgs = []
+        for m in messages:
+            if m.get("role") == "system":
+                head_msgs.append(m)
+            else:
+                break
+        body_start = len(head_msgs)
+        if len(messages) - body_start <= keep + 2 or self._estimate_tokens(messages) < threshold:
             return messages
-        old = messages[:-keep]
+        old = messages[body_start:-keep]
         recent = messages[-keep:]
         # 截断点必须落在完整工具闭环之后：单循环里每轮会追加 assistant(tool_calls) + N 条 tool 消息，盲切 messages[-keep:]有 N/(N+2) 的概率正好切在 tool 中间。
         while recent and recent[0].get("role") == "tool":
@@ -1203,22 +1214,29 @@ class Executor:
             if prev.get("role") == "assistant" and prev.get("tool_calls"):
                 # 连同它的 assistant(tool_calls) 一起留在保留区，保持对仗
                 recent = [prev] + recent
-                old = messages[:start]
+                old = messages[body_start:start]
                 break
             # 前面不是配对消息：这条孤立 tool 只能裁掉
             recent = recent[1:]
-            old = messages[:-len(recent)] if recent else messages
+            old = messages[body_start:len(messages) - len(recent)] if recent else []
         if not recent:
             # 全被判成孤立 tool（极端情况）：宁可这轮不压缩，也不能只剩摘要
             self._emit("compaction", {"ok": False,
                                       "error": "保留区全为孤立 tool 消息，已跳过压缩"})
+            return messages
+        if not old:
+            # 全 system / 没有可压的正文：同样原样返回
+            self._emit("compaction", {"ok": False,
+                                      "error": "没有可压缩的正文（仅剩系统提示与保留区），已跳过压缩"})
             return messages
         try:
             summary = self._summarize_old(old)
         except Exception as e:
             self._emit("compaction", {"ok": False, "error": str(e)[:200]})
             return messages
-        compacted = [{"role": "system", "content": summary}] + recent
+        compacted = head_msgs + [
+            {"role": "system", "content": "## 之前的执行摘要\n" + summary}
+        ] + recent
         self._emit("compaction", {"ok": True, "summarized": len(old), "kept": len(recent)})
         return compacted
 
@@ -1262,7 +1280,8 @@ class Executor:
         return ""
 
     def _dispatch_tool_call(self, tool_name: str, arguments: dict, goal: str,
-                            checkpoint: bool = True, stream_output: bool = True):
+                            checkpoint: bool = True, stream_output: bool = True,
+                            inflight_token=None):
         """执行一次工具调用（含审批 + Guardian 把关）。"""
         # 兜底解包：任何入口进来的参数都先还原嵌套 _raw（审批/Guardian/工具拿到的都必须是真正的命名参数，而不是 {"_raw": ...} 字符串）
         if isinstance(arguments, dict):
@@ -1309,22 +1328,19 @@ class Executor:
                     pass
             stream_tool.set_output_callback(_on_output)
         try:
-            result = self._run_tool_with_timeout(
+            result, zombie = self._run_tool_with_timeout(
                 lambda: self.tool_manager.execute_json(tool_name, arguments), timeout)
         finally:
             if stream_tool is not None and hasattr(stream_tool, "set_output_callback"):
                 stream_tool.set_output_callback(None)
 
         if result is None:
-            # 超时：重置该工具实例（丢弃卡死的 playwright 连接/子进程引用），让后续调用从干净状态重新开始，避免"一次卡死、次次卡死"。
-            if not self._sibling_calls_in_flight(tool_name):
-                try:
-                    self.tool_manager.reset_tool(tool_name)
-                except Exception:
-                    pass
+            # 超时：僵尸线程还在用同一工具实例，inflight 要挂到它真正退出为止 ——
+            # 立刻减计数 + reset 会让重置与新调用和它争抢 playwright/子进程。
+            self._start_zombie_watch(tool_name, zombie, token=inflight_token)
             msg = (
                 f"工具执行超时（>{timeout:.0f}s）：{tool_name} 无响应，"
-                f"已重置该工具状态。请重试或改用其他方式。"
+                "后台任务退出后将自动重置该工具。请重试或改用其他方式。"
             )
             self._emit("tool_result", {
                 "tool": tool_name,
@@ -1335,8 +1351,10 @@ class Executor:
             # 注意：第二个返回值是 blocked_reason，**必须留空**。
             return ToolResult(success=False, output="", error=msg), ""
 
-        # 逐操作式检查点：修改成功后立即 git 提交，每次操作都有独立提交（git revert HEAD 即可回滚上一步）；只提交本次修改的文件（Agent 归因提交），不卷入并行未提交改动
-        if self.snapshot_checkpoints and checkpoint and result.success:
+        # 逐操作式检查点：工具可能"半成功"（已改盘却返回失败）—— 磁盘状态与回滚点必须一致，
+        # 所以不以 result.success 为条件；没有实际改动时 checkpoint() 是 no-op（返回当前 HEAD）。
+        # 每次操作独立提交（git revert HEAD 即可回滚上一步），只提交本次修改的文件，不卷入并行未提交改动。
+        if self.snapshot_checkpoints and checkpoint:
             changed = self._changed_file(tool_name, arguments)
             if changed:
                 try:
@@ -1399,7 +1417,11 @@ class Executor:
 
     @staticmethod
     def _run_tool_with_timeout(fn, timeout: float):
-        """在守护线程中执行工具调用，超时返回 None（线程继续在后台，进程退出不阻塞）。"""
+        """在守护线程中执行工具调用，返回 (result, zombie)。
+
+        超时时 result=None、zombie 是仍在后台跑的线程：它的 inflight 必须挂到自己真正
+        退出为止（提前减计数会让 reset 与它争抢同一实例）；正常/异常路径 zombie=None。
+        """
         import threading
 
         box: dict = {}
@@ -1414,10 +1436,59 @@ class Executor:
         t.start()
         t.join(timeout)
         if t.is_alive():
-            return None   # 超时：线程仍在后台运行，调用方应重置工具实例
+            return None, t   # 超时：调用方须等这个线程退出后再重置工具实例
         if "error" in box:
             raise box["error"]
-        return box["result"]
+        return box["result"], None
+
+    def _start_zombie_watch(self, tool_name: str, zombie, token=None) -> None:
+        """起 watcher：等僵尸线程退出 → 回收 inflight → 该工具归零且待重置时才 reset。
+
+        token 非空表示这次调用的 inflight 交给 watcher 回收（计数路径）；未走计数
+        的路径只等僵尸退出后 reset。取舍：僵尸永不退出时 watcher 一直挂着（daemon，
+        不阻塞进程退出），该工具本次运行不再 reset —— 不打断在跑的线程优先于自愈。
+        """
+        import threading
+
+        with self._inflight_lock:
+            self._pending_reset.add(tool_name)
+            if token is not None:
+                self._handoff_tokens.add(token)
+        threading.Thread(target=self._reap_zombie, args=(tool_name, zombie, token is not None),
+                         daemon=True, name="tool-zombie-reaper").start()
+
+    def _reap_zombie(self, tool_name: str, zombie, counted: bool) -> None:
+        try:
+            zombie.join()
+        except Exception:                        # noqa: BLE001
+            pass
+        if counted:
+            try:
+                self._leave_tool_call(tool_name)  # 线程真退出了，这次调用才算结束
+            except Exception:                    # noqa: BLE001
+                pass
+        self._maybe_reset_if_idle(tool_name)
+
+    def _maybe_reset_if_idle(self, tool_name: str) -> None:
+        """inflight 归零且此前记录过待重置 → 执行 reset（watcher 与最后一次离开共用）。"""
+        with self._inflight_lock:
+            pending = tool_name in self._pending_reset
+            idle = self._inflight.get(tool_name, 0) == 0
+            if pending and idle:
+                self._pending_reset.discard(tool_name)
+        if pending and idle:
+            try:
+                self.tool_manager.reset_tool(tool_name)
+            except Exception:                    # noqa: BLE001
+                pass
+
+    def _claim_handoff(self, token) -> bool:
+        """认领超时移交：真移交了 → 本次 finally 不再减 inflight（由 watcher 减）。"""
+        with self._inflight_lock:
+            if token in self._handoff_tokens:
+                self._handoff_tokens.discard(token)
+                return True
+        return False
 
     @staticmethod
     def _sleep_interruptible(seconds: float, stop_event=None, slice_s: float = 0.25) -> bool:
@@ -1447,18 +1518,25 @@ class Executor:
                 self._inflight[tool_name] = left
             else:
                 self._inflight.pop(tool_name, None)
+        if left <= 0:
+            # 归零即收口：若有超时遗留的待重置意图（僵尸已退出但当时还有兄弟在飞），
+            # 此刻才能真正重置 —— 否则那次超时的工具永远得不到重置。
+            self._maybe_reset_if_idle(tool_name)
 
     def _execute_one_tool_call(self, tc, goal: str, checkpoint: bool = True,
                                stream_output: bool = True):
         """执行一次工具调用并计时；日志/指标/事件回喂由主线程统一按序处理。"""
         _t0 = time.time()
+        token = object()             # 超时移交令牌：被 watcher 认领后由它回收 inflight
         self._enter_tool_call(tc.name)
         try:
             result, blocked_reason = self._dispatch_tool_call(
                 tc.name, tc.arguments, goal, checkpoint=checkpoint,
-                stream_output=stream_output)
+                stream_output=stream_output, inflight_token=token)
         finally:
-            self._leave_tool_call(tc.name)
+            # 超时移交后不能立刻减计数：僵尸线程还活着，减了就等于"这次调用已结束"
+            if not self._claim_handoff(token):
+                self._leave_tool_call(tc.name)
         return result, blocked_reason, time.time() - _t0
 
     def _run_tool_calls_parallel(self, tcs: list, goal: str):
@@ -1660,17 +1738,15 @@ class Executor:
             return blocked
 
         timeout = float(TOOL_CONFIG.get("tool_timeout", 300))
-        result = self._run_tool_with_timeout(
+        result, zombie = self._run_tool_with_timeout(
             lambda: self.tool_manager.execute(tool_name, tool_input), timeout)
         if result is None:
-            try:
-                self.tool_manager.reset_tool(tool_name)
-            except Exception:
-                pass
+            # 这条路径不计 inflight：等僵尸线程退出后再 reset（未退出就不 reset）
+            self._start_zombie_watch(tool_name, zombie)
             return ToolResult(
                 success=False, output="",
                 error=(f"工具执行超时（>{timeout:.0f}s）：{tool_name} 无响应，"
-                       "已重置该工具状态。请重试或改用其他方式。"),
+                       "后台任务退出后将自动重置该工具。请重试或改用其他方式。"),
             )
         return result
 

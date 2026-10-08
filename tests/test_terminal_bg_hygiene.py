@@ -114,3 +114,80 @@ class TestBackgroundStartFailureCleansUp:
         assert r.success is False and "后台启动失败" in r.error
         assert all(f.closed for f in opened), "日志句柄没关"
         assert set(glob.glob(pattern)) == before, "失败时留下了空日志文件"
+
+
+class TestBackgroundSandboxFailClosed:
+    """沙箱开启时后台命令必须拒绝：裸 Popen 不受 AppContainer 约束，是绕过口子。"""
+
+    @pytest.fixture(autouse=True)
+    def _sandbox_off_by_default(self, monkeypatch):
+        from config import SANDBOX_EXEC_CONFIG
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "off")
+
+    def test_sandbox_enabled_refuses_background(self, monkeypatch, tool):
+        from config import SANDBOX_EXEC_CONFIG
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        monkeypatch.setattr(TerminalTool, "_start_background",
+                            lambda self, cmd: pytest.fail("沙箱下不该真的起后台进程"))
+        r = tool.execute_json({"command": "echo nope", "background": True})
+        assert r.success is False
+        assert "沙箱" in r.error and "前台" in r.error
+        assert "SANDBOX_EXECUTION=off" in r.error, "要给恢复途径"
+
+    def test_background_unchanged_when_sandbox_off(self, tool):
+        jid = start_bg(tool, "echo bg-allowed")
+        assert jid in tool._jobs
+
+    def test_foreground_still_routed_into_sandbox(self, monkeypatch, tool):
+        import agent.sandbox as sandbox
+        from config import SANDBOX_EXEC_CONFIG
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        seen = {}
+
+        class _Outcome:
+            returncode = 0
+            stdout = "sandboxed-ok"
+            stderr = ""
+            error = ""
+
+        monkeypatch.setattr(sandbox, "run_isolated",
+                            lambda cmd, workspace: seen.update(cmd=cmd) or _Outcome())
+        r = tool._run_command("echo fg")
+        assert "echo fg" in seen.get("cmd", ""), "前台命令必须仍走沙箱"
+        assert r.success and "sandboxed-ok" in r.output
+
+    def test_embedded_terminal_shares_the_gate(self, monkeypatch):
+        """内嵌终端后台转调 super()._run_command → 同一道闸门，无旁路。"""
+        from config import SANDBOX_EXEC_CONFIG
+        from tools.embedded_terminal import EmbeddedTerminalTool
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        t = EmbeddedTerminalTool(bridge_url="http://127.0.0.1:1/terminal")
+        r = t._run_command("echo x", background=True)
+        assert r.success is False and "沙箱" in r.error
+
+
+class TestSecurityCriticalCommandApproval:
+    """命令文本提到安全关键文件（且非只读）→ 强制人工确认，无人值守下拒绝。"""
+
+    def test_redirect_into_critical_file_escalates(self, tool):
+        r = tool.build_approval_request({"command": "echo x > agent/approval.py"})
+        assert (r.risk_level, r.approval) == ("high", "on-request")
+
+    def test_inplace_edit_of_config_escalates(self, tool):
+        r = tool.build_approval_request({"command": "sed -i s/a/b/ config.py"})
+        assert (r.risk_level, r.approval) == ("high", "on-request")
+
+    def test_readonly_inspection_not_escalated(self, tool):
+        r = tool.build_approval_request({"command": "git diff agent/approval.py"})
+        assert r.approval == "auto", "只读命令不该被升级"
+        assert r.risk_level == "low"
+
+    def test_plain_command_unchanged(self, tool):
+        r = tool.build_approval_request({"command": "echo hello"})
+        assert (r.risk_level, r.approval) == ("low", "auto")
+
+    def test_never_policy_refuses_critical_command(self, tool):
+        from agent.approval import ApprovalPolicy
+        p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+        d = p.decide(tool.build_approval_request({"command": "echo x > .env"}))
+        assert d.allowed is False

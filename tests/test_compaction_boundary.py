@@ -75,6 +75,7 @@ class TestCompactionBoundary:
             msgs = build_messages(n_turns=12, tools_per_turn=3)
             out = ex._maybe_compact(list(msgs))
             assert_protocol_valid(out)
+            assert out[0] == msgs[0], "系统提示必须原样保留"
 
     def test_keeps_pairing_when_cut_lands_inside_tool_group(self, compactor):
         """切点落在 tool 组中间时，要把它的 assistant(tool_calls) 一起留下。"""
@@ -83,7 +84,8 @@ class TestCompactionBoundary:
         out = ex._maybe_compact(list(msgs))
         assert out is not msgs, "应当发生了压缩（前置条件不成立会掩盖回归）"
         assert out[0]["role"] == "system"
-        assert out[1]["role"] != "tool", "保留区不能以孤立 tool 开头"
+        assert out[1]["content"].startswith("## 之前的执行摘要"), "摘要应紧跟系统提示"
+        assert out[2]["role"] != "tool", "保留区不能以孤立 tool 开头"
         assert_protocol_valid(out)
 
     def test_protocol_valid_for_many_shapes(self, compactor):
@@ -99,9 +101,9 @@ class TestCompactionBoundary:
         ex = compactor(keep=4)
         msgs = build_messages(n_turns=8, tools_per_turn=3)
         out = ex._maybe_compact(list(msgs))
-        head = out[1]
-        if head["role"] == "assistant":
-            assert head.get("tool_calls"), "补进来的 assistant 必须带 tool_calls"
+        tail = out[2:]                      # out = [原 system, 摘要] + 保留区
+        if tail and tail[0]["role"] == "assistant":
+            assert tail[0].get("tool_calls"), "补进来的 assistant 必须带 tool_calls"
 
 
 class TestTokenEstimate:

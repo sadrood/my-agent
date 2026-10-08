@@ -267,14 +267,22 @@ class TerminalTool(BaseTool):
         return self._run_command(command, background=background)
 
     def build_approval_request(self, arguments: Dict[str, Any]):
-        from agent.approval import ApprovalRequest, CommandSafety
+        from agent.approval import (ApprovalRequest, CommandSafety,
+                                    security_critical_name_hits)
 
         command = str(arguments.get("command", "")).strip()
+        risk = CommandSafety.classify(command)
+        # 命令改写安全关键文件（审批/沙箱/配置本身）→ 强制人工确认；只读命令豁免
+        critical = (bool(security_critical_name_hits(command))
+                    and not CommandSafety.is_readonly(command))
+        if critical:
+            risk = "high"
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=command,
-            risk_level=CommandSafety.classify(command),
+            risk_level=risk,
+            approval="on-request" if critical else "auto",
             min_sandbox_mode=self.min_sandbox_mode,
         )
 
@@ -380,10 +388,18 @@ class TerminalTool(BaseTool):
         # Windows：unix 单命令 → PowerShell 等价翻译（head/tail/sleep/grep，bg 前缀与尾 ' &' 剥离），覆盖前台/后台与会话路径，减少「不是内部或外部命令」类失败
         if _IS_WINDOWS:
             command = _win_unix_shim(command)
+        from agent.sandbox import sandbox_enabled
         if background:
+            # 后台走裸 Popen，不受 AppContainer 约束 → 沙箱开启时 fail-closed 拒绝，
+            # 否则"后台"就是绕过 OS 沙箱的口子。run_isolated 是同步模型，不支持后台。
+            if sandbox_enabled():
+                return ToolResult(
+                    success=False, output="",
+                    error=("沙箱模式下不支持后台命令；请改为前台执行，"
+                           "或显式关闭沙箱 SANDBOX_EXECUTION=off 后重试。"),
+                )
             return self._start_background(command)
         # OS 级沙箱（可选，SANDBOX_EXECUTION=appcontainer）：前台命令进 Windows AppContainer 执行；fail-closed，沙箱失败不回退明文执行。
-        from agent.sandbox import sandbox_enabled
         if sandbox_enabled():
             return self._run_in_sandbox(command)
         return self._run_foreground(command)
