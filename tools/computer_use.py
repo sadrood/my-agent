@@ -336,6 +336,25 @@ def _user32():
 # ================================================================
 _LAST_SYNTHETIC_MS = 0.0
 
+# 输入账本：只记录**我们自己按下、还没抬起**的键/鼠标键。
+# 兜底释放只能动这些——旧实现无差别抬所有修饰键，会把用户正按着的 Ctrl 一起打断。
+_HELD_KEYS: set = set()
+_HELD_BUTTONS: set = set()
+
+# 控制权：agent 还是 user。用户接管后 agent 必须硬停，且**不得自行抢回**
+# （与"让路"不同：让路是这一次动作退让，接管是把控制权交出去直到用户交还）。
+_OWNERSHIP = {"owner": "agent", "since": 0.0}
+HAND_BACK_HINT = "完成后调用 computer 的 resume 动作把控制权交回 agent。"
+
+
+def ownership() -> str:
+    return str(_OWNERSHIP.get("owner") or "agent")
+
+
+def set_owner(who: str) -> None:
+    _OWNERSHIP["owner"] = "user" if str(who).lower() == "user" else "agent"
+    _OWNERSHIP["since"] = time.time()
+
 
 def _now_ms() -> int:
     """与 GetLastInputInfo 同基准的毫秒时钟（GetTickCount，开机起算）。"""
@@ -349,6 +368,49 @@ def _now_ms() -> int:
 def _mark_synthetic() -> None:
     global _LAST_SYNTHETIC_MS
     _LAST_SYNTHETIC_MS = _now_ms()
+
+
+def _dpi_scale() -> float:
+    """主屏缩放比例（1.0 = 100%）；非 Windows 或取不到时返回 1.0。"""
+    if os.name != "nt":
+        return 1.0
+    try:
+        import ctypes
+        try:
+            return max(1.0, round(ctypes.windll.user32.GetDpiForSystem() / 96.0, 3))
+        except Exception:                        # noqa: BLE001
+            hdc = ctypes.windll.user32.GetDC(0)
+            try:
+                dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)   # LOGPIXELSX
+            finally:
+                ctypes.windll.user32.ReleaseDC(0, hdc)
+            return max(1.0, round(dpi / 96.0, 3))
+    except Exception:                            # noqa: BLE001
+        return 1.0
+
+
+def _convert_xy(x: float, y: float, scale: float = None, to_logical: bool = True):
+    """物理像素 ↔ 逻辑坐标换算（缩放 100% 时原样返回）。"""
+    factor = _dpi_scale() if scale is None else float(scale or 1.0)
+    if factor <= 0:
+        factor = 1.0
+    if to_logical:
+        return round(x / factor), round(y / factor)
+    return round(x * factor), round(y * factor)
+
+
+def _scale_note() -> str:
+    scale = _dpi_scale()
+    return f"（屏幕缩放 {scale:g}x）" if scale != 1.0 else ""
+
+
+def _coord_note() -> str:
+    """坐标口径提示：截图/a11y 可能是物理像素，而 OS 输入按逻辑像素处理。"""
+    scale = _dpi_scale()
+    if scale == 1.0:
+        return "坐标口径：x/y 为屏幕绝对坐标（逻辑像素；缩放 100%，两者一致）。"
+    return (f"坐标口径：x/y 为屏幕绝对坐标（逻辑像素）；当前屏幕缩放 {scale:g}x，"
+            "若坐标取自 DPI 感知的截图/a11y（物理像素），click/scroll 需传 physical=true 换算。")
 
 
 def _get_last_input_ms() -> int:
@@ -399,25 +461,30 @@ def _os_click(x: int, y: int, button: str = "left", double: bool = False) -> boo
     down, up = _MOUSE_DOWN_UP.get(button, _MOUSE_DOWN_UP["left"])
     for _ in range(2 if double else 1):
         u.mouse_event(down, 0, 0, 0, 0)
+        _HELD_BUTTONS.add(down)
         try:
             time.sleep(0.02)
         finally:
             # 无论中途被中断/异常，都必须补 up，绝不留"按住不放"的鼠标
             u.mouse_event(up, 0, 0, 0, 0)
+            _HELD_BUTTONS.discard(down)
         time.sleep(0.02)
     _mark_synthetic()
     return True
 
 
 def _release_all_inputs() -> None:
-    """兜底释放：左右中键抬起 + 修饰键抬起。"""
+    """兜底释放：只抬起**我们自己按下过**的键和鼠标键（不碰用户正按着的键）。"""
     try:
         u = _user32()
-        for flag in (0x0004, 0x0010, 0x0040):       # LEFTUP / RIGHTUP / MIDDLEUP
-            u.mouse_event(flag, 0, 0, 0, 0)
-        for vk in (0x10, 0x11, 0x12, 0x5B, 0x5C, 0x5D,   # Shift/Ctrl/Alt/Win/Win/RWin
-                   0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5):  # 左右修饰键
+        for down_flag in list(_HELD_BUTTONS):
+            up_flag = {0x0002: 0x0004, 0x0008: 0x0010, 0x0020: 0x0040}.get(down_flag)
+            if up_flag:
+                u.mouse_event(up_flag, 0, 0, 0, 0)
+        _HELD_BUTTONS.clear()
+        for vk in list(_HELD_KEYS):
             u.keybd_event(vk, 0, 0x0002, 0)             # KEYEVENTF_KEYUP
+        _HELD_KEYS.clear()
         _mark_synthetic()
     except Exception:
         pass
@@ -453,9 +520,11 @@ def _os_key_combo(combo: str) -> Optional[List[int]]:
     u = _user32()
     for vk in vks:
         u.keybd_event(vk, 0, 0, 0)
+        _HELD_KEYS.add(vk)
         time.sleep(0.02)
     for vk in reversed(vks):
         u.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+        _HELD_KEYS.discard(vk)
     return vks
 
 
@@ -601,7 +670,9 @@ class DesktopTool(BaseTool):
             "按钮/输入框的类型、名称和精确坐标）、click/type/key/scroll（OS 级鼠标键盘，"
             "type 支持中文）、window（列出/激活窗口）。\n"
             "用法建议：先 a11y 或 screenshot 看清界面 → 用树里/截图里的坐标 click → "
-            "type 输入 → 再 screenshot 验证效果。操作的目标窗口最好先用 window 动作激活。"
+            "type 输入 → 再 screenshot 验证效果。操作的目标窗口最好先用 window 动作激活。\n"
+            "坐标口径：x/y 是**屏幕绝对坐标**（逻辑像素）；若来自 DPI 感知的截图/a11y"
+            "（物理像素），click/scroll 传 physical=true 让工具按系统缩放换算。"
         )
 
     @property
@@ -611,12 +682,18 @@ class DesktopTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["screenshot", "a11y", "click", "type", "key", "scroll", "window"],
+                    "enum": ["screenshot", "a11y", "click", "type", "key", "scroll",
+                             "window", "resume"],
                     "description": "screenshot=截图分析; a11y=读前台窗口元素树; click=点击; "
-                                   "type=输入文本; key=按组合键; scroll=滚轮; window=列出/激活窗口",
+                                   "type=输入文本; key=按组合键; scroll=滚轮; "
+                                   "window=列出/激活窗口; resume=把控制权交回 agent"
+                                   "（你接管期间 agent 不会抢回）",
                 },
                 "x": {"type": "number", "description": "屏幕横坐标（click/scroll 用，屏幕绝对坐标）"},
                 "y": {"type": "number", "description": "屏幕纵坐标"},
+                "physical": {"type": "boolean",
+                             "description": "x/y 是否为 DPI 物理像素（如取自 DPI 感知的截图/a11y）；"
+                                            "默认 false=逻辑像素。屏幕缩放 ≠100% 且点击偏移时置 true"},
                 "button": {"type": "string", "enum": ["left", "right", "middle"],
                            "description": "click 的鼠标键（默认 left）"},
                 "double": {"type": "boolean", "description": "click 是否双击（默认 false）"},
@@ -665,27 +742,36 @@ class DesktopTool(BaseTool):
             "key": self._act_key,
             "scroll": self._act_scroll,
             "window": self._act_window,
+            "resume": self._act_resume,
         }
         handler = handlers.get(action)
         if handler is None:
             return ToolResult(success=False, output="",
                               error=f"未知 action: {action}。可用: {', '.join(handlers)}")
+
+        mutating = ("click", "type", "key", "scroll")
+        # 控制权在用户手里：写操作一律拒绝，且不自行抢回（读操作仍放行，便于继续观察）
+        if action in mutating and ownership() == "user":
+            return ToolResult(
+                success=False, output="",
+                error=f"控制权在用户手里（你之前让路或被接管），已停止键鼠动作。{HAND_BACK_HINT}")
         try:
-            # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。用户优先：检测到用户正在动鼠标/敲键盘 → 等待其停下；仍不停则放弃本次动作
-            if _yield_enabled() and action in ("click", "type", "key", "scroll"):
+            # 光标可视化：Agent 操作键鼠时显示跟随光标的光环，点击处画涟漪，让用户看得见"谁在动鼠标、点在哪里"（空闲自动隐藏；可 env 关闭）。用户优先：检测到用户正在动鼠标/敲键盘 → 等待其停下；仍不停则把控制权交出去
+            if _yield_enabled() and action in mutating:
                 wait_ms = int(os.getenv("COMPUTER_YIELD_WAIT_MS", "5000"))
                 waited = 0
                 while _user_is_active() and waited < wait_ms:
                     time.sleep(0.15)
                     waited += 150
                 if _user_is_active():
+                    set_owner("user")
                     return ToolResult(
                         success=False, output="",
-                        error="检测到你正在操作鼠标/键盘，本次动作已让出（避免和你抢光标）。"
-                              "稍后再让我继续即可。")
-            _release_all_inputs()          # 动作前清掉可能残留的按键状态
+                        error="检测到你正在操作鼠标/键盘，本次动作已让出，控制权交给你，"
+                              "后续键鼠动作停止（不会自行抢回）。" + HAND_BACK_HINT)
+            _release_all_inputs()          # 动作前清掉**我们自己**残留的按键状态
             ov = get_overlay()
-            if ov is not None and action in ("click", "type", "key", "scroll"):
+            if ov is not None and action in mutating:
                 ov.touch()
             try:
                 result = handler(arguments)
@@ -751,7 +837,7 @@ class DesktopTool(BaseTool):
         except Exception:
             max_elements, max_depth = 120, 8
         tree = _a11y_tree(max_elements=max_elements, max_depth=max_depth)
-        return ToolResult(success=True, output=tree)
+        return ToolResult(success=True, output=f"{tree}\n{_coord_note()}")
 
     def _act_click(self, args: Dict[str, Any]) -> ToolResult:
         try:
@@ -759,6 +845,8 @@ class DesktopTool(BaseTool):
         except (TypeError, ValueError):
             return ToolResult(success=False, output="",
                               error="click 需要 x/y 屏幕坐标（从 a11y 树或截图获取）。")
+        if args.get("physical"):
+            x, y = _convert_xy(x, y, to_logical=True)
         button = str(args.get("button", "left") or "left").lower()
         if button not in _MOUSE_DOWN_UP:
             button = "left"
@@ -766,7 +854,7 @@ class DesktopTool(BaseTool):
         if not ok:
             return ToolResult(success=False, output="", error=f"点击失败（坐标 {x},{y}）")
         return ToolResult(success=True, output=f"已{'双击' if args.get('double') else '点击'} ({x},{y})"
-                                              f"{' 右键' if button == 'right' else ''}")
+                                              f"{' 右键' if button == 'right' else ''}{_scale_note()}")
 
     def _act_type(self, args: Dict[str, Any]) -> ToolResult:
         text = str(args.get("text", ""))
@@ -801,8 +889,10 @@ class DesktopTool(BaseTool):
             notches = int(float(notches))
         except (TypeError, ValueError):
             notches = 3
+        if args.get("physical"):
+            x, y = _convert_xy(x, y, to_logical=True)
         _os_scroll(x, y, notches)
-        return ToolResult(success=True, output=f"已在 ({x},{y}) 向{'上' if notches > 0 else '下'}滚动 {abs(notches)} 格。")
+        return ToolResult(success=True, output=f"已在 ({x},{y}) 向{'上' if notches > 0 else '下'}滚动 {abs(notches)} 格。{_scale_note()}")
 
     def _act_window(self, args: Dict[str, Any]) -> ToolResult:
         title = str(args.get("title", "") or "").strip()
@@ -815,3 +905,11 @@ class DesktopTool(BaseTool):
             return ToolResult(success=False, output="",
                               error=f"没有标题包含 {title!r} 的可见窗口（先 window 不带 title 列出）。")
         return ToolResult(success=True, output=f"已激活窗口: {matched}")
+
+    def _act_resume(self, args: Dict[str, Any]) -> ToolResult:
+        """把键鼠控制权交回 agent（用户确认已经操作完时调用）。"""
+        previous = ownership()
+        set_owner("agent")
+        _release_all_inputs()
+        return ToolResult(success=True,
+                          output=f"键鼠控制权已交回 agent（先前归属：{previous}），可以继续操作了。")

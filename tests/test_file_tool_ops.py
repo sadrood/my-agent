@@ -286,3 +286,33 @@ class TestWriteDoesNotTranslateNewlines:
         r = tool.execute_json({"operation": "append", "path": str(p), "content": "y\n"})
         assert r.success is True, r.error
         assert p.read_bytes() == b"x\ny\n"
+
+
+# ----------------------------------------------------------------------
+# 安全关键文件：写/覆盖/搬走/删除都要人工确认
+# ----------------------------------------------------------------------
+
+CRITICAL_WRITES = [
+    {"operation": "write", "path": "config.py", "content": "x"},
+    {"operation": "append", "path": ".env", "content": "x"},
+    {"operation": "copy", "path": "notes.txt", "destination": "agent/sandbox.py"},
+    {"operation": "move", "path": "agent/consent.py", "destination": "x.py"},
+    {"operation": "delete", "path": "agent/guardian.py"},
+]
+
+
+class TestSecurityCriticalApproval:
+    @pytest.mark.parametrize("args", CRITICAL_WRITES)
+    def test_escalated_to_manual_confirmation(self, tool, args):
+        r = tool.build_approval_request(args)
+        assert r.risk_level == "high"
+        assert r.approval == "on-request"
+
+    def test_ordinary_write_unchanged(self, tool):
+        r = tool.build_approval_request(
+            {"operation": "write", "path": "notes.md", "content": "x"})
+        assert (r.risk_level, r.approval) == ("medium", "auto")
+
+    def test_reading_critical_file_not_escalated(self, tool):
+        r = tool.build_approval_request({"operation": "read", "path": "config.py"})
+        assert (r.risk_level, r.approval) == ("low", "auto")

@@ -1,6 +1,7 @@
 """工具基类模块：JSON Schema + 审批元数据。
 每个工具用 schema 暴露 function calling 参数，并声明 risk_level / approval / min_sandbox_mode。
 旧接口 execute(input_str) 保留；execute_json(arguments) 默认把结构化参数转成字符串。"""
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict
@@ -161,6 +162,31 @@ class BaseTool(ABC):
         if len(args_str) > 300:
             args_str = args_str[:300] + "..."
         return f"{self.name}({args_str})"
+
+
+#: 工具在 output 里内联传输二进制负载的标记（浏览器/OCR 截图）
+INLINE_PAYLOAD_RE = re.compile(r"\[FULL_BASE64\](.*?)\[/FULL_BASE64\]", re.DOTALL)
+
+
+def hoist_inline_payload(result: "ToolResult") -> "ToolResult":
+    """把 output 里内联的 base64 负载搬进 metadata["screenshot_base64"]。
+
+    负载留在 output 里会被统一截断（截断后消费方解码必失败），还会原样回喂模型。
+    """
+    text = result.output or ""
+    if "[FULL_BASE64]" not in text:
+        return result
+    match = INLINE_PAYLOAD_RE.search(text)
+    if match:
+        payload = match.group(1)
+        if not result.metadata.get("screenshot_base64"):
+            result.metadata["screenshot_base64"] = payload
+        note = f"[图片负载 {len(payload)} 字符已放入 metadata.screenshot_base64]"
+    else:
+        # 只有起始标记（没有闭合）：后面那段是坏负载，整段丢掉
+        note = "[图片负载不完整，已丢弃]"
+    result.output = INLINE_PAYLOAD_RE.sub(note, text) if match else text.split("[FULL_BASE64]")[0] + note
+    return result
 
 
 def truncate_output(output: str, max_chars: int) -> tuple:

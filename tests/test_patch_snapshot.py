@@ -698,3 +698,27 @@ class TestLineEndingsPreserved:
             "file_path": str(f), "old_string": "line2", "new_string": "LINE2"})
         assert r.success is False and "回滚" in r.error
         assert f.read_bytes() == original, "回滚没有逐字节还原（换行风格丢了）"
+
+
+class TestSecurityCriticalEdit:
+    """改安全关键文件（审批/沙箱/配置本身）必须人工确认，无人值守下拒绝。"""
+
+    def _req(self, path):
+        return EditTool().build_approval_request(
+            {"file_path": path, "old_string": "a", "new_string": "b"})
+
+    @pytest.mark.parametrize("path", ["config.py", ".env", "agent/approval.py",
+                                      "agent/sandbox.py", "agent/guardian.py",
+                                      "agent/execpolicy.py", "agent/consent.py"])
+    def test_critical_path_escalated(self, path):
+        r = self._req(path)
+        assert (r.risk_level, r.approval) == ("high", "on-request")
+
+    def test_ordinary_path_unchanged(self):
+        r = self._req("tools/file.py")
+        assert (r.risk_level, r.approval) == ("medium", "auto")
+
+    def test_never_policy_refuses_critical_edit(self):
+        from agent.approval import ApprovalPolicy
+        p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+        assert p.decide(self._req("agent/approval.py")).allowed is False

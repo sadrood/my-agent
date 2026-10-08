@@ -94,12 +94,16 @@ class EditTool(BaseTool):
         return self.execute_json(arguments)
 
     def build_approval_request(self, arguments: Dict[str, Any]):
-        from agent.approval import ApprovalRequest
+        from agent.approval import ApprovalRequest, is_security_critical_path
+        path = str(arguments.get("file_path", "") or "")
+        critical = is_security_critical_path(path)
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
-            command=f"edit {arguments.get('file_path', '')}",
-            risk_level="medium",
+            command=f"edit {path}",
+            risk_level="high" if critical else "medium",
+            # 安全关键文件强制人工确认：never（无人值守）下 decide 会直接拒绝
+            approval="on-request" if critical else "auto",
             min_sandbox_mode="workspace-write",
         )
 

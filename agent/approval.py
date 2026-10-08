@@ -7,9 +7,56 @@ import sys
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from config import APPROVAL_CONFIG
+from config import APPROVAL_CONFIG, resolve_under_root
 from agent.execpolicy import ExecPolicy
 from tools.base import SANDBOX_LEVELS, RISK_LEVELS, ApprovalRequest
+
+# ============================================================
+# 安全关键文件（自我修改防线）
+# ============================================================
+
+#: 改写这些文件等于改审批/沙箱/守卫本身：必须人工确认，无人值守下直接拒绝
+SECURITY_CRITICAL_PATHS = (
+    "agent/approval.py",
+    "agent/sandbox.py",
+    "agent/guardian.py",
+    "agent/execpolicy.py",
+    "agent/consent.py",
+    "config.py",
+    ".env",
+)
+
+#: 拿不到真实路径（如 python 代码文本）时的退化判断依据
+SECURITY_CRITICAL_NAME_HINTS = tuple(
+    os.path.basename(p) for p in SECURITY_CRITICAL_PATHS)
+
+
+def is_security_critical_path(path) -> bool:
+    """路径是否指向安全关键文件（realpath + normcase 归一化后与清单比对）。"""
+    raw = str(path or "").strip()
+    if not raw:
+        return False
+    try:
+        target = os.path.normcase(os.path.realpath(resolve_under_root(raw)))
+        for item in SECURITY_CRITICAL_PATHS:
+            if target == os.path.normcase(os.path.realpath(resolve_under_root(item))):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def security_critical_name_hits(text: str) -> list:
+    """文本里出现的安全关键文件名（`.env` 按词边界匹配，避免误伤 os.environ）。"""
+    haystack = str(text or "")
+    hits = []
+    for name in SECURITY_CRITICAL_NAME_HINTS:
+        if name == ".env":
+            if re.search(r"(?<![\w.])\.env(?![\w])", haystack):
+                hits.append(name)
+        elif name in haystack:
+            hits.append(name)
+    return hits
 
 # ============================================================
 # 命令安全分类（终端工具）

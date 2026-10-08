@@ -1,40 +1,35 @@
 """内嵌浏览器工具：Agent 的 browser 命令转发到桌面端侧栏的 Electron <webview>。"""
-import json as _json
 import time
-import urllib.request
 
 from tools.base import ToolResult
+from tools.bridge import BridgeClient
 from tools.browser import BrowserTool
+from tools import human_check
 from config import BROWSER_CONFIG
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8091/browser"
 
-# 探测结果缓存：桥离线时每次探测都要等连接超时(~0.8s)，而 ToolManager 会被反复创建（每个测试、每次工具管理器重建）→ 累积拖慢启动与测试套件。 TTL 内直接复用上次结果。
-_PROBE_CACHE = {"at": 0.0, "ok": False}
-_PROBE_TTL = 60.0
+# 探测结果按 URL 缓存（ToolManager 会被反复创建，每次探测都要等连接超时）
+_PROBES: dict = {}
+_PROBE_LOCK = None
+
+
+def _client_for(url: str = None) -> BridgeClient:
+    target = (url or BROWSER_CONFIG.get("embedded_url") or DEFAULT_BRIDGE_URL)
+    client = _PROBES.get(target)
+    if client is None:
+        client = _PROBES[target] = BridgeClient(target)
+    return client
 
 
 def probe_bridge(timeout: float = 0.8, use_cache: bool = True) -> bool:
     """探测桌面端内嵌浏览器桥是否在线（健康检查，快速失败）。
-    外部 Playwright 浏览器被禁用；离线（纯 CLI）→ 才允许外部浏览器。
-    use_cache=True 时在 TTL 内复用上次结果（避免反复等待连接超时）；"""
-    import time as _time
-    now = _time.time()
-    if use_cache and (now - _PROBE_CACHE["at"]) < _PROBE_TTL:
-        return _PROBE_CACHE["ok"]
 
-    base = (BROWSER_CONFIG.get("embedded_url") or DEFAULT_BRIDGE_URL).rstrip("/")
-    health = base.rsplit("/", 1)[0] + "/health"
-    ok = False
-    try:
-        import urllib.error  # noqa: F401
-        with urllib.request.urlopen(health, timeout=timeout) as resp:
-            ok = bool(_json.loads(resp.read().decode("utf-8")).get("ok"))
-    except Exception:
-        ok = False
-    _PROBE_CACHE["at"] = now
-    _PROBE_CACHE["ok"] = ok
-    return ok
+    在线 → browser 工具走内嵌 webview；离线（纯 CLI）→ 才允许外部 Playwright。
+    """
+    client = _client_for()
+    client.probe_timeout = timeout
+    return client.probe(use_cache=use_cache)
 
 
 class EmbeddedBrowserTool(BrowserTool):
@@ -48,7 +43,7 @@ class EmbeddedBrowserTool(BrowserTool):
         "press", "scroll", "js", "wait",
         "screenshot", "screenshot_base64",
         "mousemove", "clickat", "dblclickat", "mousescroll", "keycombo",
-        "typedirect", "visionclick",
+        "typedirect", "visionclick", "humancheck",
     }
 
     @property
@@ -78,31 +73,18 @@ class EmbeddedBrowserTool(BrowserTool):
             or BROWSER_CONFIG.get("embedded_url")
             or "http://127.0.0.1:8091/browser"
         ).rstrip("/")
+        self._client = BridgeClient(self._bridge_url)
 
     # ================================================================
     # 桥通信
     # ================================================================
 
     def _call_bridge(self, action: str, **params) -> dict:
-        """POST 一条动作到 Electron 桥，返回 {ok, output?/base64?, error?}。"""
-        payload = _json.dumps({"action": action, **params}).encode("utf-8")
-        req = urllib.request.Request(
-            self._bridge_url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            return {
-                "ok": False,
-                "error": (
-                    f"内嵌浏览器桥不可达（{str(e)[:120]}）。"
-                    "请确认桌面端正在运行（桥端口 8091）。"
-                ),
-            }
+        """POST 一条动作到 Electron 桥，返回 {ok, output?/base64?, error?}。
+
+        串行化与瞬态重试都在 BridgeClient 里；这里只负责转发。
+        """
+        return self._client.call(action, **params)
 
     def _to_result(self, resp: dict) -> ToolResult:
         if resp.get("ok"):
@@ -195,6 +177,8 @@ class EmbeddedBrowserTool(BrowserTool):
             return self._screenshot_via_bridge(keep_base64=False)
         if command == "screenshot_base64":
             return self._screenshot_via_bridge(keep_base64=True)
+        if command == "humancheck":
+            return self._embedded_human_check()
         if command == "visionclick":
             return self._vision_click(args)
         if command == "mousemove":
@@ -273,15 +257,33 @@ class EmbeddedBrowserTool(BrowserTool):
             return ToolResult(success=False, output="", error=str(resp.get("error", "截图失败")))
         status = self._call_bridge("status")
         header = status.get("output", "") if isinstance(status, dict) else ""
+        hint = human_check.hint_for_url(human_check.url_from_status(header))
         b64 = str(resp.get("base64", ""))
         if keep_base64:
             return ToolResult(
                 success=True,
-                output=f"截图已获取（内嵌浏览器）。\n{header}\n"
+                output=f"截图已获取（内嵌浏览器）。\n{header}\n{hint}\n"
                        f"大小: {len(b64) * 3 // 4} 字节\n"
                        f"[FULL_BASE64]{b64}[/FULL_BASE64]",
+                metadata={"human_check": True} if hint else {},
             )
-        return ToolResult(success=True, output=f"截图已获取（内嵌浏览器）。\n{header}")
+        return ToolResult(success=True,
+                          output=f"截图已获取（内嵌浏览器）。\n{header}\n{hint}".rstrip(),
+                          metadata={"human_check": True} if hint else {})
+
+    def _embedded_human_check(self) -> ToolResult:
+        """内嵌桥没有选择器查询：用 status 的 URL + html 文本识别验证页。"""
+        status = self._call_bridge("status")
+        header = status.get("output", "") if isinstance(status, dict) else ""
+        html = self._call_bridge("html").get("output", "")
+        info = human_check.verdict(url=human_check.url_from_status(header), text=html)
+        if not info["needs_human"]:
+            return ToolResult(success=True, output="未检测到人机验证，可以继续操作。",
+                              metadata={"human_check": False})
+        return ToolResult(
+            success=True,
+            output=f"{info['hint']}\n命中信号: {'；'.join(info['reasons'])}",
+            metadata={"human_check": True, "reasons": info["reasons"]})
 
     def _vision_click(self, description: str) -> ToolResult:
         """视觉点击：桥截图 → 视觉模型定位 → 桥坐标点击。"""

@@ -106,3 +106,24 @@ def _isolate_heavy_runtime_switches(monkeypatch):
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_computer_ownership():
+    """键鼠控制权与输入账本是全局状态：用例之间必须复位，否则前一条的"用户接管"
+    会把后面所有写操作都挡掉（表现为莫名其妙的失败）。"""
+    try:
+        import tools.computer_use as _cu
+        _cu.set_owner("agent")
+        _cu._HELD_KEYS.clear()
+        _cu._HELD_BUTTONS.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import tools.computer_use as _cu
+        _cu.set_owner("agent")
+        _cu._HELD_KEYS.clear()
+        _cu._HELD_BUTTONS.clear()
+    except Exception:
+        pass

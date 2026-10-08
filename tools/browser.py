@@ -7,6 +7,7 @@ from typing import Optional
 
 from tools.base import BaseTool, ToolResult
 from tools.computer_use import ComputerUseMixin
+from tools import human_check
 from tools.intent_detector import get_intent_detector
 from config import BROWSER_CONFIG, PROJECT_ROOT, resolve_under_root
 
@@ -101,6 +102,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         viewport_width: int = None,
         viewport_height: int = None,
         persistent: bool = None,
+        download_dir: str = None,
     ):
         self._headless = (
             headless
@@ -108,6 +110,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             else BROWSER_CONFIG.get("headless", False)
         )
         self._screenshot_dir = _resolve_under_root(screenshot_dir)
+        self._download_dir = _resolve_under_root(
+            download_dir or BROWSER_CONFIG.get("download_dir", "./downloads"))
         self._viewport_width = viewport_width or BROWSER_CONFIG.get("viewport_width", 1280)
         self._viewport_height = viewport_height or BROWSER_CONFIG.get("viewport_height", 720)
         # 内置浏览器：持久 profile 模式（登录态跨次启动保留，网页型分身依赖）。 persistent 可显式传 False 创建独立临时 profile 实例（如侧栏辅助浏览器），避免与主任务浏览器争用同一 user-data-dir 锁。
@@ -123,6 +127,10 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages: list = []        # 所有 page 列表
         self._current_page_idx = 0     # 当前活跃 page 索引
+        # 世代号：会话重建（超时/崩溃自愈）时 +1，用来作废"在飞的旧任务" ——
+        # 卡死的 worker 之后才跑完的任务不能把结果/状态写回新会话。
+        self._gen = 0
+        self._state_lock = threading.RLock()
 
         # 专属 worker 线程：Playwright sync API 把 asyncio 事件循环绑定在启动线程上，而 Executor 每次调用工具都在新的 daemon 线程执行。
         self._worker: Optional[threading.Thread] = None
@@ -130,6 +138,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._worker_broken = False     # 上次执行疑似卡死被废弃，下次命令重建
 
         os.makedirs(self._screenshot_dir, exist_ok=True)
+        os.makedirs(self._download_dir, exist_ok=True)
 
     # ================================================================
     # 属性
@@ -179,10 +188,15 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             "\n【截图】\n"
             "  screenshot          - 截取当前页面（保存到文件）\n"
             "  screenshot_base64   - 截取当前页面（返回完整base64，供视觉分析）\n"
+            "  download <选择器>    - 点击它触发下载并把文件落盘，返回保存路径\n"
+            "  humancheck          - 检测页面是否有人机验证（命中就该交给人来做）\n"
+            "  live on|off|status   - 实时画面开关（dashboard 页面的「实时画面」面板观看）\n"
             "\n【精确鼠标操作 Computer Use】\n"
             "  mousemove <x> <y>       - 移动鼠标到指定坐标\n"
             "  clickat <x> <y> [left|right|middle] - 在坐标处点击\n"
             "  dblclickat <x> <y>      - 在坐标处双击\n"
+            "  注：以上坐标是**页面视口 CSS 像素**（页面内坐标），不是屏幕坐标；"
+            "要按屏幕坐标操作桌面请用 computer 工具。\n"
             "  drag <x1> <y1> <x2> <y2> [步数] - 拖拽从A到B\n"
             "  mousescroll <x> <y> [dx] [dy] - 在坐标处滚轮\n"
             "  keycombo <键1>+<键2>     - 组合键（如 Control+C）\n"
@@ -280,6 +294,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             "snapshot": lambda _: self._accessibility_snapshot(),
             "screenshot": lambda _: self._screenshot(full_base64=False),
             "screenshot_base64": lambda _: self._screenshot(full_base64=True),
+            "download": self._download,
+            "humancheck": lambda _: self._human_check(),
+            "live": self._live,
             "click": self._click,
             "visionclick": self._vision_click,
             "type": self._type_text,
@@ -371,6 +388,7 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         "Sync API inside the asyncio loop",
         "cannot switch to a different thread",
         "browser has been closed",
+        "会话已重建",
     )
 
     @classmethod
@@ -388,15 +406,27 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             except Exception:
                 pass
 
-    def _invalidate(self) -> None:
-        """作废当前 worker 与 Playwright 引用：下一个命令会重建全新 worker。"""
-        self._worker_broken = True
-        self._worker = None
-        self._stop_playwright()
-        self._browser = None
-        self._context = None
-        self._pages = []
-        self._current_page_idx = 0
+    def _invalidate(self, cleanup_residual: bool = True) -> None:
+        """作废当前 worker 与 Playwright 引用：下一个命令会重建全新 worker。
+
+        连带清理残留浏览器进程——卡死时驱动进程停不掉 Chromium，只丢引用会泄漏进程。
+        """
+        with self._state_lock:
+            self._gen += 1                     # 作废在飞任务
+            had_session = self._had_session()
+            self._worker_broken = True
+            self._worker = None
+            self._worker_queue = None
+            self._stop_playwright()
+            self._browser = None
+            self._context = None
+            self._pages = []
+            self._current_page_idx = 0
+        if cleanup_residual and had_session:
+            try:
+                self._force_cleanup_residual()
+            except Exception:                    # noqa: BLE001
+                pass
 
     def _recover_and_retry(self, command: str, handler, args: str):
         """会话失效后的自愈：重建 worker（+必要时重开浏览器）并重试一次原命令。
@@ -455,8 +485,15 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
         box: dict = {}
         done = threading.Event()
+        gen = self._gen
 
         def _job():
+            # 世代号变了 = 这条命令属于已经作废的会话：直接丢弃，
+            # 不让卡死的旧 worker 把结果/状态写回新会话。
+            if gen != self._gen:
+                box["stale"] = True
+                done.set()
+                return
             try:
                 box["result"] = fn(*args, **kwargs)
             except BaseException as e:   # noqa: BLE001
@@ -479,6 +516,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
                 # 短等待超时（析构场景）：放弃该 worker，交给兜底清理
                 self._worker_broken = True
                 return None
+        if box.get("stale"):
+            raise RuntimeError("浏览器会话已重建（上一个 worker 已作废），请重试该命令。")
         if "error" in box:
             raise box["error"]
         return box.get("result")
@@ -568,8 +607,8 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return self._close_impl()
         result = self._dispatch(self._close_impl, wait_timeout=_wait)
         if result is None:
-            # 短等待超时（析构场景）：兜底清理残留进程
-            killed = self._force_cleanup_residual()
+            # 短等待超时（析构场景）：兜底清理残留进程（没启动过则无事可做）
+            killed = self._force_cleanup_residual() if self._had_session() else 0
             return ToolResult(
                 success=True,
                 output=f"浏览器已关闭（兜底清理 {killed} 个残留进程）。",
@@ -1310,16 +1349,114 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             info = (f"页面: {title}\n"
                     f"URL: {url}\n"
                     f"大小: {len(screenshot_bytes)} 字节")
+            # URL 就能看出是验证页时直接提示（不做额外的浏览器往返）
+            hint = human_check.hint_for_url(url)
+            metadata = {"human_check": True} if hint else {}
             if full_base64:
-                return ToolResult(success=True,
-                                  output=f"{head}{info}\n[FULL_BASE64]{base64_data}[/FULL_BASE64]")
-            return ToolResult(success=True, output=f"{head}{info}")
+                # 负载同时放 metadata：实时画面/直接调用绕过工具层时也能拿到完整图
+                metadata["screenshot_base64"] = base64_data
+                return ToolResult(
+                    success=True,
+                    output=f"{head}{info}\n{hint}\n[FULL_BASE64]{base64_data}[/FULL_BASE64]",
+                    metadata=metadata)
+            return ToolResult(success=True, output=f"{head}{info}\n{hint}".rstrip(),
+                              metadata=metadata)
         except Exception as e:
             return ToolResult(success=False, output="", error=f"截图失败: {str(e)}")
 
     # ================================================================
     # 辅助
     # ================================================================
+    def _live(self, args: str) -> ToolResult:
+        """实时画面开关：注册给 dashboard 的 SSE 端点用的抓帧器。"""
+        from tools import screencast
+
+        mode = (args or "").strip().lower() or "status"
+        if mode in ("on", "start"):
+            screencast.ACTIVE.set_capturer(self._capture_frame_for_live)
+            action = "已开启"
+        elif mode in ("off", "stop"):
+            screencast.ACTIVE.set_capturer(None)
+            action = "已关闭"
+        elif mode == "status":
+            action = "状态"
+        else:
+            return ToolResult(success=False, output="", error="用法: live on|off|status")
+        stats = screencast.ACTIVE.stats()
+        return ToolResult(
+            success=True,
+            output=(f"实时画面{action}：观看者 {stats['viewers']} 人，已推送 {stats['emitted']} 帧，"
+                    f"丢弃 {stats['dropped']} 帧（最小间隔 {stats['min_gap_ms']:.0f}ms）。\n"
+                    "打开 dashboard 页面的「实时画面」面板即可观看。"))
+
+    def _capture_frame_for_live(self) -> str:
+        """给实时画面抓一帧；浏览器没在跑就返回空（不因有人观看而拉起浏览器）。"""
+        try:
+            if not self._is_browser_alive() or not self._page_alive():
+                return ""
+        except Exception:                        # noqa: BLE001
+            return ""
+        result = self.execute("screenshot_base64")
+        if not result.success:
+            return ""
+        return str((result.metadata or {}).get("screenshot_base64") or "")
+
+    def _human_check(self) -> ToolResult:
+        """检测当前页面是否有人机验证；命中就明确"需要人工完成"。"""
+        url = str(getattr(self._page, "url", "") or "")
+        hits = []
+        for selector in human_check.DOM_SELECTORS:
+            try:
+                if self._page.query_selector(selector) is not None:
+                    hits.append(selector)
+            except Exception:                    # noqa: BLE001
+                continue
+        text = ""
+        try:
+            text = str(self._page.inner_text("body") or "")[:5000]
+        except Exception:                        # noqa: BLE001
+            pass
+        info = human_check.verdict(url=url, dom_hits=hits, text=text)
+        if not info["needs_human"]:
+            return ToolResult(success=True, output="未检测到人机验证，可以继续操作。",
+                              metadata={"human_check": False})
+        return ToolResult(
+            success=True,
+            output=f"{info['hint']}\n命中信号: {'；'.join(info['reasons'])}",
+            metadata={"human_check": True, "reasons": info["reasons"]})
+
+    def _download(self, args: str) -> ToolResult:
+        """点击 args 指定的元素，把触发的下载落盘并返回路径。"""
+        selector = (args or "").strip()
+        if not selector:
+            return ToolResult(success=False, output="",
+                              error="用法: download <选择器或文字>（点击它触发下载）")
+        timeout = float(BROWSER_CONFIG.get("download_timeout", 30))
+        os.makedirs(self._download_dir, exist_ok=True)
+        try:
+            with self._page.expect_download(timeout=timeout * 1000) as waiter:
+                clicked = self._click(selector)
+                if not clicked.success:
+                    return clicked
+            download = waiter.value
+            name = download.suggested_filename or f"download-{int(time.time())}"
+            path = os.path.join(self._download_dir, name)
+            stem, ext = os.path.splitext(path)
+            seq = 1
+            while os.path.exists(path):          # 同名不覆盖
+                path = f"{stem}-{seq}{ext}"
+                seq += 1
+            download.save_as(path)
+        except Exception as e:                   # noqa: BLE001
+            return ToolResult(
+                success=False, output="",
+                error=(f"下载失败: {str(e)[:150]}。可能是该元素不触发下载，"
+                       f"或超过 {timeout:g}s 没开始下载。"))
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        return ToolResult(
+            success=True,
+            output=f"已下载: {os.path.basename(path)}（{size} 字节）\n保存路径: {path}",
+            metadata={"path": path, "size": size})
 
     def _wait(self, seconds: str) -> ToolResult:
         try:
@@ -1394,7 +1531,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def reset(self):
         """强制重置浏览器状态（工具超时后由 ToolManager.reset_tool 调用）。
-        线程标记废弃并通知退出（若未卡死），下次命令自动重建。"""
+        线程标记废弃并通知退出（若未卡死），下次命令自动重建；在飞任务一并作废。"""
+        self._gen += 1                 # 作废在飞任务，防止卡死的 worker 事后写回状态
+        had_session = self._had_session()
         self._worker_broken = True
         wq = self._worker_queue
         self._worker_queue = None
@@ -1409,7 +1548,9 @@ class BrowserTool(BaseTool, ComputerUseMixin):
         self._context = None
         self._pages = []
         self._current_page_idx = 0
-        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node。
+        # 必须真正清掉残留的 Chromium/node 进程：旧实现只丢引用，而每次工具超时都会走到这里 → 每超时一次就泄漏一个 Chromium + Playwright node。没启动过浏览器则无需清理。
+        if not had_session:
+            return
         try:
             killed = self._force_cleanup_residual()
             if killed:
@@ -1422,7 +1563,16 @@ class BrowserTool(BaseTool, ComputerUseMixin):
 
     def __del__(self):
         try:
+            # 从没启动过浏览器就没有残留可清：跳过既避免析构里等 5 秒，
+            # 也避免半初始化实例被回收时误跑进程清理
+            if not self._had_session():
+                return
             # 析构场景短等待：worker 卡死时不被拖住，交给兜底清理
             self._close(_wait=5)
         except Exception:
             pass
+
+    def _had_session(self) -> bool:
+        """是否真的启动过浏览器（决定要不要做进程兜底清理）。"""
+        return any(getattr(self, attr, None) is not None
+                   for attr in ("_playwright", "_browser", "_context"))

@@ -99,10 +99,11 @@ class FileTool(BaseTool):
         )
 
     def build_approval_request(self, arguments: Dict[str, Any]):
-        from agent.approval import ApprovalRequest
+        from agent.approval import ApprovalRequest, is_security_critical_path
 
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
+        destination = str(arguments.get("destination", "")).strip()
         is_write = operation in ("write", "append", "copy", "move")
         is_delete = operation == "delete"
         recursive = bool(arguments.get("recursive"))
@@ -110,11 +111,19 @@ class FileTool(BaseTool):
             risk = "high" if recursive else "medium"
         else:
             risk = "medium" if is_write else "low"
+        # 写/覆盖/搬走/删除安全关键文件都要人工确认（copy/move 的目标也算）
+        targets = [path] if (is_write or is_delete) else []
+        if operation in ("copy", "move"):
+            targets.append(destination)
+        critical = any(is_security_critical_path(t) for t in targets)
+        if critical:
+            risk = "high"
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=f"file {operation} {path}" + (" recursive" if recursive else ""),
             risk_level=risk,
+            approval="on-request" if critical else "auto",
             min_sandbox_mode="workspace-write" if (is_write or is_delete) else "read-only",
         )
 

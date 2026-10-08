@@ -75,7 +75,7 @@ def test_schema_actions():
     s = tool.schema
     assert s["type"] == "object"
     assert set(s["properties"]["action"]["enum"]) == {
-        "screenshot", "a11y", "click", "type", "key", "scroll", "window"}
+        "screenshot", "a11y", "click", "type", "key", "scroll", "window", "resume"}
 
 
 def test_unknown_action(tool):

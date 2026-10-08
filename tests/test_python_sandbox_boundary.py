@@ -135,3 +135,20 @@ class TestCappedCapture:
         r = run(tool, "print('hello capped world')")
         assert r.success and "hello capped world" in r.output
         assert "已丢弃" not in r.output
+
+
+class TestSecurityCriticalFileGuard:
+    """代码里出现安全关键文件名 → 可能直接改写它们，同样要求人工确认。"""
+
+    def test_touching_critical_file_escalates(self, tool):
+        r = tool.build_approval_request({"code": "open('config.py', 'w').write('x')"})
+        assert (r.risk_level, r.approval) == ("high", "on-request")
+
+    def test_env_hint_needs_word_boundary(self, tool):
+        """`.env` 必须按词边界匹配：`os.environ` 里也含 ".env"。"""
+        r = tool.build_approval_request({"code": "import os\nos.environ['A'] = '1'"})
+        assert (r.risk_level, r.approval) == ("medium", "auto")
+
+    def test_plain_code_unchanged(self, tool):
+        r = tool.build_approval_request({"code": "print(1 + 1)"})
+        assert (r.risk_level, r.approval) == ("medium", "auto")

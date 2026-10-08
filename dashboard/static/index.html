@@ -250,6 +250,17 @@ button { font-family: inherit; cursor: pointer; border: 0; }
   .workbench.open { width: 100%; position: fixed; inset: 54px 0 0 0; z-index: 50; }
   .suggest-grid { grid-template-columns: 1fr; }
 }
+
+/* 浏览器实时画面：只显示最新帧（后端限流），关闭即停止抓帧 */
+.live-panel { position: fixed; right: 16px; bottom: 16px; width: 460px; max-width: 92vw;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.28); z-index: 60; overflow: hidden; }
+.live-panel[hidden] { display: none; }
+.live-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  font-size: 12.5px; color: var(--text2); border-bottom: 1px solid var(--border); }
+.live-head .live-stats { margin-left: auto; color: var(--text3); font-size: 11.5px; }
+.live-panel img { display: block; width: 100%; min-height: 160px; background: #111; }
+.live-empty { padding: 28px 12px; text-align: center; color: var(--text3); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -266,6 +277,7 @@ button { font-family: inherit; cursor: pointer; border: 0; }
   <span id="statusBadge" class="status-badge"><span class="dot"></span><span id="statusText">待命</span></span>
   <div class="goal-text" id="goalText">在聊天里说你想做什么，或点下方示例任务</div>
   <div class="header-right">
+    <button class="icon-btn" id="liveToggle" title="浏览器实时画面（只显示最新帧）">🖥 实时画面</button>
     <button class="icon-btn" id="wbToggle" title="展开/收起工作台">📋 工作台</button>
     <span id="connDot" class="conn-dot disconnected" title="WebSocket 连接状态"></span>
   </div>
@@ -326,6 +338,17 @@ button { font-family: inherit; cursor: pointer; border: 0; }
       <div class="wb-empty" id="wbEmpty"><div class="we-ic">🧘</div>工作台暂时空着。<br>给个任务试试，Agent 的每一步都会实时铺到这里。</div>
     </div>
   </div>
+</div>
+
+<!-- 浏览器实时画面：后端只推最新帧；关闭面板即断开 SSE，工具侧随之停止抓帧 -->
+<div class="live-panel" id="livePanel" hidden>
+  <div class="live-head">
+    <span>🖥 浏览器实时画面</span>
+    <span class="live-stats" id="liveStats">未连接</span>
+    <button class="icon-btn" id="liveClose" title="关闭">✕</button>
+  </div>
+  <img id="liveImg" alt="浏览器实时画面">
+  <div class="live-empty" id="liveEmpty">等待画面…（先让 agent 打开浏览器）</div>
 </div>
 
 <script>
@@ -465,7 +488,7 @@ function renderWorkbench() {
         ? (t.resultText ? esc(t.resultText) : '<i style="color:var(--text3)">执行成功</i>')
         : '<span class="err" style="color:var(--red)">' + esc(t.errorText || '执行失败') + '</span>';
       return '<div class="tool-item ' + (ok ? 'ok' : 'fail') + '">'
-        + '<div class="t-head" onclick="this.parentNode.classList.toggle('expanded')">'
+        + '<div class="t-head" onclick="this.parentNode.classList.toggle(\'expanded\')">'
         + '<span class="t-ic">' + (ok ? '✓' : '✗') + '</span>'
         + '<span class="t-name">' + esc(t.tool) + '</span>'
         + '<span class="t-args">' + esc(shortArgs(t.input)) + '</span>'
@@ -665,6 +688,37 @@ $('inputBox').addEventListener('blur', () => $('inputBox').classList.remove('foc
 $('sendBtn').addEventListener('click', () => sendGoal(false));
 $('demoBtn').addEventListener('click', () => sendGoal(true));
 $('wbToggle').addEventListener('click', toggleWorkbench);
+/* ================= 浏览器实时画面 =================
+   后端 SSE 只推最新帧；不打开面板就没有观看者，工具侧也不会抓帧。 */
+let liveES = null;
+let liveShown = 0;
+function toggleLive() {
+  const panel = $('livePanel');
+  if (liveES) {
+    liveES.close(); liveES = null; panel.hidden = true; return;
+  }
+  panel.hidden = false;
+  $('liveImg').style.display = 'none';
+  $('liveEmpty').style.display = 'block';
+  liveShown = 0;
+  liveES = new EventSource('/api/browser-live');
+  liveES.onmessage = (ev) => {
+    let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    const st = d.stats || {};
+    $('liveStats').textContent = `观看 ${st.viewers || 0} · 帧 ${liveShown} · 丢 ${st.dropped || 0}`;
+    if (!d.data) {
+      $('liveEmpty').textContent = '等待画面…（需要先让 agent 打开浏览器，或页面正在加载）';
+      return;
+    }
+    $('liveImg').src = 'data:image/' + (d.format || 'jpeg') + ';base64,' + d.data;
+    $('liveImg').style.display = 'block';
+    $('liveEmpty').style.display = 'none';
+    liveShown++;
+  };
+  liveES.onerror = () => { $('liveEmpty').style.display = 'block'; };
+}
+$('liveToggle').addEventListener('click', toggleLive);
+$('liveClose').addEventListener('click', () => { if (liveES) toggleLive(); });
 connect();
 setTimeout(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'get_state' })); }, 600);
 </script>

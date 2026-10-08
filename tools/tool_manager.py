@@ -2,7 +2,7 @@
 from typing import Optional
 
 from config import TOOL_CONFIG
-from tools.base import BaseTool, ToolResult, truncate_output
+from tools.base import BaseTool, ToolResult, hoist_inline_payload, truncate_output
 from tools.terminal import TerminalTool
 from tools.delegate import DelegateTool
 from tools.experience import ExperienceTool
@@ -389,7 +389,8 @@ class ToolManager:
         return self._truncate_result(result)
 
     def _truncate_result(self, result: ToolResult) -> ToolResult:
-        """统一输出截断。"""
+        """统一输出截断（先把内联图片负载搬进 metadata，截断只针对文本）。"""
+        result = hoist_inline_payload(result)
         if result.output:
             text, truncated, original = truncate_output(result.output, self.output_max_chars)
             result.output = text

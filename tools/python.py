@@ -243,18 +243,21 @@ class PythonTool(BaseTool):
         return self.execute(str(arguments.get("code", "")))
 
     def build_approval_request(self, arguments: Dict[str, Any]):
-        from agent.approval import ApprovalRequest
+        from agent.approval import ApprovalRequest, security_critical_name_hits
         code = str(arguments.get("code", "")).strip()
         # 代码中出现系统级操作痕迹视为高风险
         risky = any(kw in code for kw in (
             "subprocess", "socket", "ctypes", "winreg",
             "os.system", "os.popen", "os.spawn", "os.kill",
         ))
+        # 代码里出现安全关键文件名 → 可能绕过工具直接改写它们，同样按人工确认处理
+        critical = bool(security_critical_name_hits(code))
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=f"python 代码片段（{len(code)} 字符）",
-            risk_level="high" if risky else "medium",
+            risk_level="high" if (risky or critical) else "medium",
+            approval="on-request" if critical else "auto",
             min_sandbox_mode=self.min_sandbox_mode,
         )
 

@@ -10,9 +10,9 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse, FileResponse
+    from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
     HAS_FASTAPI = True
@@ -419,6 +419,35 @@ if HAS_FASTAPI:
     @app.get("/api/screenshots")
     async def get_screenshots():
         return {"count": len(hub._screenshots), "screenshots": hub._screenshots[-30:]}
+
+    # ---- 浏览器实时画面（SSE）---- 只推最新帧：慢客户端自然丢帧；没有观看者时工具侧不抓帧
+    _LIVE_TICK_SECONDS = 0.2
+
+    @app.get("/api/browser-live")
+    async def browser_live(request: Request):
+        from tools import screencast
+
+        async def _events():
+            screencast.ACTIVE.acquire()
+            seq = 0
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    frame = await asyncio.to_thread(screencast.ACTIVE.capture_now)
+                    payload = {"stats": screencast.ACTIVE.stats()}
+                    if frame and frame.get("seq") != seq:
+                        seq = frame["seq"]
+                        payload.update({"seq": seq, "format": frame.get("format", "jpeg"),
+                                        "data": frame.get("data", "")})
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    await asyncio.sleep(_LIVE_TICK_SECONDS)
+            finally:
+                screencast.ACTIVE.release()
+
+        return StreamingResponse(
+            _events(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ---- 文件树（只读，绑定工作目录，不暴露系统盘）----安全约束：所有路径必须解析到 WORKSPACE_ROOT 之内（realpath 防符号链接逃逸）。
     WORKSPACE_ROOT = os.path.realpath(os.getcwd())

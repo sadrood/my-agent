@@ -1696,17 +1696,21 @@ class Executor:
                     "screenshot_base64": "",
                     "vision_analysis": "",
                 }
-            # 提取 base64
+            # 提取 base64：优先 metadata（工具层会把内联负载搬进去，output 里只剩摘要），
+            # 回落旧的内联标记（直接调用工具、不走工具层时仍会看到它）
             output = result.output
-            match = re.search(r'\[FULL_BASE64\](.*?)\[/FULL_BASE64\]', output, re.DOTALL)
-            if match:
+            base64_data = str((result.metadata or {}).get("screenshot_base64") or "")
+            if not base64_data:
+                match = re.search(r'\[FULL_BASE64\](.*?)\[/FULL_BASE64\]', output, re.DOTALL)
+                base64_data = match.group(1) if match else ""
+            if base64_data:
                 return {
                     "step": "页面截图",
                     "action": "see",
                     "success": True,
                     "output": output.split("[FULL_BASE64]")[0].strip(),
                     "status": "completed",
-                    "screenshot_base64": match.group(1),
+                    "screenshot_base64": base64_data,
                     "vision_analysis": "",
                 }
         except Exception:

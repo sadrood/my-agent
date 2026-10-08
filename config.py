@@ -169,6 +169,11 @@ BROWSER_CONFIG = {
     # 持久 profile 目录（登录态落盘点）；memory/ 已被 gitignore，不入库
     "profile_dir": resolve_under_root(
         os.getenv("BROWSER_PROFILE_DIR", "./memory/browser_profile")),
+    # browser 的 download 命令：文件落盘目录 + 等待"开始下载"的上限（秒）
+    "download_dir": resolve_under_root(os.getenv("BROWSER_DOWNLOAD_DIR", "./downloads")),
+    "download_timeout": float(os.getenv("BROWSER_DOWNLOAD_TIMEOUT", "30")),
+    # dashboard 实时画面的最小抓帧间隔（毫秒；越小越流畅，也越费 CPU）
+    "live_min_gap_ms": int(os.getenv("BROWSER_LIVE_MIN_GAP_MS", "1000")),
     # 内嵌浏览器桥地址（仅桌面端模式由 Electron 主进程注入，如 http://127.0.0.1:8091/browser）。
     "embedded_url": os.getenv("MY_AGENT_EMBEDDED_BROWSER_URL", ""),
     # 自动探测内嵌桥（默认开）：即使环境变量没注入成功，只要桌面端在运行（桥 health 检查通过），browser 工具一律走内嵌浏览器，禁止弹出独立 Playwright 窗口；桌面端没开时（纯 CLI 场景）才回退外部浏览器。

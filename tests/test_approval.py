@@ -1,9 +1,11 @@
 """
 审批策略与命令安全测试（主流 approval_policy 语义）。
 """
+import os
+
 import pytest
 
-from agent.approval import ApprovalPolicy, CommandSafety
+from agent.approval import ApprovalPolicy, CommandSafety, is_security_critical_path
 from agent.execpolicy import ExecPolicy
 from config import APPROVAL_CONFIG
 from tools.base import ApprovalRequest
@@ -334,3 +336,51 @@ class TestExecPolicyIntegration:
         assert p.exec_policy is not None
         assert p.decide(term_req("npm install lodash")).allowed is False
         assert p.decide(term_req("git status")).allowed is True
+
+
+# ----------------------------------------------------------------------
+# 安全关键文件：改写必须人工确认，无人值守（never）下直接拒绝
+# ----------------------------------------------------------------------
+
+class TestSecurityCriticalPath:
+    def test_project_files_listed(self):
+        from config import PROJECT_ROOT
+        assert is_security_critical_path("config.py")
+        assert is_security_critical_path(".env")
+        assert is_security_critical_path(os.path.join(PROJECT_ROOT, "config.py"))
+        assert is_security_critical_path(os.path.join(PROJECT_ROOT, "agent", "sandbox.py"))
+
+    def test_normalizes_dots_case_and_separators(self):
+        assert is_security_critical_path("./agent/approval.py")
+        assert is_security_critical_path("agent/../agent/approval.py")
+        assert is_security_critical_path("AGENT/APPROVAL.PY")
+        assert is_security_critical_path("agent\\guardian.py")
+
+    def test_ordinary_paths_not_critical(self):
+        for path in ("tools/file.py", "agent/approval.py.bak", "agent", "", None):
+            assert is_security_critical_path(path) is False
+
+
+class TestSecurityCriticalApprovalFlow:
+    def _edit(self, path):
+        from tools.patch import EditTool
+        return EditTool().build_approval_request(
+            {"file_path": path, "old_string": "x", "new_string": "y"})
+
+    def test_interactive_policy_really_asks(self):
+        asked = []
+        p = ApprovalPolicy(mode="on-failure", sandbox_mode="workspace-write",
+                           interactive=False, approver=lambda r: asked.append(r) or True)
+        d = p.decide(self._edit("config.py"))
+        assert d.allowed is True and d.required_approval is True
+        assert asked and asked[0].risk_level == "high", "必须走人工确认，不能自动放行"
+
+    def test_never_policy_rejects(self):
+        p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+        d = p.decide(self._edit("agent/approval.py"))
+        assert d.allowed is False
+        assert "never" in d.reason
+
+    def test_ordinary_file_is_not_escalated(self):
+        p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+        assert p.decide(self._edit("tools/file.py")).allowed is True
