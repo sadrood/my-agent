@@ -176,6 +176,13 @@ BROWSER_CONFIG = {
     "live_min_gap_ms": int(os.getenv("BROWSER_LIVE_MIN_GAP_MS", "1000")),
     # 内嵌浏览器桥地址（仅桌面端模式由 Electron 主进程注入，如 http://127.0.0.1:8091/browser）。
     "embedded_url": os.getenv("MY_AGENT_EMBEDDED_BROWSER_URL", ""),
+    # 浏览器后端：auto=桥 > ego > Playwright；也可强制 playwright / embedded / ego
+    "backend": os.getenv("BROWSER_BACKEND", "auto").strip().lower(),
+    # ego 后端（Edge 内核的共享浏览器，与 DSH 内置浏览器同一实例）
+    "ego_enabled": os.getenv("BROWSER_EGO_ENABLED", "true").lower() == "true",
+    "ego_space": os.getenv("BROWSER_EGO_SPACE", "my-agent"),
+    "ego_headless": os.getenv("BROWSER_EGO_HEADLESS", "false").lower() == "true",
+    "ego_timeout": float(os.getenv("BROWSER_EGO_TIMEOUT", "120")),
     # 自动探测内嵌桥（默认开）：即使环境变量没注入成功，只要桌面端在运行（桥 health 检查通过），browser 工具一律走内嵌浏览器，禁止弹出独立 Playwright 窗口；桌面端没开时（纯 CLI 场景）才回退外部浏览器。
     "embedded_auto_detect": os.getenv("BROWSER_EMBEDDED_AUTO", "true").lower() == "true",
 }

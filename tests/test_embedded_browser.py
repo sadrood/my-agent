@@ -192,6 +192,9 @@ def test_tool_manager_selects_embedded_when_bridge_env(monkeypatch):
     # 未注入环境变量且桥离线（显式置离线，避免开发机上桌面端恰好开着导致探测成功）
     monkeypatch.delenv("MY_AGENT_EMBEDDED_BROWSER_URL", raising=False)
     monkeypatch.setattr("tools.embedded_browser.probe_bridge", lambda timeout=0.8: False)
+    # 桥离线后是否被 ego 接管由 ego_enabled 决定；这里固定关掉，断言 Playwright 兜底仍在
+    from config import BROWSER_CONFIG
+    monkeypatch.setitem(BROWSER_CONFIG, "ego_enabled", False)
     created.clear()
     tool = tm_mod._create_browser_tool()
     assert "embedded" not in created
@@ -217,8 +220,10 @@ def test_tool_manager_autodetects_running_bridge(monkeypatch):
     monkeypatch.setattr("tools.embedded_browser.probe_bridge", lambda timeout=0.8: True)
     assert isinstance(tm_mod._create_browser_tool(), _FakeEmbedded)
 
-    # 桥离线：回退外部 BrowserTool
+    # 桥离线：不再走内嵌（ego 是否接管由 ego_enabled 决定，这里关掉以断言 Playwright 兜底）
     monkeypatch.setattr("tools.embedded_browser.probe_bridge", lambda timeout=0.8: False)
+    from config import BROWSER_CONFIG
+    monkeypatch.setitem(BROWSER_CONFIG, "ego_enabled", False)
     created.clear()
     tool = tm_mod._create_browser_tool()
     assert "embedded" not in created

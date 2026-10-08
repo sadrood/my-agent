@@ -16,8 +16,20 @@ import os
 
 def _create_browser_tool() -> BaseTool:
     """创建浏览器工具。
-    桌面端未运行（纯 CLI 场景）→ 才回退独立 Playwright 浏览器。"""
+
+    优先级：显式 BROWSER_BACKEND > 桌面端内嵌桥（人可见可接管）> ego（Edge 共享浏览器）
+    > Playwright（纯 CLI 兜底）。桌面端没跑、也没装 ego 时才回退独立浏览器。"""
     from config import BROWSER_CONFIG
+
+    backend = str(BROWSER_CONFIG.get("backend", "auto") or "auto").strip().lower()
+    if backend == "playwright":
+        return BrowserTool()
+    if backend == "ego":
+        from tools.ego_browser import EgoBrowserTool
+        return EgoBrowserTool()
+    if backend == "embedded":
+        from tools.embedded_browser import EmbeddedBrowserTool
+        return EmbeddedBrowserTool()
 
     # 仅以实时环境变量为准（config 里 embedded_url 是导入时快照，会被陈旧值误导：桌面端曾注入过该变量时，即使当前已删除也会误走内嵌分支）。
     if os.getenv("MY_AGENT_EMBEDDED_BROWSER_URL"):
@@ -32,6 +44,13 @@ def _create_browser_tool() -> BaseTool:
             if probe_bridge():
                 from tools.embedded_browser import EmbeddedBrowserTool
                 return EmbeddedBrowserTool()
+        except Exception:
+            pass
+    if BROWSER_CONFIG.get("ego_enabled", True):
+        try:
+            from tools.ego_browser import EgoBrowserTool, ego_available
+            if ego_available():
+                return EgoBrowserTool()
         except Exception:
             pass
     return BrowserTool()
