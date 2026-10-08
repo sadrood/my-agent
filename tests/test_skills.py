@@ -806,6 +806,9 @@ class TestSkillPackManager:
             os.symlink(str(outside), str(pack / "excel" / "link.txt"))
         except (OSError, NotImplementedError):
             pytest.skip("当前平台不支持创建符号链接")
+        # 不报错但 islink 为假 = 环境 symlink 语义不完整；照常执行会伪造出安装失败
+        if not os.path.islink(str(pack / "excel" / "link.txt")):
+            pytest.skip("环境的符号链接语义不完整（创建未报错但不构成 reparse point）")
         sign_pack(pack, exclude=["excel/link.txt"])
         mgr, target = make_pack_manager(tmp_path)
         res = mgr.install_pack(str(pack), target)

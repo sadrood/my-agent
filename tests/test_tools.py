@@ -269,8 +269,15 @@ class TestTerminalBackground:
             assert "仍在运行" in out.output
 
             t.execute(f"bg kill {job_id}")
+            # 子进程输出不保证 kill 后立刻落盘：轮询等它出现，别用一次读取赌时序
+            deadline = time.time() + 5.0
             out2 = t.execute(f"bg output {job_id} 5")
+            while time.time() < deadline and "暂无输出" in out2.output:
+                time.sleep(0.1)
+                out2 = t.execute(f"bg output {job_id} 5")
             assert out2.success and "已结束" in out2.output
+            assert "暂无输出" not in out2.output, \
+                f"kill 后 5s 内仍读不到后台输出：{out2.output!r}"
         finally:
             t.execute(f"bg kill {job_id}")
 
