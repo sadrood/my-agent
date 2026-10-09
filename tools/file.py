@@ -118,11 +118,13 @@ class FileTool(BaseTool):
         critical = any(is_security_critical_path(t) for t in targets)
         if critical:
             risk = "high"
+        hit = next((t for t in targets if t and is_security_critical_path(t)), "")
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=f"file {operation} {path}" + (" recursive" if recursive else ""),
             risk_level=risk,
+            reason=f"目标是安全关键文件：{hit}" if critical and hit else "",
             approval="on-request" if critical else "auto",
             min_sandbox_mode="workspace-write" if (is_write or is_delete) else "read-only",
         )

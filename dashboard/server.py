@@ -1271,6 +1271,10 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
             config.llm_base_url = kwargs.get("base_url") or config.llm_base_url
             config.llm_api_key = kwargs.get("api_key") or config.llm_api_key
         config.approval_policy = lambda: _mode_to_policy(permission_modes.get(conv_id_y))
+        # auto 模式 = 完全权限：连"工具主动要求人工确认"也不再拦，
+        # 否则用户切了自动执行，安全关键文件/桌面操控仍会被静默拒绝（既不弹卡也不执行）
+        config.approval_honor_on_request = (
+            lambda: str(permission_modes.get(conv_id_y, "ask") or "ask").lower() != "auto")
         config.approver = approval_broker.approver_for(conv_id_y)
         if perm_mode == "block":
             config.sandbox_mode = "read-only"

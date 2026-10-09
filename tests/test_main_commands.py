@@ -1,7 +1,35 @@
 """
 斜杠命令解析测试（容忍连写 / 拼写建议）。
 """
-from main import _parse_command, build_parser
+from main import _parse_command, build_parser, parse_model_spec
+
+
+class TestParseModelSpec:
+    """`/model 名[@地址[#key]]` 的解析（换端点通常要同时换 key）。"""
+
+    def test_name_only(self):
+        assert parse_model_spec("deepseek-flash") == ("deepseek-flash", None, None)
+
+    def test_name_with_endpoint(self):
+        assert parse_model_spec("m@http://172.16.10.242:3000/v1") == (
+            "m", "http://172.16.10.242:3000/v1", None)
+
+    def test_name_endpoint_and_key(self):
+        assert parse_model_spec("m@http://x/v1#sk-abc") == ("m", "http://x/v1", "sk-abc")
+
+    def test_trailing_hash_means_no_key(self):
+        assert parse_model_spec("m@http://x/v1#") == ("m", "http://x/v1", None)
+
+    def test_blank_means_no_override(self):
+        assert parse_model_spec("") == (None, None, None)
+        assert parse_model_spec("   ") == (None, None, None)
+
+    def test_whitespace_is_trimmed(self):
+        assert parse_model_spec("  m @ http://x/v1 # sk-1 ") == ("m", "http://x/v1", "sk-1")
+
+    def test_key_without_endpoint_is_part_of_the_name(self):
+        """没有 `@` 时不解析 key（`#` 只在地址后面才有意义）。"""
+        assert parse_model_spec("m#sk-abc") == ("m#sk-abc", None, None)
 
 
 class TestCliFlags:

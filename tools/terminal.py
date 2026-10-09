@@ -273,8 +273,8 @@ class TerminalTool(BaseTool):
         command = str(arguments.get("command", "")).strip()
         risk = CommandSafety.classify(command)
         # 命令改写安全关键文件（审批/沙箱/配置本身）→ 强制人工确认；只读命令豁免
-        critical = (bool(security_critical_name_hits(command))
-                    and not CommandSafety.is_readonly(command))
+        hits = security_critical_name_hits(command)
+        critical = bool(hits) and not CommandSafety.is_readonly(command)
         if critical:
             risk = "high"
         return ApprovalRequest(
@@ -282,6 +282,8 @@ class TerminalTool(BaseTool):
             arguments=arguments,
             command=command,
             risk_level=risk,
+            # 说明是"哪个名字"触发的：不然只有一句"要求批准"，人与模型都不知道该改什么
+            reason=f"命令涉及安全关键文件：{', '.join(hits)}" if critical else "",
             approval="on-request" if critical else "auto",
             min_sandbox_mode=self.min_sandbox_mode,
         )

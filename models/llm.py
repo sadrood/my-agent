@@ -381,15 +381,19 @@ class LLM:
 
     def compact_threshold_tokens(self, model: str = None) -> int:
         """压缩触发阈值：COMPACT_TOKEN_THRESHOLD 显式 >0 优先；
-        否则按网关报告的模型窗口 × COMPACT_WINDOW_RATIO（默认 0.75）；
-        窗口查不到时回退 240_000（1M 窗口约 24% 的保守点）。"""
+        否则按模型窗口 × COMPACT_WINDOW_RATIO（默认 0.75）；窗口取网关报告，
+        网关不报就查能力目录（实测覆盖/学习缓存/models.dev），都查不到才回退 240_000。"""
         try:
             from config import COMPACT_CONFIG
             explicit = int(COMPACT_CONFIG.get("token_threshold") or 0)
             if explicit > 0:
                 return explicit
             ratio = float(COMPACT_CONFIG.get("window_ratio") or 0.75)
-            window = self.fetch_context_window(model or self.default_model)
+            name = model or self.default_model
+            window = self.fetch_context_window(name)
+            if not window:
+                from models import model_catalog
+                window = model_catalog.context_window(name, str(self.client.base_url))
             if window and window > 0:
                 return max(10_000, int(window * ratio))
         except Exception:

@@ -13,6 +13,28 @@ from agent.memory import Memory
 from config import LOG_CONFIG
 
 
+def parse_model_spec(spec: str) -> tuple:
+    """解析 `/model` 的参数，返回 (模型名, 端点, key)，缺省项为 None。
+
+    支持 `名`、`名@地址`、`名@地址#key`：换端点通常也得换 key（沿用主 key 打别家端点只会 401）。
+    key 只作用于本次会话，不写进 .env、也不写进会话文件。
+    """
+    target = str(spec or "").strip()
+    if not target:
+        return None, None, None
+    model_name, base_url, api_key = target, None, None
+    if "@" in target:
+        model_name, rest = target.split("@", 1)
+        model_name, rest = model_name.strip(), rest.strip()
+        # URL 里不会出现 `#`，用它分隔 key 不会和 `@` 冲突
+        if "#" in rest:
+            base_url, api_key = rest.split("#", 1)
+            base_url, api_key = base_url.strip(), api_key.strip() or None
+        else:
+            base_url = rest or None
+    return model_name or None, base_url, api_key
+
+
 def build_config(args) -> AgentConfig:
     """根据命令行参数构建 AgentConfig。
     注意字段传 None 才是"读配置中心"；传恒定 bool 会把 .env 总开关顶掉
@@ -208,6 +230,29 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
     agent = Agent(config=config or AgentConfig(verbose=True))
     conv_id = agent.config.session_name or generate_conversation_id()
     agent.config.session_name = conv_id
+    # 会话 id 传给浏览器适配器：ego 后端按它分配独立任务空间（互不抢标签页）
+    os.environ["MY_AGENT_SESSION_ID"] = conv_id
+
+    # 进程级运行日志 + 关窗兜底：终端被强杀时至少留下"是谁、为什么没了"和已落盘的消息
+    try:
+        from agent import console_guard, recover, run_log
+        run_log.start(extra={"session": conv_id, "model": agent.llm.default_model,
+                             "base_url": str(agent.llm.client.base_url)})
+        agent._closed_by_signal = False
+
+        def _flush_on_exit(reason):
+            agent._closed_by_signal = True
+            agent.flush_on_exit(reason)
+
+        console_guard.register_exit_hook(_flush_on_exit, "session-flush")
+        console_guard.install_close_handler()
+        for _orphan in recover.find_orphans(hours=24)[:3]:
+            print_warning(
+                f"上次运行被中断过：{_orphan['run_id']}（{_orphan['events']} 事件）。"
+                f"恢复会话：python -m agent.recover --run {_orphan['run_id']}",
+                use_rich=True)
+    except Exception as _e:                          # noqa: BLE001
+        print_warning(f"运行日志/关窗兜底未启用: {str(_e)[:80]}", use_rich=True)
 
     conv = store.load_conversation(conv_id)
 
@@ -377,17 +422,14 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                     f"当前模型: {agent.llm.default_model} @ {agent.llm.client.base_url}",
                     style="accent",
                 )
-                print_info("切换: /model <模型名> [@<API地址>]（本次会话生效，不写入 .env）", style="info")
+                print_info("切换: /model <模型名> [@<API地址>[#<key>]]（本次会话生效，不写入 .env）", style="info")
                 continue
-            # 支持 /model name 或 /model name@base_url
-            target = cmd_args.strip()
-            model_name = target
-            base_url = None
-            if "@" in target:
-                model_name, base_url = target.split("@", 1)
-                model_name, base_url = model_name.strip(), base_url.strip()
+            # 支持 /model name、/model name@base_url、/model name@base_url#api_key
+            # （换端点必须能同时换 key：沿用主 key 打别家端点只会 401）
+            model_name, base_url, api_key = parse_model_spec(cmd_args)
             try:
-                info = agent.switch_model(model=model_name or None, base_url=base_url)
+                info = agent.switch_model(model=model_name or None, base_url=base_url,
+                                          api_key=api_key)
                 # 持久化绑定：该对话从此记住这个模型（恢复时自动切回）
                 try:
                     msgs = [
@@ -401,8 +443,11 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                     )
                 except Exception:
                     pass
+                # 只回显 key 前 6 位（与 /config 一致），不把密钥明文打印进终端/日志
+                _k = (info.get("api_key") or "")[:6]
+                _ktag = f"，key {_k}…" if _k else ""
                 print_info(
-                    f"已切换模型: {info['model']} @ {info['base_url']}（临时生效，已绑定当前对话）",
+                    f"已切换模型: {info['model']} @ {info['base_url']}{_ktag}（临时生效，已绑定当前对话）",
                     style="accent",
                 )
             except Exception as e:
@@ -469,6 +514,31 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print(f"[dim]{agent.consents.summary()}[/dim]")
             c.print("[dim]  要对某次拦截放行：直接说「<那件事> 我允许」/「放行」/「可以执行」，"
                     "或拦截当场答 y / always[/dim]")
+            continue
+        if cmd == "permission":
+            # 会话内实时切权限档（只有提示符里能切；模型没有提权工具）
+            from agent.approval import PERMISSION_HELP
+            c.print()
+            name = (cmd_args or "status").strip().lower()
+            if name in ("", "status", "show"):
+                st = agent.approval.status()
+                print_info("当前权限:", style="primary")
+                c.print(f"[dim]  策略 {st['mode']} · 沙箱 {st['sandbox_mode']} · "
+                        f"人工确认 {'尊重' if st['honor_on_request'] else '不拦（完全权限）'}[/dim]")
+                print_info(f"切换: /permission {{{PERMISSION_HELP}}}", style="info")
+                continue
+            try:
+                st = agent.approval.apply_preset(name)
+            except ValueError as e:
+                print_warning(str(e), use_rich=True)
+                continue
+            # 同步到 config，保证之后重建执行器时仍是这一档
+            agent.config.approval_policy = st["mode"]
+            agent.config.sandbox_mode = st["sandbox_mode"]
+            agent.config.approval_honor_on_request = st["honor_on_request"]
+            print_info(f"已切换权限: 策略 {st['mode']} · 沙箱 {st['sandbox_mode']} · "
+                       f"人工确认 {'尊重' if st['honor_on_request'] else '不拦'}"
+                       f"（本会话生效，不写 .env）", style="accent")
             continue
         if cmd == "image":
             # 文生图：生成图片并保存到本地
@@ -568,6 +638,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/research <主题>     深度研究",
                 "/article <主题>      文章工坊（多模型互审写作，可用 | 附要求）",
                 "/consent             Guardian 放行台账（被拦待放行 / 已授权）",
+                "/permission [档]     权限档：ask（每次确认）/ auto（自动执行）/ full（完全权限）/ block（全禁）",
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
@@ -575,7 +646,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
                 "/history [条数]      查看当前对话的历史记录（默认 20 条）",
                 "/new                新开一个对话",
-                "/model [名@地址]     查看 / 切换模型（绑定当前对话）",
+                "/model [名[@地址[#key]]]  查看 / 切换模型（绑定当前对话）",
                 "/config             查看当前生效配置",
                 "/compact            手动压缩对话历史（超长时减少上下文占用）",
                 "/goal [内容]         查看 / 设置当前会话持久目标",
@@ -589,7 +660,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/image", "/memory", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/image", "/memory", "/help"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
                 f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"

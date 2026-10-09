@@ -13,6 +13,30 @@ from tools.patch import EditTool
 from tools.todo import TodoTool
 import os
 
+#: 门控工具：低频且 schema 大，默认不随每轮请求发送（省提示词 token），
+#: 由 `tools` 工具按需装载。判据：schema ≥1KB 且多数会话用不到。
+GATED_TOOLS = frozenset({
+    "zhihu", "zhihu_draft", "toonflow", "video_edit", "video_gen", "tts",
+    "article", "installer", "computer", "hello_local",
+})
+
+#: 门控工具的装载入口（自身必须常驻，否则无从装载）
+META_TOOL_NAME = "tools"
+
+#: 目标文本里出现这些词就自动装载对应门控工具（防"模型忘了 load"）
+GATED_KEYWORDS = {
+    "zhihu": ("知乎", "zhihu"),
+    "zhihu_draft": ("知乎草稿", "存草稿"),
+    "toonflow": ("短剧", "toonflow"),
+    "video_edit": ("视频剪辑", "剪视频", "ffmpeg"),
+    "video_gen": ("生成视频", "文生视频", "短视频"),
+    "tts": ("配音", "语音合成", "tts"),
+    "article": ("文章工坊", "写文章", "公众号"),
+    "computer": ("桌面操控", "操作电脑", "鼠标键盘"),
+    "installer": ("安装插件", "技能包", "mcp 插件"),
+    "hello_local": ("hello_local",),
+}
+
 
 def _create_browser_tool() -> BaseTool:
     """创建浏览器工具。
@@ -84,6 +108,8 @@ class ToolManager:
     def __init__(self, output_max_chars: int = None):
         self._tools: dict[str, BaseTool] = {}
         self.output_max_chars = output_max_chars or TOOL_CONFIG.get("output_max_chars", 8000)
+        #: 本会话已装载的门控工具（只影响 schema 发不发，不影响可调用性）
+        self._loaded_gated: set = set()
 
         # 注册默认内置工具
         browser = _create_browser_tool()
@@ -200,6 +226,20 @@ class ToolManager:
             if ZHIHU_CONFIG.get("enabled", True):
                 from tools.zhihu import ZhihuTool
                 self.register(ZhihuTool())
+        except Exception:
+            pass
+
+        # 工具目录（按需装载门控工具）：必须常驻，否则模型无从装载
+        try:
+            from tools.tool_meta import ToolsTool
+            self.register(ToolsTool(manager=self))
+        except Exception:
+            pass
+
+        # 上下文取回（零驻留折叠掉的原文按句柄取回）：必须常驻
+        try:
+            from tools.context_tool import ContextTool
+            self.register(ContextTool())
         except Exception:
             pass
 
@@ -336,17 +376,104 @@ class ToolManager:
             lines.append(f"   {tool.description}")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------
+    # 工具 schema 门控（省提示词 token）
+    # ------------------------------------------------------------
+
+    def gated_names(self) -> list:
+        """被门控的工具名（已注册、但 schema 默认不发）。"""
+        return [n for n in self._tools if n in GATED_TOOLS]
+
+    def core_names(self) -> list:
+        """常驻工具名（schema 每轮都发）。"""
+        return [n for n in self._tools if n not in GATED_TOOLS and n != META_TOOL_NAME]
+
+    def loaded_gated(self) -> list:
+        """本会话已装载的门控工具（保持注册顺序，便于对照）。"""
+        return [n for n in self._tools if n in self._loaded_gated]
+
+    def mark_loaded(self, names) -> tuple:
+        """装载门控工具；返回 (已装载, 忽略的名字)。"""
+        loaded, unknown = [], []
+        for name in names or []:
+            key = str(name).strip()
+            if key in self._tools and key in GATED_TOOLS:
+                if key not in self._loaded_gated:
+                    loaded.append(key)
+                self._loaded_gated.add(key)
+            else:
+                unknown.append(key)
+        return loaded, unknown
+
+    def mark_unloaded(self, names) -> tuple:
+        """卸下已装载的门控工具；返回 (已卸下, 忽略的名字)。"""
+        dropped, unknown = [], []
+        for name in names or []:
+            key = str(name).strip()
+            if key in self._loaded_gated:
+                self._loaded_gated.discard(key)
+                dropped.append(key)
+            else:
+                unknown.append(key)
+        return dropped, unknown
+
+    def autoload_for_text(self, text: str) -> list:
+        """目标里明确提到某门控工具就自动装载（省掉"忘了 load"的一轮）。"""
+        blob = str(text or "").lower()
+        if not blob:
+            return []
+        hits = []
+        for name, words in GATED_KEYWORDS.items():
+            if name not in self._tools or name in self._loaded_gated:
+                continue
+            if any(word.lower() in blob for word in words):
+                hits.append(name)
+        if hits:
+            self.mark_loaded(hits)
+        return hits
+
+    @staticmethod
+    def _one_line(text: str, limit: int = 46) -> str:
+        """取描述的第一句（够模型判断用途即可，别把整段描述搬进提示词）。"""
+        line = str(text or "").strip().split("\n")[0]
+        for sep in ("。", "；", "：", ". "):
+            if sep in line:
+                line = line.split(sep)[0]
+                break
+        line = line.strip()
+        return line[:limit] + ("…" if len(line) > limit else "")
+
+    def tools_hint(self, detail: bool = False) -> str:
+        """门控工具的一行式清单（detail=True 时给 tools list 用，带装载状态）。"""
+        gated = self.gated_names()
+        if not gated:
+            return "（没有需要按需装载的工具）"
+        loaded = set(self._loaded_gated)
+        lines = ["## 按需工具（schema 未常驻，用时先 tools load）"]
+        if detail:
+            lines.append("用 tools load <名字> 装载；已装载的下一轮即可调用。")
+        for name in gated:
+            tool = self._tools.get(name)
+            mark = "[已装载] " if name in loaded else ""
+            lines.append(f"- {mark}{name}: {self._one_line(getattr(tool, 'description', ''))}")
+        if not detail:
+            lines.append("（用 tools list 看说明，tools load <名字> 装载）")
+        return "\n".join(lines)
+
+    def list_openai_schemas(self, all_tools: bool = False) -> list[dict]:
+        """function calling 格式的工具描述：常驻工具 + 已装载的门控工具。
+
+        all_tools=True 时返回全部（自检/对账用）。
+        """
+        out = []
+        for name, tool in self._tools.items():
+            if all_tools or name not in GATED_TOOLS or name in self._loaded_gated:
+                out.append(tool.to_openai_schema())
+        return out
+
     def get_all_descriptions(self) -> str:
         """兼容旧调用（Team 模块使用）：返回全部工具描述。"""
         return self.get_tools_description()
-
-    # ================================================================
-    # JSON Schema 接口
-    # ================================================================
-
-    def list_openai_schemas(self) -> list[dict]:
-        """全部工具的 function calling 格式描述。"""
-        return [tool.to_openai_schema() for tool in self._tools.values()]
 
     def get_tool_schema(self, tool_name: str) -> Optional[dict]:
         """获取单个工具的 JSON Schema。"""

@@ -158,10 +158,55 @@ COMPACT_CONFIG = {
 }
 
 # ============================================================
+# 零驻留上下文配置
+# ============================================================
+CONTEXT_STORE_CONFIG = {
+    "enabled": os.getenv("CONTEXT_STORE_ENABLED", "true").lower() == "true",
+    # 单条工具输出超过这个字符数就不留在消息里，只留指针（可按句柄逐字取回）
+    "threshold_chars": int(os.getenv("CONTEXT_STORE_THRESHOLD_CHARS", "3000")),
+    # 旧历史压缩方式：pointer=确定性指针（不调模型、无损可还原）/ summary=LLM 摘要
+    "compact_mode": os.getenv("CONTEXT_COMPACT_MODE", "pointer").strip().lower(),
+    # 指针落盘目录（相对项目根）
+    "dir": os.getenv("CONTEXT_STORE_DIR", "memory/ctx"),
+}
+
+# ============================================================
+# 运行日志配置（进程级日志：启动环境/未捕获异常/退出原因）
+# ============================================================
+RUN_LOG_CONFIG = {
+    "enabled": os.getenv("RUN_LOG_ENABLED", "true").lower() == "true",
+    # 放 memory/ 下：运行期产物不进版本库（.gitignore 已忽略 memory/）
+    "dir": os.getenv("RUN_LOG_DIR", "memory/logs"),
+    # 会话增量落盘：主循环每轮就把新消息写进会话文件，被强杀最多丢最后一条
+    "incremental_session": os.getenv("SESSION_INCREMENTAL_SAVE", "true").lower() == "true",
+    # 增量写盘的最小间隔（秒）：太小会把整个会话文件反复重写
+    "incremental_interval_seconds": float(os.getenv("SESSION_INCREMENTAL_INTERVAL", "5")),
+}
+
+# ============================================================
+# QQ 机器人桥配置（agent/qqbot.py：用 QQ 私聊驱动 agent）
+# 凭证只从环境变量读；白名单为空时拒绝所有人。
+# ============================================================
+QQBOT_CONFIG = {
+    "app_id": os.getenv("QQBOT_APP_ID", ""),
+    "app_secret": os.getenv("QQBOT_APP_SECRET", ""),
+    "allow_from": os.getenv("QQBOT_ALLOW_FROM", ""),
+    # 允许的权限档：ask（需确认的操作问 QQ）/ block（全禁）；**不支持 full**
+    "permission": os.getenv("QQBOT_PERMISSION", "ask"),
+    "max_chars": int(os.getenv("QQBOT_MAX_CHARS", "2000")),
+    "rate_per_minute": int(os.getenv("QQBOT_RATE_PER_MINUTE", "6")),
+    # 群消息默认忽略：进群等于群里任何人都能远程使唤这台电脑
+    "allow_group": os.getenv("QQBOT_ALLOW_GROUP", "false").lower() == "true",
+    # 群白名单（group_openid，逗号分隔）：allow_group 打开后也只有这些群会被响应
+    "allow_groups": os.getenv("QQBOT_ALLOW_GROUPS", ""),
+    # 桥的工作目录（留空 = 当前目录）
+    "workspace": os.getenv("QQBOT_WORKSPACE", ""),
+}
+
+# ============================================================
 # 浏览器配置
 # ============================================================
-BROWSER_CONFIG = {
-    "headless": os.getenv("BROWSER_HEADLESS", "false").lower() == "true",
+BROWSER_CONFIG = {    "headless": os.getenv("BROWSER_HEADLESS", "false").lower() == "true",
     "viewport_width": int(os.getenv("BROWSER_VIEWPORT_WIDTH", "1280")),
     "viewport_height": int(os.getenv("BROWSER_VIEWPORT_HEIGHT", "720")),
     # 持久浏览器（内置浏览器）：launch_persistent_context + 用户数据目录，登录态（cookie/localStorage）跨次启动保留——需要登录的站点先手动登录一次， agent 之后复用会话。
@@ -182,7 +227,12 @@ BROWSER_CONFIG = {
     "ego_enabled": os.getenv("BROWSER_EGO_ENABLED", "true").lower() == "true",
     "ego_space": os.getenv("BROWSER_EGO_SPACE", "my-agent"),
     "ego_headless": os.getenv("BROWSER_EGO_HEADLESS", "false").lower() == "true",
+    # 会话隔离：每个 agent 进程/会话一个任务空间（各自窗口与标签页），互不抢页面
+    "ego_isolate": os.getenv("BROWSER_EGO_ISOLATE", "true").lower() == "true",
     "ego_timeout": float(os.getenv("BROWSER_EGO_TIMEOUT", "120")),
+    # 光标浮层徽标上的 agent 名（运行时默认写死 "DeepSeek"），以及是否显示浮层
+    "ego_cursor_name": os.getenv("BROWSER_EGO_CURSOR_NAME", "my_agent"),
+    "ego_cursor": os.getenv("BROWSER_EGO_CURSOR", "true").lower() == "true",
     # 自动探测内嵌桥（默认开）：即使环境变量没注入成功，只要桌面端在运行（桥 health 检查通过），browser 工具一律走内嵌浏览器，禁止弹出独立 Playwright 窗口；桌面端没开时（纯 CLI 场景）才回退外部浏览器。
     "embedded_auto_detect": os.getenv("BROWSER_EMBEDDED_AUTO", "true").lower() == "true",
 }
@@ -533,6 +583,9 @@ APPROVAL_CONFIG = {
     # 审批决策日志最多保留条数（长驻进程里只增不减会越用越慢；只影响报表口径）
     "decision_log_max": int(os.getenv("APPROVAL_DECISION_LOG_MAX", "200")),
     "dangerous_requires_approval": os.getenv("APPROVAL_DANGEROUS_REQUIRES", "true").lower() == "true",
+    # 是否尊重工具自己声明的"必须人工确认"（安全关键文件 / 桌面操控）：
+    # false = 完全权限模式，不再拦这些操作，直接按策略处理（never 下即放行）。
+    "honor_on_request": os.getenv("APPROVAL_HONOR_ON_REQUEST", "true").lower() == "true",
     # 命令白名单（深度防御）：true = 终端命令只有命中白名单才按原策略放行，未命中的一律升级为需人工批准（never/无人值守下直接拒绝）。
     "command_whitelist": os.getenv("APPROVAL_COMMAND_WHITELIST", "false").lower() == "true",
     # 追加白名单正则（| 分隔），在内置只读白名单基础上放行项目自有安全命令

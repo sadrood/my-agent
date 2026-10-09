@@ -165,3 +165,27 @@ class TestPreflightWiring:
         assert "assert 110 == 100" in res.error
         assert res.metadata.get("test_summary")
         assert target.read_text(encoding="utf-8") == "x = 0\n", "失败后应已回滚"
+
+
+class TestRelatedTestScope:
+    """preflight 的测试范围选取：选不到就退回全套，而全套在 180s 里跑不完。"""
+
+    def _cmd(self, target, test_cmd="pytest tests -q"):
+        return EditTool()._related_test_command(str(target), test_cmd)
+
+    def test_editing_a_test_file_targets_that_file(self, tmp_path):
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        target = tests_dir / "test_demo_thing.py"
+        target.write_text("", encoding="utf-8")
+        cmd = self._cmd(target)
+        assert os.path.join("tests", "test_demo_thing.py") in cmd
+        assert cmd.count("test_demo_thing.py") == 1
+
+    def test_editing_a_module_still_picks_its_named_test(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_ego_browser.py").write_text("", encoding="utf-8")
+        src = tmp_path / "tools" / "ego_browser.py"
+        src.parent.mkdir()
+        src.write_text("", encoding="utf-8")
+        assert os.path.join("tests", "test_ego_browser.py") in self._cmd(src)

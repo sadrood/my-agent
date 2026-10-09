@@ -102,6 +102,7 @@ class EditTool(BaseTool):
             arguments=arguments,
             command=f"edit {path}",
             risk_level="high" if critical else "medium",
+            reason=f"目标是安全关键文件：{path}" if critical else "",
             # 安全关键文件强制人工确认：never（无人值守）下 decide 会直接拒绝
             approval="on-request" if critical else "auto",
             min_sandbox_mode="workspace-write",
@@ -277,13 +278,17 @@ class EditTool(BaseTool):
             return [f for f in names
                     if f.startswith("test_") and f.endswith(".py") and pred(f)]
 
-        candidates = (
-            _pick(lambda f: f == f"test_{stem}.py")
-            or _pick(lambda f: f.startswith(f"test_{stem}_"))
-            or (_pick(lambda f: f == f"test_{parent}.py") if parent else [])
-            or (_pick(lambda f: f.startswith(f"test_{parent}_")) if parent else [])
-            or _pick(lambda f: f.endswith(f"_{stem}.py"))
-        )
+        if norm.endswith(".py") and parent == "tests" and stem.startswith("test_"):
+            # 被改的就是测试文件本身：跑它自己。否则候选为空会退回全套（>180s 必然超时）
+            candidates = [os.path.basename(norm)]
+        else:
+            candidates = (
+                _pick(lambda f: f == f"test_{stem}.py")
+                or _pick(lambda f: f.startswith(f"test_{stem}_"))
+                or (_pick(lambda f: f == f"test_{parent}.py") if parent else [])
+                or (_pick(lambda f: f.startswith(f"test_{parent}_")) if parent else [])
+                or _pick(lambda f: f.endswith(f"_{stem}.py"))
+            )
         # 兜底：匹配过宽（超过 8 个）说明规则失效，退回全套更稳妥
         if not candidates or len(candidates) > 8:
             return test_cmd

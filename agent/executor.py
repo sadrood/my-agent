@@ -31,6 +31,12 @@ from config import VISION_CONFIG, TOOL_CONFIG, APPROVAL_CONFIG, COMPACT_CONFIG
 
 logger = logging.getLogger(__name__)
 
+
+def _one_line(text: str, limit: int = 200) -> str:
+    """把一段文本压成单行（零驻留指针里只留能认出"这是什么"的那点信息）。"""
+    flat = re.sub(r"\s+", " ", str(text or "")).strip()
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
 # think 伪工具的 schema（不注册进 ToolManager，由 Executor 拦截处理）
 THINK_TOOL_SCHEMA = {
     "type": "function",
@@ -96,6 +102,7 @@ class Executor:
         self._supervisor_rounds = 0
         self.rollout = rollout                   # Rollout | None
         self._event_sink = None                  # execute_goal_loop 期间的事件回调（→ dashboard）
+        self.persist_callback = None             # 会话增量落盘回调（由 Agent 注入；收到 messages）
         self.instructions_text = instructions_text
         self.max_step_ops = max_step_ops or TOOL_CONFIG.get("max_step_ops", 12)
         self.llm_retry_delay = llm_retry_delay   # 轮级重试退避（秒）
@@ -198,6 +205,29 @@ class Executor:
     # v3 主路径：function calling
     # ================================================================
 
+    def _fc_tools(self) -> list:
+        """本轮的 function calling 工具集：常驻工具 + 已装载的门控工具 + think。"""
+        tools = self.tool_manager.list_openai_schemas()
+        tools.append(THINK_TOOL_SCHEMA)
+        return tools
+
+    def _tools_hint(self) -> str:
+        """按需工具清单（拼进系统提示，告诉模型有哪些工具可装载）。"""
+        try:
+            return self.tool_manager.tools_hint()
+        except Exception:                            # noqa: BLE001
+            return ""
+
+    def _persist_messages(self, messages: list) -> None:
+        """把当前消息列表交给增量落盘回调（终端被强杀时最多丢最后一条）。"""
+        callback = self.persist_callback
+        if callback is None:
+            return
+        try:
+            callback(messages)
+        except Exception:                            # noqa: BLE001
+            pass
+
     def _execute_step_fc(
         self,
         goal: str,
@@ -208,8 +238,7 @@ class Executor:
         failure_warnings: str = "",
     ) -> dict:
         """function calling 主循环：模型持续调用工具直到输出文字总结。"""
-        tools = self.tool_manager.list_openai_schemas()
-        tools.append(THINK_TOOL_SCHEMA)
+        tools = self._fc_tools()
 
         # 系统提示：基础 + 审批策略提示 + AGENTS.md 指令
         system_prompt = EXECUTOR_FC_SYSTEM_PROMPT
@@ -220,6 +249,9 @@ class Executor:
             )
         if self.instructions_text:
             system_prompt += f"\n\n## 项目指令（必须遵守）\n{self.instructions_text}"
+        hint = self._tools_hint()
+        if hint:
+            system_prompt += f"\n\n{hint}"
 
         context_parts = []
         if step_context:
@@ -251,6 +283,8 @@ class Executor:
         self._emit("step_start", {"step": current_step})
 
         for _ in range(self.max_step_ops):
+            # 每轮重取工具集：模型中途 tools load 装载的工具，从下一轮起就能调用
+            tools = self._fc_tools()
             # 上下文压缩（阈值与循环模式同一来源：窗口比例制）
             if self.rollout is not None:
                 messages = self.rollout.maybe_compact(
@@ -322,8 +356,9 @@ class Executor:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": result_text,
+                    "content": self._fold_result(result_text),
                 })
+                self._persist_messages(messages)
         else:
             # 达到步骤内最大操作数
             final_text = final_text or "达到该步骤最大操作次数。"
@@ -377,17 +412,26 @@ class Executor:
         stop_event=None,   # threading.Event | None：置位后在下个检查点优雅停止
     ) -> dict:
         """单循环执行：一轮持续对话完成整个目标。"""
-        tools = self.tool_manager.list_openai_schemas()
-        tools.append(THINK_TOOL_SCHEMA)
+        # 目标里点名了低频工具（如"剪视频""知乎"）就先装载，别让模型先撞一次"没这个工具"
+        try:
+            self.tool_manager.autoload_for_text(f"{goal}\n{context_text}")
+        except Exception:                            # noqa: BLE001
+            pass
+        tools = self._fc_tools()
 
         # 整个执行期间保存事件回调：工具实时输出流 / checkpoint 转发 dashboard 用
         self._event_sink = event_sink
 
         user_content = goal if not context_text else f"{goal}\n\n{context_text}"
+        hint = self._tools_hint()
+        if hint:
+            system_prompt = f"{system_prompt}\n\n{hint}"
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        # 先把"目标"本身落盘：万一在首次 LLM 调用期间被杀，至少知道这一轮要干什么
+        self._persist_messages(messages)
         # 人工放行提示（宿主生成，模型无法伪造）：系统提示里写着"被 Guardian 拒绝的操作不要反复重试"，不明确告诉它"这个已经被授权了"，人授权了它也不会去重试。
         if self._consents_enabled():
             try:
@@ -437,6 +481,8 @@ class Executor:
         pending_todos_at_start = self._pending_todo_ids()
         # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），for 循环会自动推进 turn，while 则会漏自增导致死循环。
         for turn in itertools.count():
+            # 每轮重取工具集：模型中途 tools load 装载的工具，从下一轮起就能调用
+            tools = self._fc_tools()
             # 结算上一轮：放在迭代开头，这样体内任何 continue 都不会漏结算
             if turn > 0:
                 budget.observe(pending)
@@ -877,8 +923,9 @@ class Executor:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": result_text,
+                    "content": self._fold_result(result_text),
                 })
+                self._persist_messages(messages)
 
         # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），"无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
         self._emit("run_loop_end", {"success": False, "output": "",
@@ -1229,6 +1276,15 @@ class Executor:
             self._emit("compaction", {"ok": False,
                                       "error": "没有可压缩的正文（仅剩系统提示与保留区），已跳过压缩"})
             return messages
+        if self._compact_mode() == "pointer":
+            folded, saved = self._fold_old_messages(old)
+            if folded:
+                compacted = head_msgs + [
+                    {"role": "system", "content": "## 之前的执行摘要（零驻留指针）\n" + folded}
+                ] + recent
+                self._emit("compaction", {"ok": True, "mode": "pointer", "folded": len(old),
+                                          "kept": len(recent), "saved_chars": saved})
+                return compacted
         try:
             summary = self._summarize_old(old)
         except Exception as e:
@@ -1239,6 +1295,79 @@ class Executor:
         ] + recent
         self._emit("compaction", {"ok": True, "summarized": len(old), "kept": len(recent)})
         return compacted
+
+    # ------------------------------------------------------------
+    # 零驻留：大负载只留确定性指针，原文落盘可按句柄逐字取回
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _compact_mode() -> str:
+        try:
+            from config import CONTEXT_STORE_CONFIG
+            mode = str(CONTEXT_STORE_CONFIG.get("compact_mode") or "pointer").strip().lower()
+        except Exception:                            # noqa: BLE001
+            mode = "pointer"
+        return mode if mode in ("pointer", "summary") else "pointer"
+
+    def _ctx_namespace(self) -> str:
+        """本次运行的指针命名空间（句柄前缀，便于按运行列出/清理）。"""
+        ns = getattr(self, "_ctx_ns", "")
+        if not ns:
+            from agent import context_store as store
+            ns = self._ctx_ns = store.new_namespace()
+        return ns
+
+    def _next_handle(self) -> str:
+        from agent import context_store as store
+        self._ctx_seq = int(getattr(self, "_ctx_seq", 0)) + 1
+        return store.handle_for(self._ctx_namespace(), self._ctx_seq)
+
+    def _fold_result(self, text: str) -> str:
+        """超过阈值的工具结果：落盘 + 只把指针放进消息（原文可按句柄取回）。"""
+        try:
+            from agent import context_store as store
+            folded, done = store.fold(self._next_handle(), text)
+            if done:
+                self._ctx_folded = int(getattr(self, "_ctx_folded", 0)) + 1
+            return folded
+        except Exception:                            # noqa: BLE001
+            return text
+
+    def _fold_old_messages(self, old_messages: list) -> tuple:
+        """把旧历史折成确定性指针清单（不调模型；原文落盘，句柄可 recall）。"""
+        from agent import context_store as store
+
+        lines, saved = [], 0
+        for m in old_messages:
+            role = str(m.get("role") or "")
+            content = m.get("content")
+            if role == "tool":
+                text = str(content or "")
+                handle = self._next_handle()
+                folded, done = store.fold(handle, text)
+                if done:
+                    saved += max(0, len(text) - len(folded))
+                    lines.append("[工具结果] " + folded.split("\n")[0])
+                elif text.strip():
+                    lines.append("[工具结果] " + _one_line(text, 200))
+            elif role == "assistant":
+                calls = m.get("tool_calls") or []
+                if calls:
+                    names = []
+                    for call in calls[:6]:
+                        fn = (call or {}).get("function") or {}
+                        names.append(f"{(fn.get('name') or '?')}({_one_line(fn.get('arguments') or '', 80)})")
+                    lines.append("[助手→工具] " + "；".join(names))
+                text = str(content or "")
+                if text.strip():
+                    lines.append("[助手] " + _one_line(text, 240))
+            elif role == "user":
+                lines.append("[用户] " + _one_line(str(content or ""), 300))
+            elif role == "system":
+                lines.append("[提示] " + _one_line(str(content or ""), 200))
+        joined = "\n".join(lines)
+        cap = int(COMPACT_CONFIG.get("pointer_max_chars", 8000))
+        return joined[:cap], saved
 
     def _summarize_old(self, old_messages: list) -> str:
         """把旧历史交给 LLM 压缩成摘要。"""

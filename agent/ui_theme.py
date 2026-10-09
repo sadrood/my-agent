@@ -89,8 +89,13 @@ _legacy_console: Optional[Console] = None  # 无颜色的纯文本 console
 
 
 def get_console(use_rich: bool = True) -> Console:
-    """获取全局 Console 实例。"""
+    """获取全局 Console 实例。
+
+    提示符正在等待输入时返回**排队替身**：并发输出会覆盖用户正在敲的那一行，
+    所以先排队、等回车后再放（见 agent/output_gate.py）。
+    """
     global _console, _legacy_console
+    from agent import output_gate
     if use_rich:
         if _console is None:
             _console = Console(
@@ -99,11 +104,12 @@ def get_console(use_rich: bool = True) -> Console:
                 force_terminal=True if sys.platform == "win32" else None,
                 color_system="auto",
             )
-        return _console
+        return output_gate.DeferringConsole(_console) if output_gate.is_prompt_active() else _console
     else:
         if _legacy_console is None:
             _legacy_console = Console(no_color=True, highlight=False)
-        return _legacy_console
+        return (output_gate.DeferringConsole(_legacy_console)
+                if output_gate.is_prompt_active() else _legacy_console)
 
 
 def _rule(c: Console, char: str = "─", width: int = 60):

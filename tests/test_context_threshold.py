@@ -60,10 +60,23 @@ def test_compact_threshold_ratio_and_explicit(monkeypatch):
 def test_compact_threshold_fallback_when_window_unknown(monkeypatch):
     """窗口查询失败时回退保守兜底（不回到过早压缩的小数字）。"""
     from models.llm import LLM
+    from models import model_catalog
     llm = _make_llm()
     monkeypatch.setitem(COMPACT_CONFIG, "token_threshold", 0)
     monkeypatch.setattr(llm, "fetch_context_window", lambda m=None: None)
+    monkeypatch.setattr(model_catalog, "context_window", lambda *a, **k: 0)
     assert llm.compact_threshold_tokens() == 240_000
+
+
+def test_compact_threshold_uses_catalog_when_gateway_silent(monkeypatch):
+    """网关不报窗口时用能力目录（实测覆盖/目录），不再直接吃 240K 兜底。"""
+    from models.llm import LLM
+    from models import model_catalog
+    llm = _make_llm()
+    monkeypatch.setitem(COMPACT_CONFIG, "token_threshold", 0)
+    monkeypatch.setattr(llm, "fetch_context_window", lambda m=None: None)
+    monkeypatch.setattr(model_catalog, "context_window", lambda *a, **k: 500_000)
+    assert llm.compact_threshold_tokens() == 375_000
 
 
 def test_executor_threshold_explicit_and_fallback():

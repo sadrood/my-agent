@@ -38,7 +38,9 @@ $env:ANTHROPIC_API_KEY="sk-..."; my-agent            # 别名：MY_AGENT_API_KEY
 $env:MY_AGENT_MINIMAL="1"; my-agent                  # 极简模式（关掉 Guardian/追踪/快照/RepoMap 等非必要功能）
 ```
 
-**对话绑定模型**：每个对话记录它当时用的模型；`--session <ID>` / `/open <ID>` / `-r` 恢复时自动切回。切换只影响主模型；视觉与 Guardian 各自独立配置。
+**对话绑定模型**：每个对话记录它当时用的模型；`--session <ID>` / `/open <ID>` / `-r` 恢复时自动切回。切换同时作用于**主模型与视觉**（临时端点跟着走；那边不支持图片时会逐级回落到 `.env` 的视觉备用链）；Guardian 保持独立配置。
+
+**`#key` 的边界**：`/model 名@地址#key` 里的 key 只作用于**本次会话**——不写 `.env`，也不写进会话文件（避免密钥落盘）。所以恢复一个"换过端点"的对话时，如果那个端点不认默认 key，需要重新 `/model 名@地址#key`（回显只显示 key 前 6 位）。
 
 ## 三、执行模式与安全参数
 
@@ -333,8 +335,36 @@ ARTICLE_FALLBACK_ENDPOINT=auto      # 某阶段被限流时自动换另一家把
 > 机械类问题（半角标点、引号不配对、叠字、省略号写法）由**规则**直接判定，不花 token、
 > 可复现；语义与措辞问题才交给审阅模型——实测模型会漏掉"全文都用半角逗号"这种惯例问题。
 
-## 三·十一、被 Guardian 拦了怎么放行
+## 三·十一之前：两道门，别搞混（审批门 vs Guardian）
 
+**对话内切权限**（只有你在提示符里能切，模型没有提权工具）：
+
+```cmd
+> /permission              :: 看当前档（策略 / 沙箱 / 是否尊重人工确认）
+> /permission ask          :: 每次确认（策略 on-request，沙箱收回 workspace-write）
+> /permission auto         :: 自动执行（never + 不再拦"必须人工确认"）
+> /permission full         :: 完全权限（auto + 沙箱 danger-full-access，黑名单也放行）
+> /permission block        :: 全禁（untrusted + 沙箱 read-only）
+```
+
+切换**当场生效**（执行器与审批门共用同一个策略对象），只作用于本会话、不写 `.env`。
+
+- **第一道：审批门**（`agent/approval.py`）。策略 `untrusted / on-failure / on-request / never`；
+  `never` = 无人值守，黑名单除外一律放行。
+- **例外：工具主动要求人工确认**（`approval="on-request"`）。命中这些就会升级为"必须有人点头"：
+  - 终端命令**非只读**且涉及安全关键文件（`agent/approval.py`、`sandbox.py`、`guardian.py`、`execpolicy.py`、`consent.py`、`config.py`、`.env`）；
+  - `python` 代码里**出现这些文件名**（连只读读取也算，要读配置请用 `file` 工具）；
+  - `file` / `edit` 的**目标路径**是这些文件；
+  - `computer`（桌面操控）**每次调用**。
+- `never` 下这些调用**直接拒绝**（无人可问 → fail-closed），拒绝文案会告诉你命中了哪个名字。
+- **想要"完全权限、什么都不拦"**（例如让 agent 自己改配置/审批文件）：
+  - 会话内：仪表盘把该会话权限模式切到 **`auto`**（`POST /api/permission-mode {session_id, mode:"auto"}`）——
+    auto 现在等同于完全权限（不再弹卡、也不再拦 on-request）；
+  - 全局：`.env` 里 `APPROVAL_HONOR_ON_REQUEST=false`（⚠ 等于关掉"自我修改防线"）；
+  - 只想放行个别命令：`APPROVAL_EXEC_POLICY_ENABLED=true` + `execpolicy.json` 里写 allow 规则。
+- **第二道：Guardian 盲审**（见下一节）：它与审批门独立，即使审批门放行，Guardian 仍可能拦。
+
+## 三·十一、被 Guardian 拦了怎么放行
 Guardian 是**独立于审批门的第二道盲审**（`审批门 → Guardian → 执行`）。它只看到
 「任务目标 + 工具名 + 参数 + 风险等级」，**看不到对话、也看不到你在审批门点的 y**，
 所以"跟它讲道理"是没用的——能生效的是下面这几条：
@@ -653,14 +683,155 @@ python main.py --skills-install <包> --skills-allow-unsigned # 放行无 manife
   低风险终端/生图）时自动并发执行，结果按原顺序回喂；混入编辑等
   有冲突风险的工具时整批保持串行。
 
-## 八、排查工具
+## 八、浏览器后端（ego / 内置桥 / Playwright）
 
 ```cmd
+# 选后端：auto（默认，优先级 内置桥 > ego > Playwright）/ playwright / embedded / ego
+BROWSER_BACKEND=auto
+
+# ego 后端：驱动系统已装的 Edge（共享浏览器窗口 + 可见光标浮层），无需 playwright install
+BROWSER_EGO_CHROME=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe   # 默认自动探测
+BROWSER_EGO_CLI=<ego-browser CLI 路径>       # 默认取 DSH 插件自带；PATH 里有 ego-browser 也行
+BROWSER_EGO_TIMEOUT=120                      # 单条命令超时（秒）
+BROWSER_EGO_HEADLESS=false
+BROWSER_EGO_CURSOR=true                      # 页面里的 agent 光标浮层（会被画进截图）
+BROWSER_EGO_CURSOR_NAME=my_agent             # 浮层上显示的名字
+```
+
+- `browser` 工具在 ego 后端下支持：`status/goto/url/title/text/snapshot/screenshot/screenshot_base64/click/type/fill/press/scroll/js/wait/humancheck/live/tabs/newtab/switchtab/spaces/usespace`。
+- **为什么浏览器会弹到前台 / 怎么让它不打扰你**：ego 驱动的 Edge 是你自己的一个独立实例（profile 在 `%LOCALAPPDATA%\ego-lite-linux\profile`，不碰你日常用的 Edge 配置），但**切换空间或切标签页用的是 `Target.activateTarget`，会把窗口拉到最前**。现在的规则是：
+  - 已经在本会话自己的标签页上时**什么都不做**（实测第 2 条命令起 `reused=true`，不再弹）；
+  - 只有真要换页面时才抢一次前台：`newtab`、`switchtab`、`usespace`、以及本次会话的第一条命令；
+  - `spaces` 只读元数据，不再挨个切空间（以前会把每个窗口闪一遍）。
+  - **完全不想被弹**：`BROWSER_EGO_HEADLESS=true`（浏览器无窗口运行；代价是看不到光标浮层、需要人工过验证码的页面也没法手点）。
+  - 折中：`EGO_LINUX_EXTRA_ARGS=--start-minimized` 让窗口起来就是最小化的。
+- **光标什么时候出现**：仅在"读过页面（snapshot）/点过/打过字/该进程接住页面加载"时；只跑 `js`、`text`、`screenshot` 的步骤不显示——这是 ego 的显隐规则，不是故障。想看它始终在，`BROWSER_EGO_CURSOR_NAME` 之外还可以让这一步先 `snapshot`。
+- **任务空间（task space）**：一个空间 = 一个窗口 + 它的标签页。空闲 30 分钟会被自动回收（长任务中途隔太久会拿到新的空空间）；`EGO_LINUX_SPACE_IDLE_MIN=0` 关闭回收。
+- **两个进程同时驱动同一浏览器会互相抢标签页**：各自用不同任务空间（或不同标签页）才互不干扰；光标浮层是页面内同一个宿主节点，两边会互相覆盖。
+
+## 九、省 token：工具按需装载 + 零驻留上下文
+
+**1) 工具 schema 按需装载**（低频大工具的 schema 默认不进提示词）
+
+```cmd
+> tools list                       # 看未常驻的工具（模型自己也能调这个工具）
+> tools load zhihu video_edit      # 装载 → 下一轮起可直接调用
+> tools unload zhihu               # 卸下，省回提示词
+```
+
+常驻 15 个（终端/文件/编辑/Python/浏览器/视觉/OCR/待办/记忆/经验/委托…）+ 门控 10 个（知乎、短剧工厂、视频剪辑/生成、配音、文章工坊、桌面操控、插件安装器、示例工具）。实测每轮 schema 从约 9.7K token 降到约 3.7K（按需清单本身约 160 token）。目标里出现"剪视频""知乎"等关键词时会自动装载。
+
+**2) 零驻留上下文**：大工具输出不整段留在对话里，只留确定性指针，原文按句柄逐字取回。
+
+```cmd
+> context recall run-1759-0007     # 取回被折叠的原文（消息里会看到 [已折叠 #句柄 12.3KB]）
+> context list                     # 本机折了哪些条目
+> context stats                    # 账本：条数/体积/估算省下的 token
+```
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| CONTEXT_STORE_ENABLED | true | 关掉则大输出原样留上下文 |
+| CONTEXT_STORE_THRESHOLD_CHARS | 3000 | 单条工具输出超过它才折叠 |
+| CONTEXT_COMPACT_MODE | pointer | `pointer`=确定性指针压缩（**不调模型**、原文可还原）/ `summary`=旧行为（LLM 摘要） |
+| CONTEXT_STORE_DIR | memory/ctx | 指针落盘目录（自动只留最近 20 个命名空间） |
+
+**3) 模型能力目录**：`memory/model_catalog.json`（models.dev 全量，7 天缓存、后台异步刷新）+ `memory/model_capabilities.json`（本机实测回填：视觉能不能用等）。网关 `/models` 不报上下文窗口时，压缩阈值也从这里取，取不到才用保守兜底。
+
+## 九·五、QQ 机器人（用 QQ 私聊驱动 agent）
+
+走**官方 API**（腾讯 `qq-botpy` SDK），不用第三方协议，无封号风险。
+
+```cmd
+pip install qq-botpy                 :: 可选依赖，不装不影响其它功能
+python -m agent.qqbot                :: 启动桥（长驻）
+```
+
+`.env` 里只写这几项（**凭证别提交、别外发**；泄漏后立刻去开放平台重置 AppSecret）：
+
+```ini
+QQBOT_APP_ID=你的AppID
+QQBOT_APP_SECRET=你的AppSecret
+QQBOT_ALLOW_FROM=            # openid 白名单，逗号分隔；**留空=拒绝所有人**
+QQBOT_PERMISSION=ask         # ask（需确认的操作问 QQ）/ block（全禁）；不支持 full
+QQBOT_MAX_CHARS=2000         # 单条任务文字上限
+QQBOT_RATE_PER_MINUTE=6      # 每人每分钟消息上限
+QQBOT_ALLOW_GROUP=false      # 群消息默认忽略
+QQBOT_WORKSPACE=             # 桥的工作目录（留空=当前目录）
+```
+
+第一次怎么拿到自己的 openid：留空白名单启动 → 给机器人发一句话 → 它回复你的 openid（
+同时日志里也有一条 `QQ 消息被拒（不在白名单）`）→ 粘进 `QQBOT_ALLOW_FROM` 重启。
+
+聊天里可用：
+
+| 输入 | 效果 |
+|---|---|
+| 任意一句话 | 当成任务交给 agent（同一个 QQ 号 = 同一个会话） |
+| `/status` | 看会话/档位/完成轮数/上次结果尾部 |
+| `/new` | 开新会话（清上下文） |
+| `/help` | 用法提示 |
+| `y` / `a` / `n` | 审批答复：允许一次 / 本会话始终允许这个工具 / 拒绝（超时=拒绝） |
+
+**群聊**（默认关闭）：QQ 群的 @机器人 事件是 `on_group_at_message_create`（`on_at_message_create`
+是**频道**事件，两回事）。要开群聊：
+
+```ini
+QQBOT_ALLOW_GROUP=true       # 总开关
+QQBOT_ALLOW_GROUPS=          # 群白名单（group_openid，逗号分隔）：只有这些群会响应
+```
+
+两道名单都要过：**群在白名单里** 且 **发言人本人在 `QQBOT_ALLOW_FROM` 里**；每个群成员各自
+独立上下文（键是 `g:<群>:<人>`，私聊是 `c:<人>`），互不串、限流也各算各的。被拦时回复会说清
+是"群不在白名单"还是"你不在白名单"，并把要加的那串回显出来。
+
+> **进群与"群内 @ 没反应"怎么排查？** 按官方 FAQ（`bot.q.qq.com/wiki/agent-qqbot/` 常见问题）：
+> 1. **进群能力已开放**：官方原话"QQ 机器人进群能力现已全面开放，群主可直接添加所创建的
+>    QQ 机器人加入群聊（升级最新版 QQ），并支持相关权限设置" —— 拉不进群**不是**发布审核问题。
+> 2. **手机 QQ 版本**：官方原话"旧版本手机 QQ 仅支持个人用户私聊使用**不支持群功能**"。
+>    群内 @ 机器人若提示"该机器人当前服务状态异常，暂时无法回复消息"，先升级到最新版手机 QQ。
+> 3. **群内权限由群主设置**：接收全量消息、主动推送消息、设为群管理员后可撤回成员消息 ——
+>    不开这些权限时，机器人只能收到 **@它** 的消息。
+> 4. **触发方式**：群里必须 **@机器人**（本桥只处理 @ 消息）。
+> 5. 仍无反应：确认机器人**在线**（AppID/AppSecret 正确、桥进程在跑），再看桥的日志里有没有
+>    "QQ 群消息被拒"（有的话把回显的群 openid 加进 `QQBOT_ALLOW_GROUPS`）。
+
+**安全边界（硬编码，配置改不了）**：
+- 只响应**私聊**与**群内 @ 机器人**；群聊默认关（进群=群里任何人都可能触达这台电脑）；
+- 白名单之外一律拒绝，并把对方 openid 回显出来方便你决定要不要加；
+- 每个 QQ 号**独立会话**，互不串上下文；
+- 权限档只允许 `ask` / `block`，**不接受 `full`** —— 聊天通道不允许提权；
+- 需要人工确认的操作（安全关键文件、桌面操控）会推到 QQ 等你回 y/a/n，超时按拒绝处理；
+- 回复按 800 字符分块；任务开始先回执一条，长任务跑完可 `/status` 查结果。
+
+> 沙箱环境提醒：新机器人默认在**沙箱**里，只能和"沙箱测试用户"对话 —— 去开放平台
+> 「开发设置 → 沙箱配置」把你自己（和要用的 QQ 号）加进去，否则你发的消息它收不到。
+
+## 十、排查工具
+```cmd
 my-agent --list-tools                     # 看工具和 schema
-dir rollouts                              # 运行日志（JSONL，含 llm_error/reasoning_len）
-dir memory\sessions                       # 对话记录文件
+dir rollouts                              # 事件流（JSONL，含 llm_error/reasoning_len）
+dir memory\logs                           # 进程级日志：启动环境/未捕获异常/退出原因
+dir memory\sessions                       # 对话记录文件（增量落盘）
 git log --oneline                         # 每次运行前的自动快照（可回滚点）
 git diff HEAD -- <文件>                   # 看 Agent 改了什么
 git revert <commit>                       # 回滚某次运行
 .venv\Scripts\python -m pytest tests -q   # 跑测试（全套）
 ```
+
+**终端被强杀/突然关闭之后**（会话记录只剩 0 条时）：
+
+```cmd
+python -m agent.recover --list                                    # 列出最近运行，标注[被中断]/[已收尾]
+python -m agent.recover --run <run-id> --dry-run                  # 先看能从事件流还原多少
+python -m agent.recover --run <run-id> --conv <会话ID>            # 写回会话（不带 --conv 则新建）
+```
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| RUN_LOG_ENABLED | true | 进程级日志总开关 |
+| RUN_LOG_DIR | memory/logs | 日志目录（放 memory/ 下，不入版本库） |
+| SESSION_INCREMENTAL_SAVE | true | 每完成一次工具调用就把新消息追加进会话文件 |
+| SESSION_INCREMENTAL_INTERVAL | 5 | 增量写盘最小间隔（秒） |
+
+启动时会自动检测"有 rollout 却没有 run_end"的孤儿运行并打印恢复命令；关窗（Windows 控制台关闭/注销/关机）时有约 5 秒窗口用于兜底刷盘，Ctrl+C 不受影响（仍走正常中断）。

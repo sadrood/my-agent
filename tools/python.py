@@ -251,12 +251,16 @@ class PythonTool(BaseTool):
             "os.system", "os.popen", "os.spawn", "os.kill",
         ))
         # 代码里出现安全关键文件名 → 可能绕过工具直接改写它们，同样按人工确认处理
-        critical = bool(security_critical_name_hits(code))
+        hits = security_critical_name_hits(code)
+        critical = bool(hits)
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=f"python 代码片段（{len(code)} 字符）",
             risk_level="high" if (risky or critical) else "medium",
+            # 说明命中了哪个文件：只读读取也会命中，所以要让人/模型知道怎么改才对
+            reason=(f"代码里出现安全关键文件：{', '.join(hits)}"
+                    "；含只读读取也算，要读配置请改用 file 工具") if critical else "",
             approval="on-request" if critical else "auto",
             min_sandbox_mode=self.min_sandbox_mode,
         )

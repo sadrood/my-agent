@@ -10,3 +10,6 @@ rich>=13.0.0
 pytest>=8.0.0
 uiautomation>=2.0.0; sys_platform == "win32"
 Pillow>=10.0.0
+
+# 可选：QQ 机器人桥（python -m agent.qqbot）。不装不影响其它功能，模块内惰性导入。
+# qq-botpy>=1.2.1

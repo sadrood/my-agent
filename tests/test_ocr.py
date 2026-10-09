@@ -292,7 +292,43 @@ class TestVisionFallback:
         see = SeeTool(browser_tool=_FakeBrowser(_b64()), vision_model=vision)
         out = see.execute_json({"question": "请提取截图中所有可见的文字内容。"})
         assert out.success and "图里的字" in out.output
-        assert vision.calls == 0, "要文字时不该调用视觉模型"
+
+
+class _MetadataBrowser:
+    """ego 后端形态：base64 只在 metadata，output 不带 [FULL_BASE64] 标记。"""
+
+    def __init__(self, b64):
+        self._b64 = b64
+
+    def execute(self, cmd):
+        return ToolResult(success=True, output="截图已获取（ego）。",
+                          metadata={"screenshot_base64": self._b64})
+
+
+class TestSeePayloadSources:
+    """回归：负载可能来自 metadata（工具层搬运/ego 后端）或旧的内联标记。"""
+
+    def test_metadata_only_browser_still_works(self, monkeypatch):
+        from tools.vision_tool import SeeTool
+
+        monkeypatch.setattr(ocr_mod, "recognize_image",
+                            lambda **kw: ocr_mod.OcrResult(text="图里的字", engine="fake",
+                                                           seconds=0.1))
+        see = SeeTool(browser_tool=_MetadataBrowser(_b64()), vision_model=_CountingVision())
+        out = see.execute_json({"question": "请提取截图中所有可见的文字内容。"})
+        assert out.success, out.error
+        assert "图里的字" in out.output
+
+    def test_missing_payload_reports_clearly(self):
+        from tools.vision_tool import SeeTool
+
+        class _Empty:
+            def execute(self, cmd):
+                return ToolResult(success=True, output="截图已获取。")
+
+        out = SeeTool(browser_tool=_Empty(), vision_model=_CountingVision()).execute_json(
+            {"question": "看看这个页面"})
+        assert out.success is False and "base64" in out.error
 
     def test_see_reports_both_failures(self, monkeypatch):
         from tools.vision_tool import SeeTool

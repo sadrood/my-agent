@@ -40,10 +40,40 @@ def parse_fallback_entries(config: dict = None) -> list:
     return entries
 
 
+#: 会话内临时主视觉（/model 换了端点时同步过来）；备用链仍取自 .env 的 VISION_FALLBACK_MODELS
+_TEMP_PRIMARY = {"model": "", "base_url": "", "api_key": ""}
+
+
+def set_temporary_primary(model: str = None, base_url: str = None,
+                          api_key: str = None) -> None:
+    """把视觉主模型临时指到指定端点（传空=清回 .env 配置）。"""
+    _TEMP_PRIMARY["model"] = str(model or "")
+    _TEMP_PRIMARY["base_url"] = str(base_url or "")
+    _TEMP_PRIMARY["api_key"] = str(api_key or "")
+
+
+def temporary_primary() -> dict:
+    """当前的临时主视觉覆盖（空字符串=未覆盖）。"""
+    return dict(_TEMP_PRIMARY)
+
+
+#: 上游"不接受图片"的报错特征（区别于超时/限流/网络：那些不能判定成不支持视觉）
+_REJECT_IMAGE_SIGNS = (
+    "unsupported image", "invalid image", "image is not supported",
+    "not support image", "does not support image", "unable to process image",
+    "image_url is not supported", "no vision", "not a vision model",
+)
+
+
+def _rejected_image(message: str) -> bool:
+    """这条报错是否说明"该模型不支持图片"。"""
+    text = str(message or "").lower()
+    return any(sign in text for sign in _REJECT_IMAGE_SIGNS)
+
+
 class VisionModel:
     """视觉分析模型。
     普通的 text-only 模型（如通用小模型无视觉能力）不可用于此模块。"""
-
     # 可选择的视觉模型优先级列表
     RECOMMENDED_MODELS = [
         "gpt-4o",
@@ -64,20 +94,26 @@ class VisionModel:
     ):
         """Args:
         留空回退 VISION_* 环境变量，再回退主 LLM 配置。"""
-        # 视觉模型可走独立端点（VISION_API_KEY / VISION_BASE_URL）
+        # 视觉可走独立端点（VISION_API_KEY / VISION_BASE_URL）；/model 临时切端点时优先生效
+        override = _TEMP_PRIMARY
+        resolved_key = (api_key or override["api_key"] or VISION_CONFIG.get("api_key")
+                        or LLM_CONFIG["api_key"])
+        resolved_base = (base_url or override["base_url"] or VISION_CONFIG.get("base_url")
+                         or LLM_CONFIG["base_url"])
         self.client = OpenAI(
-            api_key=api_key or VISION_CONFIG.get("api_key") or LLM_CONFIG["api_key"],
-            base_url=base_url or VISION_CONFIG.get("base_url") or LLM_CONFIG["base_url"],
+            api_key=resolved_key,
+            base_url=resolved_base,
             timeout=float(VISION_CONFIG.get("timeout", 30)),
             max_retries=0,
         )
-        self.vision_model = vision_model or VISION_CONFIG.get("vision_model") or self._auto_detect_model()
+        self.vision_model = (vision_model or override["model"]
+                             or VISION_CONFIG.get("vision_model") or self._auto_detect_model())
         self.screenshot_dir = VISION_CONFIG.get("screenshot_path", "./screenshots")
         #: 上一次成功应答用的模型（备用顶上时，调用方/日志要知道是谁答的）
         self.last_model = self.vision_model
         self.last_detail = ""
         self.last_fallback_reason = ""
-        self.base_url = base_url or VISION_CONFIG.get("base_url") or LLM_CONFIG["base_url"]
+        self.base_url = resolved_base
 
     # ------------------------------------------------------------
     # 备用端点（主模型超时/报错时接着试）
@@ -200,12 +236,27 @@ class VisionModel:
                 if idx > 0:
                     # 让上层知道这次是备用顶上的（工具输出里会显示，避免误以为主模型正常）
                     self.last_fallback_reason = errors[-1] if errors else ""
+                self._note_capability(client, model, vision=True)
                 return content
             except Exception as e:              # noqa: BLE001
-                errors.append(f"{model}: {str(e)[:160]}")
+                message = str(e)
+                errors.append(f"{model}: {message[:160]}")
+                # 上游明确说图片不受支持：记下来，下次不必再拿它试图片
+                if _rejected_image(message):
+                    self._note_capability(client, model, vision=False)
                 continue
         raise RuntimeError("视觉调用全部失败（主模型 + "
                            f"{len(attempts) - 1} 个备用）：" + "；".join(errors))
+
+    @staticmethod
+    def _note_capability(client, model: str, **fields) -> None:
+        """把这次实测到的能力写进目录的学习缓存（失败不影响主流程）。"""
+        try:
+            from models import model_catalog
+            model_catalog.note_capability(str(getattr(client, "base_url", "") or ""),
+                                          model, **fields)
+        except Exception:                        # noqa: BLE001
+            pass
 
     # ================================================================
     # 高级封装：常用分析场景

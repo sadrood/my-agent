@@ -114,11 +114,13 @@ class SeeTool(BaseTool):
         if not result.success:
             return ToolResult(success=False, output="", error=f"截图失败: {result.error}")
 
-        match = re.search(r"\[FULL_BASE64\](.*?)\[/FULL_BASE64\]", result.output, re.DOTALL)
-        if not match:
+        # 优先 metadata（工具层会把内联负载搬进去，ego 后端也直接放这里），回落旧的内联标记
+        base64_data = str((result.metadata or {}).get("screenshot_base64") or "")
+        if not base64_data:
+            match = re.search(r"\[FULL_BASE64\](.*?)\[/FULL_BASE64\]", result.output, re.DOTALL)
+            base64_data = match.group(1) if match else ""
+        if not base64_data:
             return ToolResult(success=False, output="", error="截图返回格式异常（缺少 base64 数据）。")
-
-        base64_data = match.group(1)
 
         # 2. 文字类请求优先本地 OCR：识字是本地引擎的强项（离线、免费、不超时），没必要为了"读出图里有什么字"去赌一次多模态调用（用户痛点：视觉模型无响应就整个废掉）。
         if self._wants_text(question):

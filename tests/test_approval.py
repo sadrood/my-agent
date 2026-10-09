@@ -400,3 +400,175 @@ class TestSecurityCriticalApprovalFlow:
     def test_ordinary_file_is_not_escalated(self):
         p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
         assert p.decide(self._edit("tools/file.py")).allowed is True
+
+
+class TestDenyReasonNamesTheTrigger:
+    """拒绝信息必须说明"是谁触发的"：只回一句"工具要求批准"没法排查。"""
+
+    def _never(self):
+        return ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+
+    @staticmethod
+    def _edit(path):
+        from tools.patch import EditTool
+        return EditTool().build_approval_request(
+            {"file_path": path, "old_string": "a", "new_string": "b"})
+
+    def test_terminal_write_to_critical_file_names_it(self):
+        from tools.terminal import TerminalTool
+        tool = TerminalTool()
+        req = tool.build_approval_request({"command": "echo x >> config.py"})
+        assert req.approval == "on-request" and "config.py" in req.reason
+        d = self._never().decide(req)
+        assert d.allowed is False and "config.py" in d.reason
+
+    def test_terminal_readonly_still_exempt(self):
+        from tools.terminal import TerminalTool
+        req = TerminalTool().build_approval_request({"command": "cat .env"})
+        assert req.approval == "auto", "只读命令不该升级为需批准"
+        assert self._never().decide(req).allowed is True
+
+    def test_python_code_touching_env_names_it(self):
+        from tools.python import PythonTool
+        req = PythonTool().build_approval_request({"code": "print(open('.env').read())"})
+        assert req.approval == "on-request" and ".env" in req.reason
+        d = self._never().decide(req)
+        assert d.allowed is False and ".env" in d.reason and "file 工具" in d.reason
+
+    def test_edit_critical_file_names_it(self):
+        req = self._edit("agent/approval.py")
+        assert "agent/approval.py" in req.reason
+        d = self._never().decide(req)
+        assert d.allowed is False and "agent/approval.py" in d.reason
+
+    def test_interactive_ask_carries_the_detail(self):
+        asked = []
+        p = ApprovalPolicy(mode="on-request", sandbox_mode="workspace-write",
+                           interactive=False, approver=lambda r: asked.append(r) or True)
+        p.decide(self._edit("config.py"))
+        assert asked, "on-request 策略下必须询问"
+        assert "config.py" in asked[0].reason
+
+    def test_plain_on_request_without_reason_keeps_old_wording(self):
+        from tools.base import ApprovalRequest
+        p = self._never()
+        req = ApprovalRequest(tool_name="x", arguments={}, command="x", approval="on-request")
+        d = p.decide(req)
+        assert d.allowed is False and d.reason == "工具要求批准，但策略为 never。"
+
+
+class TestFullPermissionMode:
+    """`honor_on_request=False` = 完全权限：不再拦"必须人工确认"的工具，直接按策略处理。"""
+
+    def test_default_still_honors(self):
+        from tools.patch import EditTool
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False)
+        req = EditTool().build_approval_request(
+            {"file_path": "config.py", "old_string": "a", "new_string": "b"})
+        assert p.decide(req).allowed is False, "默认必须保持自我修改防线"
+
+    def test_full_permission_allows_critical_write(self):
+        from tools.patch import EditTool
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False,
+                           honor_on_request=False)
+        req = EditTool().build_approval_request(
+            {"file_path": "config.py", "old_string": "a", "new_string": "b"})
+        d = p.decide(req)
+        assert d.allowed is True and "never" in d.reason
+
+    def test_full_permission_allows_python_touching_env(self):
+        from tools.python import PythonTool
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False,
+                           honor_on_request=False)
+        req = PythonTool().build_approval_request({"code": "print(open('.env').read())"})
+        assert p.decide(req).allowed is True
+
+    def test_honor_can_be_callable_for_live_switch(self):
+        """仪表盘 auto 模式靠这个实时解析：切过去立刻不再拦。"""
+        from tools.patch import EditTool
+        state = {"honor": True}
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False,
+                           honor_on_request=lambda: state["honor"])
+        req = EditTool().build_approval_request(
+            {"file_path": "config.py", "old_string": "a", "new_string": "b"})
+        assert p.decide(req).allowed is False
+        state["honor"] = False
+        assert p.decide(req).allowed is True
+
+    def test_broken_callable_falls_back_to_honoring(self):
+        def boom():
+            raise RuntimeError("x")
+
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False,
+                           honor_on_request=boom)
+        from tools.base import ApprovalRequest
+        d = p.decide(ApprovalRequest(tool_name="x", arguments={}, command="x",
+                                     approval="on-request"))
+        assert d.allowed is False, "解析失败要保守（继续拦），不能默默放行"
+
+    def test_config_default_is_honoring(self):
+        from config import APPROVAL_CONFIG
+        assert APPROVAL_CONFIG.get("honor_on_request", True) is True
+
+
+class TestPermissionPresets:
+    """`/permission` 的会话内档位（只有提示符里能切，模型没有提权工具）。"""
+
+    def _policy(self):
+        return ApprovalPolicy(mode="on-failure", sandbox_mode="workspace-write", interactive=False)
+
+    def _critical(self):
+        from tools.patch import EditTool
+        return EditTool().build_approval_request(
+            {"file_path": "config.py", "old_string": "a", "new_string": "b"})
+
+    def test_preset_table_matches_dashboard_semantics(self):
+        from agent.approval import permission_preset
+        assert permission_preset("ask") == {"mode": "on-request", "sandbox": "workspace-write",
+                                            "honor": True}
+        assert permission_preset("auto")["mode"] == "never"
+        assert permission_preset("auto")["honor"] is False
+        assert permission_preset("full")["sandbox"] == "danger-full-access"
+        assert permission_preset("block") == {"mode": "untrusted", "sandbox": "read-only",
+                                              "honor": True}
+        assert permission_preset("nope") == {}
+
+    def test_full_allows_critical_write_and_reports_status(self):
+        p = self._policy()
+        st = p.apply_preset("full")
+        assert st == {"mode": "never", "sandbox_mode": "danger-full-access",
+                      "honor_on_request": False}
+        assert p.decide(self._critical()).allowed is True
+
+    def test_ask_restores_the_guard(self):
+        p = self._policy()
+        p.apply_preset("full")
+        st = p.apply_preset("ask")
+        assert st["sandbox_mode"] == "workspace-write" and st["honor_on_request"] is True
+        assert p.decide(self._critical()).allowed is False, "切回 ask 必须重新拦住"
+
+    def test_block_is_readonly_and_denies(self):
+        p = self._policy()
+        st = p.apply_preset("block")
+        assert st["mode"] == "untrusted" and st["sandbox_mode"] == "read-only"
+        assert p.decide(self._critical()).allowed is False
+
+    def test_unknown_preset_raises_with_help(self):
+        import pytest as _pytest
+        with _pytest.raises(ValueError) as err:
+            self._policy().apply_preset("nope")
+        assert "ask" in str(err.value) and "full" in str(err.value)
+
+    def test_invalid_sandbox_is_rejected(self):
+        import pytest as _pytest
+        with _pytest.raises(ValueError):
+            self._policy().set_sandbox_mode("unlimited")
+
+    def test_live_switch_is_visible_to_the_same_instance(self):
+        """执行器持有同一个 ApprovalPolicy：切档后立刻生效，无需重建。"""
+        p = ApprovalPolicy(mode="never", sandbox_mode="danger-full-access", interactive=False)
+        assert p.decide(self._critical()).allowed is False   # 默认尊重 on-request
+        p.apply_preset("auto")
+        assert p.decide(self._critical()).allowed is True    # 切 auto 后立刻放行
+        p.apply_preset("block")
+        assert p.decide(self._critical()).allowed is False   # 切到全禁又拦回来

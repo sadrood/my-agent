@@ -19,15 +19,18 @@ class FakeLLM:
         return None
 
 
-def _make(llm, threshold=100, keep=3):
+def _make(llm, threshold=100, keep=3, mode="summary"):
+    """默认钉住 summary 模式：本文件测的是 LLM 摘要那条路径（指针模式见 test_context_store.py）。"""
     import agent.executor as ex
     ex.COMPACT_CONFIG = {"enabled": True, "token_threshold": threshold, "keep_last": keep}
-    return Executor(
+    executor = Executor(
         tool_manager=ToolManager(),
         llm=llm,
         approval_policy=ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False),
         guardian=None, rollout=None, instructions_text="", max_step_ops=10, llm_retry_delay=0,
     )
+    executor._compact_mode = lambda: mode      # 实例级，别改全局配置污染别的用例
+    return executor
 
 
 def test_compact_over_threshold():

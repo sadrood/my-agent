@@ -48,9 +48,11 @@ def _tool(monkeypatch, **kw):
 class TestScriptProtocol:
     def test_top_level_await_with_space_and_sentinel(self, monkeypatch):
         script = _tool(monkeypatch)._script("  __out = { a: 1 }\n")
-        assert 'await taskSpaces.useOrCreate("test-space")' in script
+        # 空间名带会话后缀（会话隔离）；前缀就是配置里的空间名
+        assert 'const __spaceName = "test-space' in script
+        assert "taskSpaces.useOrCreate(__spaceName)" in script
         assert "await browser.listTabs()" in script
-        assert "await browser.switchTab(__real.targetId)" in script
+        assert "browser.switchTab(__tab.targetId)" in script
         assert "let __out = null" in script
         assert SENTINEL in script
         # 包成 IIFE 会让 CLI 在 promise 未落地时退出（实测踩过）
@@ -66,6 +68,28 @@ class TestScriptProtocol:
         assert "EGO_LINUX_HEADLESS" not in captured["envs"][0]
         _tool(monkeypatch, headless=True)._run("  __out = {}\n")
         assert captured["envs"][1]["EGO_LINUX_HEADLESS"] == "1"
+
+    def test_cursor_name_overrides_runtime_default(self, monkeypatch, captured):
+        """浮层徽标默认写死 "DeepSeek"：必须用 EGO_LINUX_CURSOR_NAME 改成自己的名字。"""
+        tool = _tool(monkeypatch)
+        tool._cursor_name = "my_agent"
+        tool._run("  __out = {}\n")
+        assert captured["envs"][0]["EGO_LINUX_CURSOR_NAME"] == "my_agent"
+
+    def test_cursor_can_be_disabled(self, monkeypatch, captured):
+        """浮层会被画进截图：关掉时传 EGO_LINUX_CURSOR=0。"""
+        tool = _tool(monkeypatch)
+        tool._cursor_on = False
+        tool._run("  __out = {}\n")
+        assert captured["envs"][0]["EGO_LINUX_CURSOR"] == "0"
+
+    def test_cursor_env_absent_when_defaults_left_alone(self, monkeypatch, captured):
+        tool = _tool(monkeypatch)
+        tool._cursor_name = ""          # 留空 = 用运行时默认值
+        tool._cursor_on = True
+        tool._run("  __out = {}\n")
+        env = captured["envs"][0]
+        assert "EGO_LINUX_CURSOR_NAME" not in env and "EGO_LINUX_CURSOR" not in env
 
 
 class TestRunParsing:
@@ -220,3 +244,23 @@ class TestBackendSelection:
         import tools.embedded_browser as eb
         monkeypatch.setattr(eb, "probe_bridge", lambda *a, **kw: False)
         assert type(_create_browser_tool()).__name__ == "BrowserTool"
+
+
+class TestFileUpload:
+    """文件上传：fill 对 input[type=file] 无效（只会往框里打字），必须走 CDP 的 setInputFiles。"""
+
+    def test_upload_maps_to_set_input_files(self, monkeypatch, captured):
+        _tool(monkeypatch).execute("upload input[type=file] D:/tmp/a.xlsx")
+        assert ('page.locator("input[type=file]").setInputFiles("D:/tmp/a.xlsx")'
+                in captured["scripts"][-1])
+
+    def test_upload_keeps_windows_backslashes(self, monkeypatch, captured):
+        """反斜杠路径必须转义后进脚本，否则 \\U 之类会被当转义序列吃掉。"""
+        _tool(monkeypatch).execute(r"upload #f C:\Users\me\Downloads\template.xlsx")
+        assert (r'setInputFiles("C:\\Users\\me\\Downloads\\template.xlsx")'
+                in captured["scripts"][-1])
+
+    def test_upload_without_path_is_rejected(self, monkeypatch, captured):
+        for bad in ("upload", "upload #f"):
+            assert _tool(monkeypatch).execute(bad).success is False
+        assert captured["scripts"] == [], "参数不全不该真的跑脚本"

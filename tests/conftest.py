@@ -127,3 +127,20 @@ def _reset_computer_ownership():
         _cu._HELD_BUTTONS.clear()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_vision_temporary():
+    """会话级临时视觉覆盖是模块级全局状态：/model 切换会写它，用例之间必须复位，
+    否则前一条用例设过的临时端点会让后面所有视觉端点断言集体失败。"""
+    try:
+        from models import vision as _vision
+        _vision.set_temporary_primary()
+    except Exception:
+        pass
+    yield
+    try:
+        from models import vision as _vision
+        _vision.set_temporary_primary()
+    except Exception:
+        pass

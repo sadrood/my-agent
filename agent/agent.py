@@ -15,7 +15,7 @@ from config import (
     VISION_CONFIG, MCP_CONFIG, APPROVAL_CONFIG,
     GUARDIAN_CONFIG, ROLLOUT_CONFIG, INSTRUCTIONS_CONFIG,
     SNAPSHOT_CONFIG, TEST_CONFIG, CHECKPOINT_CONFIG, REPOMAP_CONFIG,
-    SESSION_CONFIG, SKILLS_CONFIG,
+    SESSION_CONFIG, SKILLS_CONFIG, RUN_LOG_CONFIG,
 )
 from agent.ui_theme import (
     get_console, print_header, print_stage, print_step_header, print_step_result,
@@ -81,6 +81,7 @@ class AgentConfig:
         sandbox_mode: str = None,
         approval_interactive: bool = None,
         approver=None,
+        approval_honor_on_request=None,   # False=完全权限：不拦"必须人工确认"的工具
         agent_name: str = None,       # 用户自定义名字（None=默认人格名「小悟」）
         guardian_enabled: bool = None,
         supervisor_enabled: bool = None,   # 任务监管者（独立模型复核完成度）；None=读配置
@@ -129,6 +130,7 @@ class AgentConfig:
             else APPROVAL_CONFIG.get("interactive", True)
         )
         self.approver = approver
+        self.approval_honor_on_request = approval_honor_on_request
 
         # 用户自定义名字（桌面端首次初始化填写；None=默认人格名「小悟」）
         self.agent_name = agent_name
@@ -226,6 +228,13 @@ class Agent:
         self.config = config or AgentConfig()
         self.llm = llm or self._build_llm()
         self._wire_llm_notifier()
+        # 视觉的"临时端点跟随"是进程级全局：新建 Agent 必须从干净状态开始，
+        # 否则同进程里上一个 Agent（或上一次会话）切过的端点会漏到这一个身上。
+        try:
+            from models import vision as _vision_mod
+            _vision_mod.set_temporary_primary()
+        except Exception:                        # noqa: BLE001
+            pass
         self.tool_manager = tool_manager or ToolManager()
         self.memory = memory or Memory()
         self.llm_health = None       # 懒加载：只在真出现限流/切换时才落盘
@@ -242,6 +251,7 @@ class Agent:
             sandbox_mode=self.config.sandbox_mode,
             interactive=self.config.approval_interactive,
             approver=self.config.approver,
+            honor_on_request=getattr(self.config, "approval_honor_on_request", None),
         )
         self.guardian = self._build_guardian()
         # 人工放行（Guardian 授权）：授权只能由人类输入写入，见 agent/consent.py。无人值守（approval=never 或非交互）时不注入询问回调 → 拦截仍然是拦截。
@@ -470,7 +480,8 @@ class Agent:
         except Exception:       # noqa: BLE001
             pass
 
-    def switch_model(self, model: str = None, base_url: str = None, api_key: str = None):
+    def switch_model(self, model: str = None, base_url: str = None, api_key: str = None,
+                     sync_vision: bool = True):
         """会话内临时切换主模型（/model 风格）："""
         self.config.llm_model = model or self.config.llm_model
         self.config.llm_base_url = base_url or self.config.llm_base_url
@@ -497,10 +508,40 @@ class Agent:
         if self.executor is not None:
             self.executor.guardian = self.guardian
             self.executor.supervisor = self.supervisor
+        if sync_vision:
+            # 视觉跟着切到同一临时端点；那边要是不支持看图，会逐级回落 .env 的视觉备用链
+            self._sync_vision_to_temporary(api_key=api_key)
         return {
             "model": self.llm.default_model,
             "base_url": str(self.llm.client.base_url),
+            # 供调用方回显"key 是否生效"（只回前 6 位，别整串打印）
+            "api_key": self.llm.client.api_key,
         }
+
+    def _sync_vision_to_temporary(self, api_key: str = None) -> None:
+        """把视觉主模型指到当前主 LLM 的端点，并让各处视觉缓存失效重建。"""
+        try:
+            from models import vision as vision_mod
+            vision_mod.set_temporary_primary(
+                model=self.llm.default_model,
+                base_url=str(self.llm.client.base_url),
+                api_key=api_key or self.llm.client.api_key,
+            )
+        except Exception:                            # noqa: BLE001
+            return
+        if self.executor is not None:
+            try:
+                self.executor._vision_model = None   # 懒加载缓存：清掉才会按新端点重建
+            except Exception:                        # noqa: BLE001
+                pass
+        tool_manager = getattr(self.executor, "tool_manager", None)
+        for name in ("see", "computer"):
+            try:
+                tool = tool_manager.get_tool(name) if tool_manager is not None else None
+            except Exception:                        # noqa: BLE001
+                tool = None
+            if tool is not None and getattr(tool, "_vision_model", None) is not None:
+                tool._vision_model = None
 
     def _build_guardian(self):
         """构建 Guardian（支持独立端点：GUARDIAN_API_KEY / GUARDIAN_BASE_URL）。
@@ -1217,6 +1258,65 @@ class Agent:
         except Exception as e:
             print_warning(f"会话恢复失败: {e}", use_rich=self.config.verbose)
 
+    @staticmethod
+    def _session_entries_from_messages(messages: list) -> list:
+        """把执行器消息转成会话记录（只留可读可恢复的 user/assistant 文本）。
+
+        工具结果折成 assistant 侧的「工具结果」条目：会话文件是给人看、也是恢复对话用的，
+        直接塞 tool 角色（带 tool_call_id）会让恢复出来的历史缺配对而不可用。
+        """
+        out = []
+        for m in messages or []:
+            role = str((m or {}).get("role") or "")
+            content = str((m or {}).get("content") or "").strip()
+            if role == "user" and content:
+                out.append({"role": "user", "content": content[:8000]})
+            elif role == "assistant" and content:
+                out.append({"role": "assistant", "content": content[:8000]})
+            elif role == "tool" and content:
+                out.append({"role": "assistant", "content": f"【工具结果】{content[:2000]}"})
+        return out
+
+    def _incremental_save(self, messages: list) -> None:
+        """增量落盘：只追加新出现的消息（节流写入，避免每轮整份重写）。"""
+        self._last_messages = messages           # 关窗兜底要用最新一份
+        name = self.config.session_name
+        if not name or not RUN_LOG_CONFIG.get("incremental_session", True):
+            return
+        try:
+            entries = self._session_entries_from_messages(messages)
+            done = int(getattr(self, "_persisted_count", 0))
+            if len(entries) <= done:
+                return
+            now = _time.time()
+            interval = float(RUN_LOG_CONFIG.get("incremental_interval_seconds", 5) or 0)
+            if interval > 0 and now - float(getattr(self, "_persist_last_at", 0.0)) < interval:
+                return
+            self._persist_last_at = now
+            self.session_store.append_messages(
+                name, entries[done:],
+                model=self.llm.default_model,
+                base_url=str(self.llm.client.base_url),
+            )
+            self._persisted_count = len(entries)
+        except Exception:                            # noqa: BLE001
+            pass                                     # 落盘失败不能影响主流程
+
+    def flush_on_exit(self, reason: str = "") -> None:
+        """进程即将消失（关窗/注销/关机）时的兜底：把当前消息刷进会话文件。"""
+        try:
+            from agent import run_log
+            run_log.log(f"退出兜底刷盘：{reason or '未注明'}")
+        except Exception:                            # noqa: BLE001
+            pass
+        messages = getattr(self, "_last_messages", None)
+        if messages:
+            try:
+                self._persist_last_at = 0.0
+                self._incremental_save(messages)
+            except Exception:                        # noqa: BLE001
+                pass
+
     def _save_session_if_requested(self, final_summary: str):
         """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。"""
         name = self.config.session_name
@@ -1291,6 +1391,14 @@ class Agent:
 
     def _finalize_run(self, status: str, result_text: str = ""):
         """运行收尾：关闭 Rollout、保存会话、输出统计与审批信息。"""
+        # 转圈状态必须在收尾时停掉：漏停的 rich Status 会持续重画同一行，
+        # 用户随后在提示符里输入的内容会被它覆盖（表现为"输入跑到前面去了"）。
+        self._stop_turn_spinner()
+        try:
+            from agent import run_log
+            run_log.log(f"运行收尾：{status}")
+        except Exception:                        # noqa: BLE001
+            pass
         if self.rollout is not None:
             try:
                 self.rollout.emit("run_end", {"status": status, "result": clip_text(result_text or "")})
@@ -1557,6 +1665,13 @@ class Agent:
         self._stream_answer_started = False
         from agent.ui_theme import StreamingMarkdown
         self._md_renderer = StreamingMarkdown(use_rich=self.config.verbose)
+        # 增量落盘：每完成一次工具调用就把新消息写进会话文件，终端被强杀最多丢最后一条
+        self._persisted_count = 0
+        self._persist_last_at = 0.0
+        try:
+            self.executor.persist_callback = self._incremental_save
+        except Exception:                        # noqa: BLE001
+            pass
         try:
             result = self.executor.execute_goal_loop(
                 goal=planning_goal,

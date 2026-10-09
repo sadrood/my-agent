@@ -50,6 +50,35 @@ def _check_deps() -> dict:
     return {"name": "依赖完整性", "ok": True, "message": f"{len(REQUIRED_DEPS)} 个依赖齐全", "hint": ""}
 
 
+def _check_browser() -> dict:
+    """浏览器后端体检：按**实际会被选中**的后端检查依赖（内置桥 > ego > Playwright）。
+
+    以前只查 Playwright：走 ego 后端的机器会被误报"缺 chromium"，而真正的问题
+    （CLI/Edge 路径不对）反而查不出来。
+    """
+    try:
+        from tools.tool_manager import ToolManager
+        tool = ToolManager().get_tool("browser")
+        kind = type(tool).__name__
+        if kind == "EgoBrowserTool":
+            from tools.ego_browser import ego_available, resolve_chrome, resolve_cli
+            cli = resolve_cli()
+            chrome = resolve_chrome()
+            if ego_available():
+                return {"name": "浏览器后端（ego）", "ok": True,
+                        "message": f"Edge: {chrome or '已探测'}", "hint": ""}
+            return {"name": "浏览器后端（ego）", "ok": False,
+                    "message": f"不可用（CLI: {cli or '未找到'}）",
+                    "hint": "装 dsh-ego-browser，或设 BROWSER_BACKEND=playwright"}
+        if "Embedded" in kind:
+            return {"name": "浏览器后端（内置桥）", "ok": True,
+                    "message": "桌面端内置浏览器可用", "hint": ""}
+        return _check_playwright_browser()
+    except Exception as e:                       # noqa: BLE001
+        return {"name": "浏览器后端", "ok": False,
+                "message": f"检查失败: {str(e)[:80]}", "hint": ""}
+
+
 def _check_playwright_browser() -> dict:
     try:
         # 优先直接探测默认安装目录（不启动 playwright 驱动，避免退出时的异步警告）
@@ -59,7 +88,7 @@ def _check_playwright_browser() -> dict:
             hits = glob.glob(os.path.join(base, "chromium-*", "chrome-win64", "chrome.exe"))
             if hits:
                 return {
-                    "name": "Playwright 浏览器",
+                    "name": "浏览器后端（Playwright）",
                     "ok": True,
                     "message": f"chromium: {hits[0]}",
                     "hint": "",
@@ -69,14 +98,14 @@ def _check_playwright_browser() -> dict:
             path = p.chromium.executable_path
             ok = os.path.exists(path)
             return {
-                "name": "Playwright 浏览器",
+                "name": "浏览器后端（Playwright）",
                 "ok": ok,
                 "message": f"chromium: {path}" if ok else "chromium 二进制缺失",
                 "hint": "playwright install chromium" if not ok else "",
             }
     except Exception as e:
         return {
-            "name": "Playwright 浏览器",
+            "name": "浏览器后端（Playwright）",
             "ok": False,
             "message": f"检查失败: {str(e)[:80]}",
             "hint": "playwright install chromium",
@@ -513,7 +542,7 @@ def _check_sandbox() -> dict:
 def run_doctor(include_llm: bool = True) -> List[dict]:
     """执行全部自检，返回结果列表。"""
     checks: List[Callable[[], dict]] = [
-        _check_python, _check_deps, _check_playwright_browser,
+        _check_python, _check_deps, _check_browser,
         _check_git, _check_env, _check_env_sync, _check_tools, _check_ws_support,
         _check_policy, _check_hooks, _check_exec_policy, _check_skills, _check_sandbox,
     ]

@@ -274,7 +274,47 @@ def _read_goal_posix(stdin, prompt_primary, prompt_continuation) -> str:
 
 def read_goal(prompt_primary=None, prompt_continuation=None,
               stdin=None, pending_fn=None, drain_fn=None) -> str:
-    """读取一条目标输入（交互模式）。"""
+    """读取一条目标输入（交互模式）。
+
+    提示符期间开**输出闸门**：别的线程的输出先排队，回车后按原顺序放出来，
+    避免把用户正在敲的那一行覆盖掉。
+    """
+    from agent import output_gate
+    output_gate.begin_prompt()
+    try:
+        return _read_goal_inner(prompt_primary, prompt_continuation, stdin,
+                                pending_fn, drain_fn)
+    finally:
+        output_gate.end_prompt()
+        _flush_deferred()
+
+
+def _flush_deferred() -> None:
+    """把闸门里排队的输出按顺序真正打印（不在提示符状态时调用）。"""
+    from agent import output_gate
+    try:
+        from agent.ui_theme import _console, _legacy_console
+    except Exception:                                # noqa: BLE001
+        return
+    items = output_gate.drain()
+    if not items:
+        return
+    for text, args, kwargs in items:
+        console = _console or _legacy_console
+        if console is None:
+            try:
+                sys.stdout.write(text + "\n")
+            except Exception:                        # noqa: BLE001
+                pass
+            continue
+        try:
+            console.print(*(args or (text,)), **(kwargs or {}))
+        except Exception:                            # noqa: BLE001
+            pass
+
+
+def _read_goal_inner(prompt_primary=None, prompt_continuation=None,
+                     stdin=None, pending_fn=None, drain_fn=None) -> str:
     stdin = stdin if stdin is not None else sys.stdin
 
     # ↑ POSIX 默认路径统一成单一字节读取者；显式注入 pending_fn/drain_fn（测试、嵌入方）

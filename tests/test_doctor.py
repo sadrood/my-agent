@@ -12,6 +12,60 @@ def test_python_check():
     assert "Python" in r["message"]
 
 
+class TestBrowserBackendCheck:
+    """体检必须报**实际会被选中**的后端：走 ego 的机器不该被误报"缺 chromium"。"""
+
+    def _stub_tool_manager(self, monkeypatch, tool):
+        monkeypatch.setattr("tools.tool_manager.ToolManager.get_tool",
+                            lambda self, name: tool)
+
+    def test_reports_ego_when_ego_selected(self, monkeypatch):
+        from tools.ego_browser import EgoBrowserTool
+        from tools import ego_browser as ego_mod
+        self._stub_tool_manager(monkeypatch, EgoBrowserTool.__new__(EgoBrowserTool))
+        monkeypatch.setattr(ego_mod, "ego_available", lambda: True)
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: r"C:\Edge\msedge.exe")
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: r"C:\ego.mjs")
+        r = doc._check_browser()
+        assert r["ok"] is True and "ego" in r["name"] and "msedge" in r["message"]
+
+    def test_ego_missing_cli_gives_actionable_hint(self, monkeypatch):
+        from tools.ego_browser import EgoBrowserTool
+        from tools import ego_browser as ego_mod
+        self._stub_tool_manager(monkeypatch, EgoBrowserTool.__new__(EgoBrowserTool))
+        monkeypatch.setattr(ego_mod, "ego_available", lambda: False)
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: "")
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "")
+        r = doc._check_browser()
+        assert r["ok"] is False and "dsh-ego-browser" in r["hint"]
+
+    def test_reports_embedded_bridge(self, monkeypatch):
+        from tools.embedded_browser import EmbeddedBrowserTool
+        self._stub_tool_manager(monkeypatch, EmbeddedBrowserTool.__new__(EmbeddedBrowserTool))
+        r = doc._check_browser()
+        assert r["ok"] is True and "内置桥" in r["name"]
+
+    def test_falls_back_to_playwright_check(self, monkeypatch):
+        from tools.browser import BrowserTool
+        self._stub_tool_manager(monkeypatch, BrowserTool.__new__(BrowserTool))
+        monkeypatch.setattr(doc, "_check_playwright_browser",
+                            lambda: {"name": "浏览器后端（Playwright）", "ok": True,
+                                     "message": "marker", "hint": ""})
+        assert doc._check_browser()["message"] == "marker"
+
+    def test_failure_is_reported_not_raised(self, monkeypatch):
+        def _boom(self, name):
+            raise RuntimeError("tool manager 炸了")
+
+        monkeypatch.setattr("tools.tool_manager.ToolManager.get_tool", _boom)
+        r = doc._check_browser()
+        assert r["ok"] is False and "检查失败" in r["message"]
+
+    def test_check_is_registered_in_doctor(self):
+        rows = doc.run_doctor(include_llm=False)
+        assert any("浏览器后端" in row["name"] for row in rows), "浏览器项必须在体检清单里"
+
+
 def test_deps_check():
     r = doc._check_deps()
     # 测试环境已装齐依赖（websockets 等）

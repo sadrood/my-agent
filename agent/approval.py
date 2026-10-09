@@ -290,6 +290,26 @@ class ApprovalDecision:
     required_approval: bool = False   # 是否真的询问了用户
 
 
+#: 会话内权限预设（`/permission` 用；只有人能在提示符里切换，模型没有提权的工具）
+PERMISSION_PRESETS = {
+    # 每次需确认的工具都弹卡（默认档）；回到本档时把沙箱也收回工作区可写
+    "ask": {"mode": "on-request", "sandbox": "workspace-write", "honor": True},
+    # 自动执行：连"必须人工确认"的也不再拦（与仪表盘 auto 一致）
+    "auto": {"mode": "never", "sandbox": None, "honor": False},
+    # 完全权限：在 auto 之上把沙箱开到 danger-full-access（黑名单也不再拒绝）
+    "full": {"mode": "never", "sandbox": "danger-full-access", "honor": False},
+    # 禁止：非低风险一律拒绝，沙箱收到只读
+    "block": {"mode": "untrusted", "sandbox": "read-only", "honor": True},
+}
+
+PERMISSION_HELP = "ask（每次确认）/ auto（自动执行）/ full（完全权限）/ block（全禁）/ status"
+
+
+def permission_preset(name: str) -> dict:
+    """按名字取权限预设（未知返回 {}）。"""
+    return dict(PERMISSION_PRESETS.get(str(name or "").strip().lower()) or {})
+
+
 class ApprovalPolicy:
     """审批策略引擎。
     不能豁免沙箱等级不足，allow 只影响"是否需要询问"）"""
@@ -300,6 +320,46 @@ class ApprovalPolicy:
         m = self._mode
         return m() if callable(m) else m
 
+    def honor_on_request(self) -> bool:
+        """是否尊重工具声明的"必须人工确认"（可传可调用对象，便于运行中按模式实时解析）。"""
+        value = getattr(self, "_honor_on_request", True)
+        try:
+            value = value() if callable(value) else value
+        except Exception:                        # noqa: BLE001
+            return True
+        return bool(value)
+
+    # ---- 会话内实时切换（/permission；只有人能调，模型没有对应工具） ----
+
+    def set_mode(self, mode: str) -> None:
+        if not callable(mode) and mode not in ("untrusted", "on-failure", "on-request", "never"):
+            raise ValueError(f"未知 approval_policy: {mode}")
+        self._mode = mode
+
+    def set_sandbox_mode(self, sandbox_mode: str) -> None:
+        if sandbox_mode not in SANDBOX_LEVELS:
+            raise ValueError(f"未知 sandbox_mode: {sandbox_mode}")
+        self.sandbox_mode = sandbox_mode
+
+    def set_honor_on_request(self, value) -> None:
+        self._honor_on_request = value
+
+    def status(self) -> dict:
+        """当前生效的审批状态（/permission status 与启动横幅共用）。"""
+        return {"mode": self.mode, "sandbox_mode": self.sandbox_mode,
+                "honor_on_request": self.honor_on_request()}
+
+    def apply_preset(self, name: str) -> dict:
+        """应用权限预设，返回应用后的状态；名字未知抛 ValueError。"""
+        preset = permission_preset(name)
+        if not preset:
+            raise ValueError(f"未知权限档: {name}（可用：{PERMISSION_HELP}）")
+        self.set_mode(preset["mode"])
+        if preset.get("sandbox"):
+            self.set_sandbox_mode(preset["sandbox"])
+        self.set_honor_on_request(preset["honor"])
+        return self.status()
+
     def __init__(
         self,
         mode: str = "on-failure",
@@ -309,9 +369,12 @@ class ApprovalPolicy:
         command_whitelist: Optional[bool] = None,
         command_whitelist_extra: Optional[List[str]] = None,
         exec_policy: Optional["ExecPolicy"] = None,
+        honor_on_request=None,
     ):
         """Args:
-        （enabled 且文件存在才创建，否则保持旧路径零行为变化）。"""
+        honor_on_request: 是否尊重工具自己的"必须人工确认"（默认取配置中心，true）。
+        传 False 或配置成 false = 完全权限模式：安全关键文件/桌面操控不再拦，
+        直接按策略处理（never 下即放行）。"""
         if not callable(mode) and mode not in ("untrusted", "on-failure", "on-request", "never"):
             raise ValueError(f"未知 approval_policy: {mode}")
         if sandbox_mode not in SANDBOX_LEVELS:
@@ -321,6 +384,9 @@ class ApprovalPolicy:
         self.sandbox_mode = sandbox_mode
         self.interactive = interactive
         self.approver = approver
+        if honor_on_request is None:
+            honor_on_request = APPROVAL_CONFIG.get("honor_on_request", True)
+        self._honor_on_request = honor_on_request
         # 白名单缺省走配置中心（显式传参可覆盖，便于测试与嵌入式调用）
         if command_whitelist is None:
             command_whitelist = APPROVAL_CONFIG.get("command_whitelist", False)
@@ -406,11 +472,17 @@ class ApprovalPolicy:
                 return decision
 
         # 3. 工具主动要求批准（on-request 语义）
-        if getattr(request, "approval", "auto") == "on-request":
+        # honor_on_request=False = 完全权限模式：跳过本步，落到第 4 步按策略处理（never → 放行）
+        if (getattr(request, "approval", "auto") == "on-request"
+                and self.honor_on_request()):
+            # 把"为什么要求批准"带上（如命中了哪个安全关键文件）：
+            # 只回一句"工具要求批准"，人和模型都不知道该改什么。
+            why = str(getattr(request, "reason", "") or "").strip()
+            detail = f"（{why}）" if why else ""
             if self.mode == "never":
-                decision = ApprovalDecision(False, "工具要求批准，但策略为 never。")
+                decision = ApprovalDecision(False, f"工具要求批准{detail}，但策略为 never。")
             else:
-                decision = self._ask(request, "该工具主动要求人工确认")
+                decision = self._ask(request, f"该工具主动要求人工确认{detail}")
             self._record(request, decision)
             return decision
 
