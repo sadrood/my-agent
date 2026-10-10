@@ -305,6 +305,7 @@ class QQBotBridge:
         self._pending: Dict[str, dict] = {}
         self._always: Dict[str, set] = {}            # 用户选了"始终允许"的工具
         self._ctx: Dict[str, dict] = {}              # 会话 → 发送上下文（api/msg_id/loop/收信时刻）
+        self._seq: Dict[str, dict] = {}             # 会话 → {msg_id, next}：同一 msg_id 下 msg_seq 持续递增
         self._api = None                            # botpy 的 message._api（兼容单会话调用）
         self._msg_id = ""
         self._loop = None
@@ -342,6 +343,22 @@ class QQBotBridge:
         return self._ctx.get(self.norm_key(key)) or {
             "api": self._api, "msg_id": self._msg_id,
             "loop": self._loop, "recv_at": 0.0}
+
+    def _next_seq(self, key: str, msg_id) -> int:
+        """同一 msg_id 下持续递增的 msg_seq。
+
+        回执、正式回复、审批提问共用一条计数：否则回执占了 seq=1，
+        紧随其后的回复又从 1 开始，会被平台按「msg_id+msg_seq 重复」去重拒收。
+        换了 msg_id（新一条来信）则重新从 1 计数。
+        """
+        key = self.norm_key(key)
+        state = self._seq.get(key)
+        if not state or state.get("msg_id") != msg_id:
+            state = {"msg_id": msg_id, "next": 1}
+            self._seq[key] = state
+        seq = state["next"]
+        state["next"] = seq + 1
+        return seq
 
     def _reply_plan(self, key: str, ctx: dict) -> tuple:
         """回报策略：还在被动窗口内就带 msg_id 回复，超了才改主动消息。
@@ -473,7 +490,8 @@ class QQBotBridge:
             return
         msg_id, fresh = self._reply_plan(key, ctx)
         group_openid, user_openid = self.split_key(key)
-        for seq, piece in enumerate(_chunks_capped(text), start=1):
+        for piece in _chunks_capped(text):
+            seq = self._next_seq(key, msg_id)
             if group_openid:
                 coro = api.post_group_message(group_openid=group_openid, msg_type=0,
                                               msg_id=msg_id, msg_seq=seq, content=piece)
@@ -680,7 +698,8 @@ class QQBotBridge:
             return
         msg_id, fresh = self._reply_plan(key, ctx)
         group_openid, user_openid = self.split_key(key)
-        for seq, piece in enumerate(_chunks_capped(payload), start=1):
+        for piece in _chunks_capped(payload):
+            seq = self._next_seq(key, msg_id)
             try:
                 if group_openid:
                     await api.post_group_message(group_openid=group_openid, msg_type=0,
