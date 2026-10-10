@@ -68,21 +68,38 @@ VENV_PY=".venv/bin/python"
 run "$VENV_PY" -m pip install --upgrade pip
 run "$VENV_PY" -m pip install -r requirements.txt
 
-say "4/6 浏览器内核（默认 Playwright；ego 后端需另装 dsh-ego-browser）"
-if [ "$WITH_BROWSER" = "1" ]; then
-  # --with-deps 会调 apt 装 chromium 依赖（需要 sudo）
-  run "$VENV_PY" -m playwright install --with-deps chromium
-  echo "  可选：中文网页截图更清晰 → sudo apt install -y fonts-noto-cjk"
-else
-  echo "  已按 --no-browser 跳过"
-fi
-
-say "5/6 配置文件 .env"
+say "4/6 配置文件 .env"
 if [ -f .env ]; then
   echo "  ✓ .env 已存在（不动它）。新版新增的配置项见：bash scripts/upgrade.sh --check"
 else
   run cp .env.example .env
   echo "  ⚠ 请编辑 .env 填入 LLM_API_KEY（以及可选端点/浏览器/QQ 等），再跑自检"
+fi
+
+say "5/6 浏览器内核（默认 Playwright；ego 后端需另装 dsh-ego-browser）"
+if [ "$WITH_BROWSER" = "1" ]; then
+  # 系统依赖走 apt（国内源很快），和内核下载分开：这样才能单独给下载换镜像
+  run sudo "$VENV_PY" -m playwright install-deps chromium
+
+  # 无头模式只需 headless shell（少下约 170MB 的完整 chromium）
+  HEADLESS=0
+  if [ "${BROWSER_HEADLESS:-}" = "true" ] || grep -qiE '^[[:space:]]*BROWSER_HEADLESS=true' .env 2>/dev/null; then
+    HEADLESS=1
+  fi
+  SHELL_ARG=""
+  [ "$HEADLESS" = "1" ] && SHELL_ARG="--only-shell"
+
+  if [ -z "${PLAYWRIGHT_DOWNLOAD_HOST:-}" ]; then
+    echo "  ⚠ 海外 CDN（cdn.playwright.dev）在国内很慢。建议先设镜像（本机实测可用）："
+    echo "      export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright"
+  else
+    echo "  使用下载源: $PLAYWRIGHT_DOWNLOAD_HOST"
+  fi
+  run "$VENV_PY" -m playwright install $SHELL_ARG chromium
+  echo "  可选：中文网页截图更清晰 → sudo apt install -y fonts-noto-cjk"
+  echo "  可选：视频剪辑/合成工具（video_edit）需要系统 ffmpeg → sudo apt install -y ffmpeg"
+else
+  echo "  已按 --no-browser 跳过"
 fi
 
 say "6/6 环境自检（--doctor 会逐项报告依赖/端点/工具/沙箱/浏览器）"

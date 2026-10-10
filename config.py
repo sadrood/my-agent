@@ -215,6 +215,12 @@ QQBOT_CONFIG = {
     "send_frame": os.getenv("QQBOT_SEND_FRAME", "true"),
     "public_frame_url": os.getenv("QQBOT_PUBLIC_FRAME_URL", ""),
     "frame_push_seconds": os.getenv("QQBOT_FRAME_PUSH_SECONDS", "2.0"),
+    # ---- 对话 / 任务 ----
+    # task（默认）= 发什么都当任务执行；chat = 直接说话只聊天，干活要 /do。
+    # 两种模式下"短问候"都走对话，不会被当成任务扔进工具循环。
+    "default_mode": os.getenv("QQBOT_DEFAULT_MODE", "task"),
+    "chat_turns": int(os.getenv("QQBOT_CHAT_TURNS", "10")),
+    "chat_max_tokens": int(os.getenv("QQBOT_CHAT_MAX_TOKENS", "1000")),
     # 桥的工作目录（留空 = 当前目录）
     "workspace": os.getenv("QQBOT_WORKSPACE", ""),
 }

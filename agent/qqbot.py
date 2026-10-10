@@ -39,6 +39,21 @@ MAX_REPLIES_PER_MESSAGE = 4
 #: 允许的权限档（不给 full：聊天通道不允许提权）
 ALLOWED_PRESETS = ("ask", "block")
 
+#: 会话模式：task = 发什么都当任务执行；chat = 直接说话只聊天（干活要 /do）
+ALLOWED_MODES = ("task", "chat")
+#: 短问候一律走对话、不当任务执行（"你好"被当成目标去开浏览器是最容易踩的坑）
+CHITCHAT_HINTS = ("你好", "您好", "hi", "hello", "hiya", "在吗", "在么", "在不在", "哈喽",
+                  "嗨", "早", "早安", "晚安", "谢谢", "thanks", "thank you", "辛苦了")
+CHITCHAT_MAX_CHARS = 12
+
+
+def looks_like_chitchat(text: str) -> bool:
+    """是不是一句寒暄：短 + 命中问候词。任务描述通常更长，不会被误判。"""
+    body = str(text or "").strip().lower()
+    if not body or len(body) > CHITCHAT_MAX_CHARS:
+        return False
+    return any(hint in body for hint in CHITCHAT_HINTS)
+
 
 def _chunk(text: str, limit: int = CHUNK_CHARS) -> List[str]:
     """把长回复切成多条（QQ 单条有长度限制），保留换行边界。"""
@@ -133,6 +148,18 @@ class QQBotConfig:
                                     or env.get("public_frame_url") or "").strip()
         self.push_seconds = max(0.5, float(env.get("QQBOT_FRAME_PUSH_SECONDS")
                                            or env.get("frame_push_seconds") or 2.0))
+        # ---- 对话 / 任务 ----
+        # 默认模式：task = 发什么都当任务；chat = 直接说话只聊天（寒暄两种模式下都走对话）
+        mode = str(env.get("QQBOT_DEFAULT_MODE") or env.get("default_mode") or "task").strip().lower()
+        self.default_mode = mode if mode in ALLOWED_MODES else "task"
+        self.chat_turns = max(1, int(env.get("QQBOT_CHAT_TURNS") or env.get("chat_turns") or 10))
+        self.chat_max_tokens = max(64, int(env.get("QQBOT_CHAT_MAX_TOKENS")
+                                           or env.get("chat_max_tokens") or 1000))
+        # 闲聊引擎：agent（默认）= 与任务同一个会话（上下文共享、落盘、可用工具）；
+        # llm = 轻量纯聊天（不落盘、不带工具，省 token）
+        engine = str(env.get("QQBOT_CHAT_ENGINE")
+                     or env.get("chat_engine") or "agent").strip().lower()
+        self.chat_engine = engine if engine in ("agent", "llm") else "agent"
 
     def frame_url(self) -> str:
         """给 QQ 抓图用的带 token 地址（需面板能被公网/QQ 服务器访问）。"""
@@ -148,7 +175,8 @@ class QQBotConfig:
         return (f"QQBotConfig(app_id={'*' * len(self.app_id)}, secret=***, "
                 f"allow_from={len(self.allow_from)} 个, 群={len(self.allow_groups)} 个, "
                 f"preset={self.preset}, per_minute={self.per_minute}, "
-                f"group={self.allow_group}, env={'沙箱' if self.sandbox else '正式'})")
+                f"group={self.allow_group}, mode={self.default_mode}, "
+                f"env={'沙箱' if self.sandbox else '正式'})")
 
     def ready(self) -> bool:
         return bool(self.app_id and self.secret)
@@ -158,9 +186,14 @@ class UserSession:
     """一个 QQ 用户 ↔ 一个会话（独立 Agent 实例，权限档锁死在 ask/block）。"""
 
     def __init__(self, openid: str, preset: str = "ask", verbose: bool = False,
-                 approver=None, task_timeout: float = TASK_TIMEOUT):
+                 approver=None, task_timeout: float = TASK_TIMEOUT,
+                 mode: str = "task", chat_turns: int = 10, chat_max_tokens: int = 1000):
         self.openid = openid
         self.preset = preset
+        self.mode = mode if mode in ALLOWED_MODES else "task"
+        self.chat_turns = max(1, int(chat_turns))
+        self.chat_max_tokens = max(64, int(chat_max_tokens))
+        self.chat_history: list = []
         self.agent = None
         self.lock = threading.Lock()
         self.last_run_at = 0.0
@@ -246,6 +279,20 @@ class UserSession:
             return "", "png"
         meta = getattr(result, "metadata", None) or {}
         return str(meta.get("screenshot_base64") or ""), "png"
+
+    def chat(self, text: str) -> str:
+        """纯对话：只调 LLM 聊天，不注册工具、不起浏览器、不写盘。
+
+        走 agent 的同一个 LLM 实例（沿用端点/备用链/限流重试），但不进工具循环。
+        """
+        from models.prompts import QQ_CHAT_SYSTEM_PROMPT
+        agent = self.ensure_agent()
+        self.chat_history.append({"role": "user", "content": text})
+        messages = [{"role": "system", "content": QQ_CHAT_SYSTEM_PROMPT},
+                    *self.chat_history[-self.chat_turns * 2:]]
+        reply = str(agent.llm.chat(messages, max_tokens=self.chat_max_tokens) or "").strip()
+        self.chat_history.append({"role": "assistant", "content": reply})
+        return reply
 
 
 class QQBotBridge:
@@ -647,7 +694,7 @@ class QQBotBridge:
                             f"{type(e).__name__}: {str(e)[:160]}", "warn")
 
     def handle_text(self, openid: str, text: str, group_openid: str = "") -> str:
-        """核心：门控 → 审批答复 → 新任务。返回要发回去的文本（空=不回）。"""
+        """核心：门控 → 审批答复 → 对话 / 任务。返回要发回去的文本（空=不回）。"""
         from agent import run_log
         if not openid:
             return ""
@@ -667,22 +714,80 @@ class QQBotBridge:
             # 要一张当前画面：图本身异步发出去，这里只做确认（成功/失败都会再发一条）
             self.schedule_frame(key)
             return ""
+
+        session = self._session_for(key)
+        lowered = goal.lower()
+
+        # ---- 对话 / 任务的显式切换 ----
+        if lowered.startswith("/chat"):
+            rest = goal[len("/chat"):].strip()
+            if rest:
+                return self._chat_once(session, key, rest)
+            session.mode = "chat"
+            return "已切到对话模式：直接说话就是聊天，要干活用 /do <任务>。"
+        if lowered.startswith("/do") or lowered.startswith("/task"):
+            cut = 3 if lowered.startswith("/do") else 5
+            rest = goal[cut:].strip()
+            if rest:
+                return self._execute_task(session, key, rest)
+            session.mode = "task"
+            return "已切到任务模式：发什么都当成任务执行（寒暄仍会当聊天回你）。"
         if goal.startswith("/"):
             return self._slash(key, goal)
-        session = self.sessions.setdefault(
+
+        # ---- 默认路由：寒暄一律走对话；否则按会话模式 ----
+        if looks_like_chitchat(goal) or session.mode == "chat":
+            return self._chat_once(session, key, goal)
+        return self._execute_task(session, key, goal)
+
+    def _session_for(self, key: str) -> "UserSession":
+        return self.sessions.setdefault(
             key, UserSession(key, self.config.preset, approver=self.approver_for(key),
-                             task_timeout=self.config.task_timeout))
-        run_log.log(f"QQ 任务：用户尾号 {openid[-6:]}"
-                    + (f"，群尾号 {group_openid[-6:]}" if group_openid else "")
-                    + f"，{len(goal)} 字，会话 {session.session_name()}，档位 {session.preset}")
+                             task_timeout=self.config.task_timeout,
+                             mode=self.config.default_mode,
+                             chat_turns=self.config.chat_turns,
+                             chat_max_tokens=self.config.chat_max_tokens))
+
+    def _chat_once(self, session: "UserSession", key: str, text: str) -> str:
+        """闲聊：默认走**同一个 agent 会话**（上下文与任务共享、落盘、需要时仍可用工具）。
+
+        这样才像 QQ 上的聊天助手：聊过的内容，之后发任务时它还记得；
+        代价是每条闲聊也会过一次工具循环（可用 QQBOT_CHAT_ENGINE=llm 换成轻量纯聊天）。
+        """
+        from agent import run_log
+        from models.prompts import QQ_CHAT_HINT
+        run_log.log(f"QQ 聊天：会话 {session.session_name()}，{len(text)} 字，"
+                    f"引擎 {self.config.chat_engine}")
+        if self.config.chat_engine == "llm":
+            try:
+                return session.chat(text) or "（没有回复）"
+            except Exception as e:                    # noqa: BLE001
+                run_log.log(f"QQ 对话失败：{type(e).__name__}: {str(e)[:160]}", "warn")
+                return f"对话出错了：{type(e).__name__}。稍后再试，或用 /do <任务> 直接执行。"
+        try:
+            # 连寒暄也带提示：否则同一条 agent 会话里"你好"又会被当成任务去"完成"
+            return self._execute_task(session, key, f"{text}\n\n{QQ_CHAT_HINT}", kind="chat")
+        except Exception as e:                        # noqa: BLE001
+            run_log.log(f"QQ 聊天失败：{type(e).__name__}: {str(e)[:160]}", "warn")
+            return f"聊天出错了：{type(e).__name__}。稍后再试。"
+
+    def _execute_task(self, session: "UserSession", key: str, goal: str,
+                      kind: str = "task") -> str:
+        """执行路径：走完整 agent 循环（含工具、审批、检查点）。
+
+        kind="chat" 时是闲聊：不推帧、不自动发截图（页面本来就没动）。
+        """
+        from agent import run_log
+        run_log.log(f"QQ {'任务' if kind == 'task' else '聊天'}：会话 {session.session_name()}，"
+                    f"{len(goal)} 字，档位 {session.preset}")
         runner = self._run_task or session.run
-        pusher = self._start_frame_pusher(key)       # A：面板实时画面（跨进程要靠推帧）
+        pusher = self._start_frame_pusher(key) if kind == "task" else None
         try:
             output = runner(goal)
         finally:
             if pusher is not None:
                 pusher.set()
-        if self.config.send_frame and self._run_task is None:
+        if kind == "task" and self.config.send_frame and self._run_task is None:
             self.schedule_frame(key)                 # B：任务收尾把画面发到 QQ
         return output or "（没有输出）"
 
@@ -690,13 +795,14 @@ class QQBotBridge:
         cmd = goal.split()[0].lower()
         session = self.sessions.get(key)
         if cmd in ("/help", "/?", "/h"):
-            return ("可用：直接发任务；/status 看状态；/new 开新会话；/shot 发一张当前画面。"
+            return ("可用：直接说话=聊天（寒暄），/do <任务> 执行一次任务，/chat 切对话模式，"
+                    "/task 切任务模式，/status 看状态，/new 开新会话，/shot 发一张当前画面。"
                     "需要批准时会问你，回 y/a/n。")
         if cmd == "/status":
             if not session:
                 return "还没有会话（发一条任务就建）。"
             tail = (session.last_output or "").strip().replace("\n", " ")[-160:]
-            return (f"会话 {session.session_name()} · 档位 {session.preset} · "
+            return (f"会话 {session.session_name()} · 模式 {session.mode}/{self.config.chat_engine} · 档位 {session.preset} · "
                     f"已完成 {session.turns} 轮 · 上次 "
                     f"{time.strftime('%H:%M:%S', time.localtime(session.last_run_at))}"
                     + (f"\n上次结果尾部：{tail}" if tail else ""))
@@ -704,6 +810,7 @@ class QQBotBridge:
             if session:
                 session.agent = None
                 session.turns = 0
+                session.chat_history = []
             return "已开新会话。"
         return f"未知指令 {cmd}（可用：/status /new /help）"
 

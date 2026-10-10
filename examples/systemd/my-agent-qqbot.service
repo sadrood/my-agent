@@ -1,0 +1,29 @@
+[Unit]
+Description=my_agent QQ 机器人桥（QQ 就是 agent 的入口；agent 跑在本进程内）
+Documentation=file:///home/ubuntu/my_agent/docs/QQBOT-LIVE.md
+After=network-online.target
+Wants=network-online.target
+# 反复退出时别疯狂重启（例如凭证失效、被踢下线）
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# 改成你的实际路径与用户
+WorkingDirectory=/home/ubuntu/my_agent
+User=ubuntu
+ExecStart=/home/ubuntu/my_agent/.venv/bin/python -m agent.qqbot
+# .env 由程序自己加载（python-dotenv），不需要 EnvironmentFile
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# 优雅停止：给 agent 一个检查点收尾的机会（Agent 的 stop_event）
+KillSignal=SIGINT
+TimeoutStopSec=60
+# 基本加固（不限制工作区写入；更强隔离请另配 ProtectSystem/ReadWritePaths）
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

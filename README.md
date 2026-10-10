@@ -72,6 +72,16 @@ $EDITOR .env                            # 填 LLM_API_KEY（至少这一项）
 
 > Linux 差异：桌面操控工具 `computer`（Windows UIA）在 Linux 上不可用，浏览器后端建议用 Playwright
 > （ego 后端需要另装 `dsh-ego-browser` 运行时）。`skills/` 与 `tools/local/` 不入库，新机是干净的产品本体。
+>
+> 国内网络下载浏览器内核慢（默认源 `cdn.playwright.dev` 在海外）：先设镜像再装（实测可用），
+> 并且只用无头模式时加 `--only-shell` 可少下约 170MB：
+> ```bash
+> export PLAYWRIGHT_DOWNLOAD_HOST=https://registry.npmmirror.com/-/binary/playwright
+> sudo .venv/bin/python -m playwright install-deps chromium          # 系统依赖走 apt
+> .venv/bin/python -m playwright install --only-shell chromium       # 内核走镜像
+> ```
+> Playwright 自带的 ffmpeg **只用于"录像"**，本项目不录像、用不到；视频剪辑工具（`video_edit`）
+> 需要的是**系统** ffmpeg：`sudo apt install -y ffmpeg`。
 
 ## 🧩 能力总览
 

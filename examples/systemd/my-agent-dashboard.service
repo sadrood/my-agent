@@ -1,0 +1,25 @@
+[Unit]
+Description=my_agent 面板（实时画面 / 任务流水；可选）
+Documentation=file:///home/ubuntu/my_agent/docs/QQBOT-LIVE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/my_agent
+User=ubuntu
+# 网页版控制面板默认关闭，需要 MY_AGENT_WEB_UI=1 才提供页面
+Environment=MY_AGENT_WEB_UI=1
+Environment=PYTHONUNBUFFERED=1
+# 只绑本机：用 SSH 隧道访问（面板没有登录鉴权，别裸开公网）
+ExecStart=/home/ubuntu/my_agent/.venv/bin/python -c "from dashboard.server import start_server; start_server('127.0.0.1', 8080)"
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGINT
+TimeoutStopSec=15
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
