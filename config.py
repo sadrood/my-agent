@@ -184,7 +184,7 @@ RUN_LOG_CONFIG = {
 }
 
 # ============================================================
-# QQ 机器人桥配置（agent/qqbot.py：用 QQ 私聊驱动 agent）
+# QQ 机器人桥配置（agent/qqbot.py：用 QQ 私聊 / 群内 @ 驱动 agent）
 # 凭证只从环境变量读；白名单为空时拒绝所有人。
 # ============================================================
 QQBOT_CONFIG = {
@@ -195,10 +195,26 @@ QQBOT_CONFIG = {
     "permission": os.getenv("QQBOT_PERMISSION", "ask"),
     "max_chars": int(os.getenv("QQBOT_MAX_CHARS", "2000")),
     "rate_per_minute": int(os.getenv("QQBOT_RATE_PER_MINUTE", "6")),
+    # 单条任务上限（秒）：到点给 agent 置停止信号优雅收尾，<=0 不限时
+    "task_timeout": int(os.getenv("QQBOT_TASK_TIMEOUT", "1800")),
+    # 连沙箱还是正式环境。新机器人默认只存在于沙箱，连错环境会"连上了却收不到消息"
+    "sandbox": os.getenv("QQBOT_SANDBOX", "true"),
     # 群消息默认忽略：进群等于群里任何人都能远程使唤这台电脑
     "allow_group": os.getenv("QQBOT_ALLOW_GROUP", "false").lower() == "true",
     # 群白名单（group_openid，逗号分隔）：allow_group 打开后也只有这些群会被响应
     "allow_groups": os.getenv("QQBOT_ALLOW_GROUPS", ""),
+    # ---- 实时画面 / 截图（A+B）----
+    # 面板地址：桥把画面推给它（面板的「实时画面」与取图端点才看得到非本进程的浏览器）
+    "dashboard_url": os.getenv("QQBOT_DASHBOARD_URL", ""),
+    # 推帧鉴权：与面板的 DASHBOARD_FRAME_TOKEN 同一个值
+    "dashboard_token": os.getenv("QQBOT_DASHBOARD_TOKEN",
+                                 os.getenv("DASHBOARD_FRAME_TOKEN", "")),
+    # 给你点开看的链接（留空则用 dashboard_url）
+    "live_url": os.getenv("QQBOT_LIVE_URL", ""),
+    # 任务结束/收到 /shot 时把截图发到 QQ；公网可取图的地址是备用上传通道
+    "send_frame": os.getenv("QQBOT_SEND_FRAME", "true"),
+    "public_frame_url": os.getenv("QQBOT_PUBLIC_FRAME_URL", ""),
+    "frame_push_seconds": os.getenv("QQBOT_FRAME_PUSH_SECONDS", "2.0"),
     # 桥的工作目录（留空 = 当前目录）
     "workspace": os.getenv("QQBOT_WORKSPACE", ""),
 }
@@ -994,4 +1010,18 @@ ARTICLE_CONFIG = {
         "proofread": os.getenv("ARTICLE_MODEL_PROOFREAD", "agnes"),
         "finalize": os.getenv("ARTICLE_MODEL_FINALIZE", "main"),
     },
+}
+
+# ============================================================
+# 自我升级配置（agent/upgrade.py：python -m agent.upgrade / my-agent --upgrade / /upgrade）
+# 只做 git pull --ff-only，不做任何破坏性动作。
+# ============================================================
+UPGRADE_CONFIG = {
+    "enabled": os.getenv("UPGRADE_ENABLED", "true").lower() == "true",
+    "remote": os.getenv("UPGRADE_REMOTE", "origin"),
+    "branch": os.getenv("UPGRADE_BRANCH", "main"),
+    # 单条 git / pip 命令的超时（秒）
+    "timeout_seconds": int(os.getenv("UPGRADE_TIMEOUT", "300")),
+    # 仓库目录（留空 = 当前工作目录）
+    "repo_dir": os.getenv("UPGRADE_REPO_DIR", ""),
 }

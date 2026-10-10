@@ -197,3 +197,70 @@ class TestStreamingBoldRendering:
         assert "**" not in captured          # 星号被流式 Markdown 渲染消费
         assert "结果是 " in captured
         assert "42" in captured
+
+
+class TestTurnSpinnerTimer:
+    """思考转圈带秒表：上游慢的时候，能看出是"还在等"还是"卡住了"。"""
+
+    class _StubSpinner:
+        def __init__(self):
+            self.texts = []
+            self.stopped = False
+
+        def update(self, text):
+            self.texts.append(text)
+
+        def stop(self):
+            self.stopped = True
+
+    @staticmethod
+    def _bare_agent():
+        agent = Agent.__new__(Agent)        # 只测秒表方法，不走完整初始化
+        agent._turn_spinner = None
+        agent._turn_spinner_timer = None
+        return agent
+
+    @staticmethod
+    def _running_timers():
+        import threading
+        return [t.name for t in threading.enumerate() if t.name == "turn-spinner-timer"]
+
+    def test_timer_refreshes_with_elapsed_seconds(self):
+        import time
+        agent = self._bare_agent()
+        spinner = self._StubSpinner()
+        agent._start_spinner_timer(spinner)
+        time.sleep(0.3)
+        agent._turn_spinner = spinner
+        agent._stop_turn_spinner()
+
+        assert len(spinner.texts) >= 2, "秒表应持续刷新"
+        assert spinner.texts[0].endswith("s"), f"应带秒数，实际 {spinner.texts[0]!r}"
+        assert spinner.stopped is True
+
+    def test_timer_thread_is_reclaimed(self):
+        import time
+        agent = self._bare_agent()
+        spinner = self._StubSpinner()
+        agent._start_spinner_timer(spinner)
+        time.sleep(0.2)
+        assert self._running_timers(), "启动后应有秒表线程"
+        agent._turn_spinner = spinner
+        agent._stop_turn_spinner()
+        time.sleep(0.15)
+        assert self._running_timers() == [], "停止后秒表线程必须回收"
+        assert agent._turn_spinner_timer is None
+
+    def test_stop_is_safe_before_any_start(self):
+        agent = self._bare_agent()
+        agent._stop_turn_spinner()          # 不该抛
+        assert agent._turn_spinner is None
+
+    def test_stop_is_idempotent(self):
+        agent = self._bare_agent()
+        spinner = self._StubSpinner()
+        agent._start_spinner_timer(spinner)
+        agent._turn_spinner = spinner
+        agent._stop_turn_spinner()
+        agent._stop_turn_spinner()          # 再来一次也不该抛
+        assert agent._turn_spinner_timer is None

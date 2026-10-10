@@ -1,0 +1,25 @@
+[Unit]
+Description=my_agent（自主 Agent 单循环执行器）
+Documentation=file:///opt/my_agent/docs/COMMANDS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你的实际路径与用户
+WorkingDirectory=/opt/my_agent
+User=myagent
+# 交互式/常驻均可：这里用交互模式的"无目标"启动，配合 dashboard 或 QQ 桥接受任务
+ExecStart=/opt/my_agent/.venv/bin/python main.py --interactive
+# .env 由程序自己加载（python-dotenv），不需要 EnvironmentFile
+Restart=on-failure
+RestartSec=5
+# 崩溃/被杀时也有日志可查（memory/logs 里另有一份运行日志）
+StandardOutput=journal
+StandardError=journal
+# 关窗兜底刷盘：Ctrl+C 不受影响（见 agent/console_guard.py）
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

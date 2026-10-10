@@ -6,7 +6,7 @@
 
 浏览器 · 桌面 · 终端 · 文档 · 多 Agent 团队，都在一个循环里
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B%20(建议%203.11%2B)-3776AB?logo=python&logoColor=white)](#-快速开始)
+[![Python](https://img.shields.io/badge/Python-3.10%2B%20(建议%203.11%2B)-3776AB?logo=python&logoColor=white)](#-快速开始)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)](#-快速开始)
 [![Tests](https://img.shields.io/badge/tests-2177%20passed-brightgreen)](#-开发约定)
 [![Tools](https://img.shields.io/badge/tools-26-4B8BBE)](#-能力总览)
@@ -44,10 +44,34 @@ python main.py --doctor
 python main.py "你的任务目标"      :: 单次任务（单循环）
 python main.py --team "复杂任务"   :: 多 Agent 团队协作（可 DAG 依赖）
 python main.py                     :: 交互模式（/help 看命令）
+
+:: 5) 升级到最新版本（只快进，不做破坏性动作；完事重启进程）
+python main.py --upgrade-check     :: 只看有没有新版本
+python main.py --upgrade           :: 升级代码 + 依赖（工作区脏会拒绝）
 ```
 
 > 浏览器默认 `BROWSER_BACKEND=auto`：**内置桥 > ego > Playwright**。
 > 想固定用哪条，在 `.env` 里写死即可（见 [浏览器三种后端](#-浏览器三种后端)）。
+
+### 🐧 Ubuntu / Linux 安装
+
+需要 **Python 3.10+**（代码用了 `str | None` 注解；22.04 自带 3.10 ✓，24.04 自带 3.12 ✓，
+20.04 需 deadsnakes PPA）。一键脚本（幂等，可重复跑；`--dry-run` 只打印不改动）：
+
+```bash
+git clone https://github.com/sadrood/my-agent.git ~/my_agent
+cd ~/my_agent
+bash scripts/install-ubuntu.sh          # 系统包 + venv + 依赖 + chromium 内核 + .env + 自检
+$EDITOR .env                            # 填 LLM_API_KEY（至少这一项）
+.venv/bin/python main.py --doctor
+.venv/bin/python main.py "你的任务"
+```
+
+常驻服务（可选）：`examples/systemd/my-agent.service` → 拷到 `/etc/systemd/system/` 后
+`systemctl daemon-reload && systemctl enable --now my-agent`（记得改里面的路径与 User）。
+
+> Linux 差异：桌面操控工具 `computer`（Windows UIA）在 Linux 上不可用，浏览器后端建议用 Playwright
+> （ego 后端需要另装 `dsh-ego-browser` 运行时）。`skills/` 与 `tools/local/` 不入库，新机是干净的产品本体。
 
 ## 🧩 能力总览
 
@@ -158,6 +182,14 @@ python -m agent.recover --run <run-id> --dry-run :: 先从事件流还原，确�
 - 改 `.py` 用精确替换；新配置进 `config.py` 并同步 `.env.example`；新提示词进 `models/prompts.py`。
 - 安全功能必须走 `agent/approval.py` 审批门；黑名单与沙箱等级不可被任何扩展层豁免。
 - 公共文件（`config.py` / `.env.example` / `AGENTS.md` / `main.py`）提交时**逐 hunk 暂存**，避免把别人未完成的改动卷进来。
+- **当天改动汇总成一笔提交（一天一条）**。用钩子把它变成命令级约束：
+
+```bash
+bash scripts/install-hooks.sh      # 启用仓库自带钩子（core.hooksPath=.githooks）
+# 同一天已在远端推过提交时，再次 git push 会被拦下并列出当天已推的提交；
+# 紧急例外：ALLOW_MULTI_PUSH_TODAY=1 git push ...
+# 关闭：bash scripts/install-hooks.sh --uninstall
+```
 
 详见 [`AGENTS.md`](AGENTS.md)。
 

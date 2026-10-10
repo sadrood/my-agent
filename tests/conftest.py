@@ -1,8 +1,28 @@
 """pytest 全局隔离配置。
 离线时要等连接超时（1.7s/次）——几十个测试累积到分钟级。"""
+import asyncio
+
 import pytest
 
 from config import TOOL_CONFIG
+
+
+@pytest.fixture(autouse=True)
+def _keep_main_thread_event_loop():
+    """保证主线程始终有一个可用的事件循环。
+
+    `asyncio.run()` 结束会把线程的 loop 置空，而 `botpy.Client` 这类库在构造时要
+    `asyncio.get_event_loop()` —— 不补的话，谁先跑谁决定别人的用例能不能过（顺序依赖）。
+    """
+    def _ensure():
+        try:
+            asyncio.get_event_loop_policy().get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+    _ensure()
+    yield
+    _ensure()
 
 
 @pytest.fixture(autouse=True)

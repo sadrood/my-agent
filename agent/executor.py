@@ -31,6 +31,22 @@ from config import VISION_CONFIG, TOOL_CONFIG, APPROVAL_CONFIG, COMPACT_CONFIG
 
 logger = logging.getLogger(__name__)
 
+#: 支持增量输出回调的工具：terminal 逐行吐、delegate 吐子 agent 的流式片段
+STREAM_TOOLS = ("terminal", "delegate")
+
+
+def stream_label(tool_name: str, arguments: dict = None) -> str:
+    """实时输出行的来源标签：子 agent 要能一眼看出是哪个引擎、第几层。"""
+    if tool_name != "delegate":
+        return str(tool_name or "")
+    from tools.delegate import _DEPTH_ENV
+    runtime = str((arguments or {}).get("runtime") or "sub").strip() or "sub"
+    try:
+        depth = int(os.getenv(_DEPTH_ENV, "0") or 0)
+    except ValueError:
+        depth = 0
+    return f"sub:{runtime}#{depth + 1}" if depth else f"sub:{runtime}"
+
 
 def _one_line(text: str, limit: int = 200) -> str:
     """把一段文本压成单行（零驻留指针里只留能认出"这是什么"的那点信息）。"""
@@ -916,6 +932,8 @@ class Executor:
                             "success": result.success,
                             "output": (result.output or result.error or blocked_reason or "")[:ui_cap],
                             "metadata": getattr(result, "metadata", {}) or {},
+                            # 实时输出已逐段显示过：终端渲染据此只打一行收尾，不重复整段
+                            "streamed": bool((getattr(result, "metadata", None) or {}).get("streamed")),
                         })
                     except Exception:
                         pass
@@ -1442,17 +1460,24 @@ class Executor:
         timeout = TOOL_CONFIG.get("browser_timeout", 60) if tool_name == "browser" \
             else TOOL_CONFIG.get("tool_timeout", 300)
 
-        # 实时输出流：支持增量回调的工具（terminal）执行期间把输出逐段转发 dashboard
+        # 实时输出流：支持增量回调的工具（terminal 逐行；delegate 是子 agent 的流式片段）
+        # 执行期间把输出逐段转发 event_sink（→ dashboard）与终端渲染（见 Agent._loop_tool_event）
         stream_tool = None
-        if stream_output and self._event_sink is not None and tool_name == "terminal":
+        streamed = [False]
+        if stream_output and tool_name in STREAM_TOOLS:
             try:
                 stream_tool = self.tool_manager.get_tool(tool_name)
             except Exception:
                 stream_tool = None
         if stream_tool is not None and hasattr(stream_tool, "set_output_callback"):
-            def _on_output(text: str, _sink=self._event_sink, _name=tool_name):
+            label = stream_label(tool_name, arguments)
+
+            def _on_output(text: str, _sink=self._event_sink, _name=tool_name, _label=label):
+                streamed[0] = True
+                if _sink is None:
+                    return
                 try:
-                    _sink("tool_output", {"tool": _name, "text": text})
+                    _sink("tool_output", {"tool": _name, "label": _label, "text": text})
                 except Exception:
                     pass
             stream_tool.set_output_callback(_on_output)
@@ -1462,6 +1487,15 @@ class Executor:
         finally:
             if stream_tool is not None and hasattr(stream_tool, "set_output_callback"):
                 stream_tool.set_output_callback(None)
+
+        # 把"已实时显示过"挂在结果上：主循环的事件发射在别处（event_sink("tool_result")），
+        # 只在这里记个局部变量它看不到，终端就会把同一段输出再整段打一遍。
+        if streamed[0] and result is not None:
+            try:
+                result.metadata = dict(getattr(result, "metadata", None) or {})
+                result.metadata["streamed"] = True
+            except Exception:
+                pass
 
         if result is None:
             # 超时：僵尸线程还在用同一工具实例，inflight 要挂到它真正退出为止 ——
@@ -1476,6 +1510,7 @@ class Executor:
                 "success": False,
                 "output": clip_result(msg),
                 "truncated": False,
+                "streamed": streamed[0],
             })
             # 注意：第二个返回值是 blocked_reason，**必须留空**。
             return ToolResult(success=False, output="", error=msg), ""
@@ -1509,6 +1544,8 @@ class Executor:
             "success": result.success,
             "output": clip_result(result.output or result.error),
             "truncated": result.truncated,
+            # 已实时显示过就别再整段重复打印（终端渲染据此只打一行摘要）
+            "streamed": bool((getattr(result, "metadata", None) or {}).get("streamed")),
         })
 
         # 3.2 工具执行后钩子（fail-open：任何异常只警告，绝不阻断主流程）

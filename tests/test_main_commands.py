@@ -167,3 +167,32 @@ class TestAutoModeRouting:
         assert args.desktop is True
         args2 = parser.parse_args(["--dashboard"])
         assert args2.desktop is False and args2.dashboard is True
+
+    def test_upgrade_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["--upgrade"])
+        assert args.upgrade is True and args.upgrade_check is False
+        args2 = parser.parse_args(["--upgrade-check"])
+        assert args2.upgrade_check is True and args2.upgrade is False
+        args3 = parser.parse_args(["--upgrade", "--upgrade-stash"])
+        assert args3.upgrade_stash is True
+
+    def test_upgrade_slash_command(self):
+        assert _parse_command("/upgrade") == ("upgrade", "")
+        assert _parse_command("/upgrade check") == ("upgrade", "check")
+
+    def test_permission_slash_command(self):
+        assert _parse_command("/permission") == ("permission", "")
+        assert _parse_command("/permission auto") == ("permission", "auto")
+
+    def test_every_handled_command_is_parseable(self):
+        """有处理分支的命令必须在解析白名单里，否则它会变成一条普通消息发给模型。"""
+        import re
+        src = open("main.py", encoding="utf-8").read()
+        registered = set(re.findall(r'"([a-z_]+)"', re.search(r"for cmd in \((.*?)\):", src, re.S).group(1)))
+        handled = set(re.findall(r'if cmd == "([a-z_]+)"', src))
+        assert handled, "没解析到任何命令分支，测试本身失效了"
+        missing = sorted(handled - registered)
+        assert not missing, f"这些命令有分支但解析不到: {missing}"
+        for cmd in sorted(handled):
+            assert _parse_command(f"/{cmd}") == (cmd, ""), f"/{cmd} 解析失败"

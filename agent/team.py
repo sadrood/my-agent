@@ -112,6 +112,7 @@ class WorkerAgent:
 
                 if emit:
                     emit("tool_call", {
+                        "tool": tool_name,
                         "name": tool_name,
                         "input": str(tool_input)[:200] if not isinstance(tool_input, str) else tool_input[:200],
                         "worker": self.name,
@@ -135,6 +136,7 @@ class WorkerAgent:
                     tool_success = tool_result.success
                 if emit:
                     emit("tool_result", {
+                        "tool": tool_name,
                         "name": tool_name,
                         "output": output[:300],
                         "success": tool_success,
@@ -210,12 +212,29 @@ class Team:
             pass
 
     def _emit(self, event_type: str, data: dict):
-        """向 Dashboard Hub 发送事件（静默失败）。"""
+        """向 Dashboard Hub 发送事件（静默失败），并同步给终端一行成员进度。"""
         if self._hub is not None:
             try:
                 self._hub.emit(event_type, data)
             except Exception:
                 pass
+        self._emit_cli(event_type, data)
+
+    def _emit_cli(self, event_type: str, data: dict):
+        """终端也要看得出是哪个成员在做——面板靠 worker 字段，命令行靠这行。"""
+        worker = str((data or {}).get("worker") or "").strip()
+        if not worker or event_type not in ("step_start", "step_end"):
+            return
+        try:
+            from agent.ui_theme import print_info
+            desc = str(data.get("description") or data.get("summary") or "").strip()[:70]
+            if event_type == "step_start":
+                print_info(f"  ▸ [团队·{worker}] {desc}", style="info")
+            else:
+                mark = "✓" if data.get("success", True) else "✗"
+                print_info(f"  {mark} [团队·{worker}] 完成", style="info")
+        except Exception:
+            pass
 
     def _register_default_workers(self):
         """注册默认 Worker。"""

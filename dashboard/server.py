@@ -4,15 +4,18 @@ import sys
 import json
 import uuid
 import time
+import base64
 import asyncio
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request, Header
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+    from fastapi.responses import (HTMLResponse, FileResponse, StreamingResponse,
+                                   JSONResponse, Response)
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
     HAS_FASTAPI = True
@@ -448,6 +451,48 @@ if HAS_FASTAPI:
         return StreamingResponse(
             _events(), media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---- 外部进程推帧 / 取图（QQ 桥在另一个进程里跑浏览器时用）----
+    # 浏览器画面默认只有"跑浏览器那个进程"能看到；QQ 桥把帧推过来，面板的实时画面
+    # 与取图端点才看得到。token 由 DASHBOARD_FRAME_TOKEN 指定（面板与桥共用同一个值）。
+    _FRAME_TOKEN = os.getenv("DASHBOARD_FRAME_TOKEN", "").strip()
+
+    def _frame_token_ok(given: str) -> bool:
+        return bool(_FRAME_TOKEN) and secrets.compare_digest(str(given or ""), _FRAME_TOKEN)
+
+    @app.post("/api/frame")
+    async def push_frame(payload: dict = Body(None), x_frame_token: str = Header("")):
+        """外部进程（如 QQ 桥）推最新帧：面板因此能看到非本进程的浏览器画面。"""
+        from tools import screencast
+        if not _frame_token_ok(x_frame_token):
+            return JSONResponse(
+                {"ok": False, "error": "需要 DASHBOARD_FRAME_TOKEN（请求头 X-Frame-Token）"},
+                status_code=403)
+        body = payload or {}
+        data = str(body.get("data") or "").strip()
+        if not data:
+            return JSONResponse({"ok": False, "error": "缺少 data（base64 图像）"},
+                                status_code=400)
+        fmt = "png" if str(body.get("format") or "jpeg").lower() == "png" else "jpeg"
+        seq = screencast.ACTIVE.store.put(data, fmt)
+        return {"ok": True, "seq": seq}
+
+    @app.get("/api/frame.png")
+    async def frame_png(token: str = ""):
+        """最新一帧（token 保护）：给 QQ 服务器抓图用，等价于"把截图发到聊天里"。"""
+        from tools import screencast
+        if not _frame_token_ok(token):
+            return JSONResponse({"ok": False, "error": "token 不匹配"}, status_code=403)
+        frame = screencast.ACTIVE.store.latest()
+        if not frame:
+            return JSONResponse({"ok": False, "error": "暂无画面（还没有帧）"}, status_code=404)
+        try:
+            raw = base64.b64decode(frame["data"])
+        except Exception:                            # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "帧数据损坏"}, status_code=500)
+        media = "image/png" if frame.get("format") == "png" else "image/jpeg"
+        return Response(content=raw, media_type=media,
+                        headers={"Cache-Control": "no-store"})
 
     # ---- 文件树（只读，绑定工作目录，不暴露系统盘）----安全约束：所有路径必须解析到 WORKSPACE_ROOT 之内（realpath 防符号链接逃逸）。
     WORKSPACE_ROOT = os.path.realpath(os.getcwd())

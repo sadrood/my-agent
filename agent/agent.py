@@ -1,6 +1,7 @@
 """Agent 核心模块（Computer Use + MCP 增强版）。"""
 import sys
 import os
+import threading
 import time as _time
 
 from agent.state import AgentState
@@ -31,6 +32,9 @@ INCOMPLETE_MARKERS = ("未完成", "已达到任务最大操作轮数", "任务�
                       "连续失败", "重试耗尽", "max_ops",
                       # 动态轮数预算：连续无进展被判定空转而提前停，同样是"没做完"
                       "没有进展")
+
+#: "思考中"转圈的秒表刷新间隔（秒）
+SPINNER_TICK_SECONDS = 0.1
 
 def compose_handoff(goal: str, reason: str, final: str, done_hint: str = "") -> str:
     """无 LLM 可用的兜底交接文本（也用作 LLM 生成的统一外壳）。"""
@@ -301,6 +305,7 @@ class Agent:
         self._tools_used_this_run = set()   # 本轮用到的工具集合
         self.last_execution_summary = ""    # 上轮执行摘要（注入到下一轮上下文）
         self._turn_spinner = None           # 思考中转圈状态（流式模式）
+        self._turn_spinner_timer = None      # 转圈秒表线程（stop_event, thread）
         self._session_loaded = False        # 会话只加载一次（防指数膨胀）
 
         # Dashboard 集成
@@ -1660,7 +1665,7 @@ class Agent:
             system_prompt += "\n\n" + skills_prompt
 
         # 5. 单循环执行（流式渲染：思考转圈 → 逐字输出答案，加粗实时生效）
-        self._turn_spinner = None
+        self._stop_turn_spinner()            # 连带收掉上一轮可能残留的秒表线程
         self._stream_reasoning_started = False
         self._stream_answer_started = False
         from agent.ui_theme import StreamingMarkdown
@@ -1803,11 +1808,33 @@ class Agent:
                 console = get_console(True)
                 self._turn_spinner = console.status("✻ 思考中…", spinner="dots")
                 self._turn_spinner.start()
+                self._start_spinner_timer(self._turn_spinner)
         except Exception:
             self._turn_spinner = None
 
+    def _start_spinner_timer(self, spinner):
+        """给转圈挂秒表：上游慢的时候能看出是"还在等"还是"卡住了"。"""
+        stop = threading.Event()
+        started = _time.monotonic()
+
+        def _tick():
+            while not stop.wait(SPINNER_TICK_SECONDS):
+                try:
+                    spinner.update(f"✻ 思考中… {_time.monotonic() - started:.1f}s")
+                except Exception:
+                    return                      # 转圈已被外部停掉，秒表自行退出
+
+        thread = threading.Thread(target=_tick, name="turn-spinner-timer", daemon=True)
+        thread.start()
+        self._turn_spinner_timer = (stop, thread)
+
     def _stop_turn_spinner(self):
-        """停止思考中转圈。"""
+        """停止思考中转圈（先收秒表线程，再停 Status，避免它继续重画同一行）。"""
+        timer, self._turn_spinner_timer = getattr(self, "_turn_spinner_timer", None), None
+        if timer is not None:
+            stop, thread = timer
+            stop.set()
+            thread.join(timeout=0.5)
         if self._turn_spinner is not None:
             try:
                 self._turn_spinner.stop()
@@ -1922,26 +1949,46 @@ class Agent:
             print_edit_diff, print_unified_diff, print_file_write_call,
         )
 
+        # 团队成员/子 agent 的归属：面板靠 worker 字段，命令行靠这行前缀
+        worker = str(data.get("worker") or "").strip()
+        tag = f"团队·{worker} ▸ " if worker else ""
+
         if event_type == "tool_call":
-            tool = data.get("tool", "")
+            tool = str(data.get("tool") or data.get("name") or "")
             if tool == "think":
                 return
             # 推理块刚流式结束 → 换行后再打印工具调用行
-            if self._stream_reasoning_started:
+            if getattr(self, "_stream_reasoning_started", False):
                 self._stream_reasoning_started = False
                 get_console(True).print()
-            args = data.get("arguments") or {}
+            args = data.get("arguments") or data.get("args") or {}
+            if not isinstance(args, dict):
+                args = {"input": args}
             if tool == "edit":
                 print_edit_call(args.get("file_path", ""))
             elif tool == "file" and str(args.get("operation", "") or "").lower() == "write":
                 print_file_write_call(args.get("path", ""))
             else:
-                print_tool_call(tool, args)
+                print_tool_call(f"{tag}{tool}", args)
+        elif event_type == "tool_output":
+            # 实时输出（terminal 逐行 / delegate 子 agent 流式片段）：带来源标签逐段打印
+            text = str(data.get("text") or "")
+            if not text:
+                return
+            from rich.markup import escape as _esc_markup
+            label = str(data.get("label") or data.get("tool") or "").strip()
+            head = f"[{tag}{label}] " if (tag or label) else ""
+            console = get_console(True)
+            body = text if text.endswith("\n") else text + "\n"
+            for line in body.splitlines(keepends=True):
+                console.print(f"[dim]{_esc_markup(head)}[/dim]{_esc_markup(line)}", end="")
         elif event_type == "tool_result":
-            tool = data.get("tool", "")
+            tool = str(data.get("tool") or data.get("name") or "")
             if tool == "think":
                 return
-            args = data.get("arguments") or {}
+            args = data.get("arguments") or data.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
             if tool == "edit" and data.get("success"):
                 # unified diff（红-绿+上下文灰+@@ 行号）：优先读 .bak 备份；成功路径 .bak 已即时清理，退回 metadata.old_text；都没有时回退参数内 old/new 简式
                 meta = data.get("metadata") or {}
@@ -1966,7 +2013,11 @@ class Agent:
                     print_unified_diff(old_text, new_text)
                 else:
                     print_edit_diff(args.get("old_string", ""), args.get("new_string", ""))
-            print_tool_result(data.get("success", False), data.get("output", ""))
+            if data.get("streamed"):
+                # 输出已经实时逐段打过了，这里只留一行收尾（否则同一段内容会被打印两次）
+                print_tool_result(data.get("success", False), "（输出已实时显示）")
+            else:
+                print_tool_result(data.get("success", False), data.get("output", ""))
 
     # ================================================================
     # 向后兼容

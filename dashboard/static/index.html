@@ -127,6 +127,12 @@ button { font-family: inherit; cursor: pointer; border: 0; }
 .flow-item .f-res.err { color: var(--red); }
 .flow-item .f-step { color: var(--text); font-weight: 600; font-size: 13px; }
 .flow-item .f-think { color: var(--yellow); }
+/* 团队成员/子 agent 归属徽标 + 实时输出 */
+.flow-item .f-worker {
+  display: inline-block; padding: 0 6px; margin-right: 2px; border-radius: 8px;
+  background: var(--accent-s); color: var(--accent2); font-size: 11px; font-weight: 600;
+}
+.flow-item .f-live { color: var(--text3); font-style: italic; }
 .flow-item .f-warn { color: var(--yellow); }
 
 /* 思考中指示 */
@@ -356,6 +362,7 @@ button { font-family: inherit; cursor: pointer; border: 0; }
 const state = {
   goal: '', status: 'idle', plan: [], currentStep: -1,
   tools: [], toolsMap: {}, startTime: null, answerShown: false,
+  live: {}, liveStarted: {},
 };
 let ws = null, connected = false;
 const $ = id => document.getElementById(id);
@@ -522,9 +529,12 @@ function updateCounts() {
 /* ================= 事件处理 ================= */
 function handleEvent(evt) {
   const type = evt.type, data = evt.data || {};
+  // 团队成员/子 agent 归属徽标（team 的 step/tool 事件都会带 worker）
+  const wtag = data.worker ? '<span class="f-worker">[' + esc(String(data.worker)) + ']</span> ' : '';
   if (type === 'run_start') {
     state.goal = data.goal || state.goal;
     state.plan = []; state.currentStep = -1; state.tools = []; state.toolsMap = {};
+    state.live = {}; state.liveStarted = {};
     state.startTime = nowTs(); state.answerShown = false;
     hideThinking();
     addMsg('user', state.goal);
@@ -541,29 +551,42 @@ function handleEvent(evt) {
   } else if (type === 'step_start') {
     state.currentStep = (data.step || 1) - 1;
     hideThinking();
-    addFlow('think', '▸', '<span class="f-step">步骤 ' + (data.step || '') + '/' + (data.total || state.plan.length) + ' · ' + esc(data.description || '') + '</span>');
+    addFlow('think', '▸', wtag + '<span class="f-step">步骤 ' + (data.step || '') + '/' + (data.total || state.plan.length) + ' · ' + esc(data.description || '') + '</span>');
     setStatus('running', '执行中');
     renderWorkbench();
   } else if (type === 'tool_call') {
     hideThinking();
-    addFlow('tool', '⏺', '<span class="f-tool">' + esc(data.tool || '') + '</span>(<span class="f-args">' + esc(shortArgs(data.input || data.arguments || data.args || '')) + '</span>)');
-    if (state.toolsMap[data.tool]) {
-      // 同一工具再次调用：标记上一条未配对的
-    }
-    const rec = { tool: data.tool || '', input: data.input || data.arguments || data.args || '',
+    const tname = data.tool || data.name || '';
+    addFlow('tool', '⏺', wtag + '<span class="f-tool">' + esc(tname) + '</span>(<span class="f-args">' + esc(shortArgs(data.input || data.arguments || data.args || '')) + '</span>)');
+    const rec = { tool: tname, worker: data.worker || '',
+                  input: data.input || data.arguments || data.args || '',
                   fullInput: data.input || data.arguments || data.args || '',
                   success: null, resultText: '', errorText: '', ts: evt.timestamp || nowTs() };
-    state.toolsMap[data.tool] = rec;
+    state.toolsMap[tname] = rec;
     state.tools.push(rec);
     updateCounts();
-  } else if (type === 'tool_result') {
+  } else if (type === 'tool_output') {
+    // 实时输出：terminal 逐行、delegate 是子 agent 的流式片段（带来源标签）
+    const text = String(data.text || '');
+    if (!text) return;
+    const label = data.label || data.tool || '';
+    state.live = state.live || {}; state.liveStarted = state.liveStarted || {};
+    state.live[label] = (state.live[label] || '') + text;
     const rec = state.toolsMap[data.tool] || state.tools[state.tools.length - 1];
+    if (rec) { rec.resultText = state.live[label].slice(-220); rec.live = true; }
+    if (!state.liveStarted[label]) {          // 只在开头提示一次，避免刷屏
+      state.liveStarted[label] = true;
+      addFlow('tool', '⋯', wtag + '<span class="f-live">' + esc(label ? label + ' 开始输出…' : '开始输出…') + '</span>');
+    }
+    renderWorkbench();
+  } else if (type === 'tool_result') {
+    const rec = state.toolsMap[data.tool || data.name] || state.tools[state.tools.length - 1];
     if (rec) {
       rec.success = !!data.success;
       rec.resultText = (data.output || '').slice(0, 220);
       rec.errorText = (data.error || '').slice(0, 220);
       const ok = !!data.success;
-      addFlow(ok ? 'ok' : 'fail', ok ? '⎿' : '⎿✗',
+      addFlow(ok ? 'ok' : 'fail', ok ? '⎿' : '⎿✗', wtag +
         '<span class="f-res' + (ok ? '' : ' err') + '">' + esc(ok ? shortArgs(data.output) : (data.error || '失败')) + '</span>');
     }
     renderWorkbench();

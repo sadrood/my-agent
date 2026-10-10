@@ -1,11 +1,14 @@
 """QQ 机器人桥：白名单、限流、独立会话、审批回 y/a/n、权限档不可提权、密钥不落日志。"""
+import asyncio
 import threading
 import time
 
 import pytest
 
-from agent.qqbot import (ALLOWED_PRESETS, APPROVE_TIMEOUT, CHUNK_CHARS, QQBotBridge,
-                         QQBotConfig, UserSession, _chunk)
+from agent.qqbot import (ALLOWED_PRESETS, APPROVE_TIMEOUT, CHUNK_CHARS,
+                         MAX_REPLIES_PER_MESSAGE, PASSIVE_REPLY_WINDOW_C2C,
+                         PASSIVE_REPLY_WINDOW_GROUP, QQBotBridge, QQBotConfig,
+                         TASK_TIMEOUT, UserSession, _chunk, _chunks_capped)
 
 
 def _cfg(**kw):
@@ -41,6 +44,25 @@ class TestSecretsAndConfig:
     def test_allow_from_accepts_list_or_csv(self):
         assert QQBotConfig({"allow_from": "a, b ,c"}).allow_from == ["a", "b", "c"]
         assert QQBotConfig({"allow_from": ["x", " y "]}).allow_from == ["x", "y"]
+
+    def test_sandbox_defaults_on(self):
+        """新机器人默认只存在于沙箱；连正式环境会"连上了却收不到任何消息"。"""
+        assert _cfg().sandbox is True
+        assert QQBotConfig({"sandbox": "false"}).sandbox is False
+        assert QQBotConfig({"sandbox": "0"}).sandbox is False
+        assert QQBotConfig({"sandbox": "true"}).sandbox is True
+        assert QQBotConfig({"sandbox": ""}).sandbox is True, "空值按安全默认（沙箱）"
+
+    def test_repr_shows_which_environment(self):
+        assert "沙箱" in repr(_cfg())
+        assert "正式" in repr(_cfg(sandbox="false"))
+
+    def test_client_follows_the_sandbox_flag(self):
+        """沙箱标志必须真的传进 botpy，否则连错环境一条消息都收不到。"""
+        pytest.importorskip("botpy")
+        from agent.qqbot import _build_client
+        assert _build_client(QQBotBridge(_cfg())).http.is_sandbox is True
+        assert _build_client(QQBotBridge(_cfg(sandbox="false"))).http.is_sandbox is False
 
 
 class TestGating:
@@ -268,3 +290,171 @@ class TestEntryPoint:
         assert importlib.util.find_spec("agent.qqbot") is not None
         src = open("agent/qqbot.py", encoding="utf-8").read()
         assert "\nimport botpy" not in src, "botpy 必须在函数内惰性导入"
+
+
+class _FakeApi:
+    """假发送端：记录每次调用，可配置成必失败。"""
+
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    async def post_c2c_message(self, **kw):
+        self.calls.append(("c2c", kw))
+        if self.fail:
+            raise RuntimeError("boom")
+
+    async def post_group_message(self, **kw):
+        self.calls.append(("group", kw))
+        if self.fail:
+            raise RuntimeError("boom")
+
+
+class TestDelivery:
+    """发送层：msg_seq 递增、被动窗口降级、失败不炸、上下文按会话隔离。"""
+
+    def _bridge_with_api(self, api, key="c:me", msg_id="m1", age=0.0):
+        b = QQBotBridge(_cfg(), runner=lambda goal: "ok")
+        b._ctx[QQBotBridge.norm_key(key)] = {
+            "api": api, "msg_id": msg_id, "loop": None, "recv_at": time.time() - age}
+        return b
+
+    def test_chunks_increment_msg_seq(self):
+        """官方：相同 msg_id + msg_seq 重复发送会失败 —— 分块必须递增序号。"""
+        api = _FakeApi()
+        b = self._bridge_with_api(api)
+        asyncio.run(b._send("c:me", "a" * (CHUNK_CHARS * 2 + 5)))
+        assert [c[1]["msg_seq"] for c in api.calls] == [1, 2, 3]
+        assert all(c[1]["msg_id"] == "m1" for c in api.calls)
+
+    def test_group_chunks_increment_msg_seq(self):
+        api = _FakeApi()
+        b = self._bridge_with_api(api, key="g:G1:me")
+        asyncio.run(b._send("g:G1:me", "b" * (CHUNK_CHARS + 10)))
+        assert api.calls[0][0] == "group"
+        assert [c[1]["msg_seq"] for c in api.calls] == [1, 2]
+
+    def test_reply_within_window_stays_passive(self):
+        api = _FakeApi()
+        b = self._bridge_with_api(api, age=10)
+        asyncio.run(b._send("c:me", "hi"))
+        assert api.calls[0][1]["msg_id"] == "m1", "窗口内应带 msg_id 被动回复"
+
+    def test_reply_after_window_becomes_active(self):
+        """超窗口还带原 msg_id 必被平台拒；此时只能改主动消息。"""
+        api = _FakeApi()
+        b = self._bridge_with_api(api, age=PASSIVE_REPLY_WINDOW_C2C + 60)
+        asyncio.run(b._send("c:me", "hi"))
+        assert api.calls[0][1]["msg_id"] is None, "超窗口要改主动消息"
+
+    def test_window_differs_by_scene(self):
+        """官方：私聊 60 分钟、群聊 5 分钟 —— 同样 10 分钟前，判断应当不同。"""
+        api_g = _FakeApi()
+        asyncio.run(self._bridge_with_api(api_g, key="g:G1:me", age=600)
+                    ._send("g:G1:me", "hi"))
+        assert api_g.calls[0][1]["msg_id"] is None, "群聊超 5 分钟要改主动消息"
+
+        api_c = _FakeApi()
+        asyncio.run(self._bridge_with_api(api_c, key="c:me", age=600)
+                    ._send("c:me", "hi"))
+        assert api_c.calls[0][1]["msg_id"] == "m1", "私聊 60 分钟内仍能被动回复"
+
+    def test_c2c_stays_passive_well_past_the_group_window(self):
+        api = _FakeApi()
+        b = self._bridge_with_api(api, key="c:me", age=PASSIVE_REPLY_WINDOW_C2C - 60)
+        asyncio.run(b._send("c:me", "hi"))
+        assert api.calls[0][1]["msg_id"] == "m1"
+
+    def test_replies_per_message_are_capped(self):
+        """平台限制同一条消息最多回复 4~5 次，超了整条失败 —— 要截断而不是硬发。"""
+        api = _FakeApi()
+        b = self._bridge_with_api(api)
+        asyncio.run(b._send("c:me", "a" * (CHUNK_CHARS * 10)))
+        assert len(api.calls) == MAX_REPLIES_PER_MESSAGE
+        assert [c[1]["msg_seq"] for c in api.calls] == list(
+            range(1, MAX_REPLIES_PER_MESSAGE + 1))
+        assert "已省略" in api.calls[-1][1]["content"], "截断要说清，别让用户以为内容就这么多"
+
+    def test_capped_chunks_leave_short_replies_alone(self):
+        assert _chunks_capped("短回复") == ["短回复"]
+        assert len(_chunks_capped("a" * (CHUNK_CHARS * 10))) == MAX_REPLIES_PER_MESSAGE
+
+    def test_send_failure_is_logged_not_raised(self):
+        api = _FakeApi(fail=True)
+        b = self._bridge_with_api(api)
+        asyncio.run(b._send("c:me", "hi"))           # 不该抛出去
+        assert len(api.calls) == 1
+
+    def test_send_sync_without_loop_is_safe(self):
+        api = _FakeApi()
+        b = self._bridge_with_api(api)
+        b._send_sync("c:me", "hi")                   # 无事件循环：记日志丢弃，不炸
+        assert api.calls == []
+
+    def test_context_is_isolated_per_scope(self):
+        """群聊与私聊并发时 api/msg_id 不能互相覆盖，否则审批会发错窗口。"""
+        api_a, api_b = _FakeApi(), _FakeApi()
+        b = QQBotBridge(_cfg(), runner=lambda goal: "ok")
+        ma = type("M", (), {"_api": api_a, "id": "m-private"})()
+        mb = type("M", (), {"_api": api_b, "id": "m-group"})()
+        b.remember_context("c:me", ma, None)
+        b.remember_context("g:G1:me", mb, None)
+        assert b._ctx_for("c:me")["msg_id"] == "m-private"
+        assert b._ctx_for("g:G1:me")["msg_id"] == "m-group"
+        assert b._ctx_for("c:me")["api"] is api_a
+
+    def test_approval_goes_back_to_its_own_session(self):
+        sent = []
+        b = QQBotBridge(_cfg(), runner=lambda goal: "ok")
+        b.approve_timeout = 0.05
+        b._ctx["c:me"] = {"api": _FakeApi(), "msg_id": "m1",
+                          "loop": None, "recv_at": time.time()}
+        b._ctx["c:friend"] = {"api": _FakeApi(), "msg_id": "m2",
+                              "loop": None, "recv_at": time.time()}
+        b._send_sync = lambda key, text: sent.append(key)
+        req = type("R", (), {"tool_name": "terminal", "command": "ls", "reason": "测试"})()
+        b.begin_approval("me", req)
+        assert sent == ["c:me"], "审批要发回提问的那个会话"
+
+
+class TestTaskTimeout:
+    """超时不硬杀线程：给 agent 置停止信号，让它优雅收尾并保留成果。"""
+
+    def test_timeout_stops_agent_and_keeps_partial_result(self):
+        class _SlowAgent:
+            def run(self, goal, keep_session=False, stop_event=None):
+                assert stop_event is not None, "必须把停止信号交给 agent"
+                stop_event.wait(5)                   # 等超时置位
+                return "部分成果"
+
+        s = UserSession("u")
+        s.agent = _SlowAgent()
+        s.task_timeout = 0.1
+        out = s.run("干活")
+        assert "已中断" in out and "部分成果" in out
+        assert s.timed_out is True
+
+    def test_normal_run_is_untouched(self):
+        class _FastAgent:
+            def run(self, goal, keep_session=False, stop_event=None):
+                return "正常完成"
+
+        s = UserSession("u")
+        s.agent = _FastAgent()
+        s.task_timeout = 30
+        assert s.run("干活") == "正常完成"
+        assert s.timed_out is False
+
+    def test_timeout_can_be_disabled(self):
+        class _FastAgent:
+            def run(self, goal, keep_session=False, stop_event=None):
+                assert stop_event is not None
+                return "正常完成"
+
+        s = UserSession("u")
+        s.agent = _FastAgent()
+        s.task_timeout = 0                            # <=0 不限时
+        assert s.run("干活") == "正常完成"
+
+    def test_session_defaults_to_module_timeout(self):
+        assert UserSession("u").task_timeout == TASK_TIMEOUT

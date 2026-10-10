@@ -165,7 +165,9 @@ def start_desktop_app():
 
 def _parse_command(goal: str):
     """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
-    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model", "config", "image", "memory", "compact", "goal", "consent", "history", "help"):
+    for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model",
+                "config", "image", "memory", "compact", "goal", "consent", "permission",
+                "upgrade", "history", "help"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -515,6 +517,24 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print("[dim]  要对某次拦截放行：直接说「<那件事> 我允许」/「放行」/「可以执行」，"
                     "或拦截当场答 y / always[/dim]")
             continue
+        if cmd == "upgrade":
+            # 自我升级：只有人在提示符里能触发（模型没有提权/改动代码的工具）
+            from agent.upgrade import UpgradeError
+            from agent.upgrade import main as upgrade_main
+            c.print()
+            if cmd_args.strip() in ("check", "--check"):
+                print_info("检查新版本（不改动任何东西）…", style="primary")
+                code = upgrade_main(["--check"])
+            else:
+                print_warning("即将升级：只做 git pull --ff-only，不做破坏性动作", use_rich=True)
+                code = upgrade_main([])
+            if code == 0:
+                print_info("升级流程结束。若本次真的更新了代码，请重启进程让新版本生效。",
+                           style="success")
+            elif code == 2:
+                print_warning("代码已更新，但依赖安装失败：请手动跑 "
+                              "pip install -r requirements.txt", use_rich=True)
+            continue
         if cmd == "permission":
             # 会话内实时切权限档（只有提示符里能切；模型没有提权工具）
             from agent.approval import PERMISSION_HELP
@@ -639,6 +659,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/article <主题>      文章工坊（多模型互审写作，可用 | 附要求）",
                 "/consent             Guardian 放行台账（被拦待放行 / 已授权）",
                 "/permission [档]     权限档：ask（每次确认）/ auto（自动执行）/ full（完全权限）/ block（全禁）",
+                "/upgrade [check]     升级到远端最新版本（只快进；check = 只看不升）",
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
@@ -660,7 +681,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/image", "/memory", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/help"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
                 f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"
@@ -753,6 +774,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="查看 LLM 限流/延迟累计数据（memory/llm_health.json）")
     parser.add_argument("--doctor", action="store_true",
                         help="依赖/浏览器/git/.env/模型连通等环境自检")
+    parser.add_argument("--upgrade", action="store_true",
+                        help="升级到远端最新版本（只快进；--upgrade-check 只检查不升级）")
+    parser.add_argument("--upgrade-check", action="store_true", dest="upgrade_check",
+                        help="只看有没有新版本，不改动任何东西")
+    parser.add_argument("--upgrade-stash", action="store_true", dest="upgrade_stash",
+                        help="升级前自动 stash 未提交改动，升级后恢复")
     parser.add_argument("--no-vision", action="store_true", help="关闭视觉感知")
 
     # 安全 / 追踪 / 会话 ----
@@ -931,6 +958,16 @@ def main():
         from agent.doctor import run_doctor, render_report
         print(render_report(run_doctor(include_llm=True)))
         return
+
+    # 自我升级（my-agent --upgrade / --upgrade-check）
+    if getattr(args, "upgrade", False) or getattr(args, "upgrade_check", False):
+        from agent.upgrade import main as upgrade_main
+        argv = []
+        if getattr(args, "upgrade_check", False):
+            argv.append("--check")
+        if getattr(args, "upgrade_stash", False):
+            argv.append("--stash")
+        sys.exit(upgrade_main(argv))
 
     # MCP server 模式（优先级最高）
     if args.mcp_server:

@@ -1,0 +1,38 @@
+#!/bin/sh
+# pre-push 钩子：同一天已经推送过提交时，默认拦下再次推送。
+#
+# 仓库规则（AGENTS.md 提交纪律）：当天改动汇总成一笔提交、一天一条。
+# 人最容易犯的就是"干完一小块就 commit + push"——这个钩子把那条规则变成命令级约束。
+#
+# 允许例外：
+#   ALLOW_MULTI_PUSH_TODAY=1 git push ...      # 明确知道自己在破坏规则（比如紧急修复）
+# 卸载：git config --unset core.hooksPath
+
+remote="$1"
+url="$2"
+
+if [ "${ALLOW_MULTI_PUSH_TODAY:-0}" = "1" ]; then
+  echo "[push-hygiene] 已设置 ALLOW_MULTI_PUSH_TODAY=1，跳过当天重复推送检查"
+  exit 0
+fi
+
+# 今天 00:00（本地时区）以来，远端分支上已经存在的提交 —— 有就说明今天推过了
+since="$(date +%Y-%m-%d) 00:00:00"
+pushed_today="$(git log --oneline --since="$since" "$remote" 2>/dev/null || true)"
+
+if [ -z "$pushed_today" ]; then
+  exit 0
+fi
+
+cat <<EOF
+[push-hygiene] ✗ 今天（$since 起）$remote 上已经有提交推送过了：
+
+$(echo "$pushed_today" | sed 's/^/    /')
+
+仓库规则是「当天改动汇总成一笔提交（一天一条）」，别一步一推。选择：
+  1) 先别推：把这次改动并进今天的提交（还没推的那笔可以 git commit --amend）
+     或攒到收尾统一推；
+  2) 确实要再推一笔（紧急修复等）：ALLOW_MULTI_PUSH_TODAY=1 git push ...
+  3) 关掉这个钩子：git config --unset core.hooksPath
+EOF
+exit 1
