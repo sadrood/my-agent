@@ -203,6 +203,10 @@ QQBOT_CONFIG = {
     "allow_group": os.getenv("QQBOT_ALLOW_GROUP", "false").lower() == "true",
     # 群白名单（group_openid，逗号分隔）：allow_group 打开后也只有这些群会被响应
     "allow_groups": os.getenv("QQBOT_ALLOW_GROUPS", ""),
+    # 任务回执开关：false 时不发「已收到，开始执行」
+    "ack": os.getenv("QQBOT_ACK", "true"),
+    # 语音回复开关：true 时回复后同时发一条语音（TTS）
+    "voice_reply": os.getenv("QQBOT_VOICE_REPLY", "false"),
     # ---- 实时画面 / 截图（A+B）----
     # 面板地址：桥把画面推给它（面板的「实时画面」与取图端点才看得到非本进程的浏览器）
     "dashboard_url": os.getenv("QQBOT_DASHBOARD_URL", ""),

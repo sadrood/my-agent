@@ -131,6 +131,12 @@ class QQBotConfig:
         allow_group = env.get("QQBOT_ALLOW_GROUP", env.get("allow_group", False))
         self.allow_group = (allow_group is True
                             or str(allow_group).strip().lower() == "true")
+        # 任务回执开关：QQBOT_ACK=false 时不发「已收到，开始执行」
+        ack = env.get("QQBOT_ACK") or env.get("ack") or ""
+        self.ack_enabled = str(ack).strip().lower() not in ("false", "0", "no", "off")
+        # 语音回复开关：QQBOT_VOICE_REPLY=true 时回复后同时发一条语音（TTS）
+        voice = env.get("QQBOT_VOICE_REPLY") or env.get("voice_reply") or ""
+        self.voice_reply = str(voice).strip().lower() in ("1", "true", "yes", "on")
         self.workspace = str(env.get("QQBOT_WORKSPACE") or env.get("workspace") or "").strip()
         # ---- 实时画面 / 截图（A+B）----
         # 面板地址：桥把画面推给它，面板的「实时画面」与取图端点才看得到非本进程的浏览器
@@ -316,8 +322,10 @@ class QQBotBridge:
 
     @staticmethod
     def scope_key(user_openid: str, group_openid: str = "") -> str:
-        """会话/限流/审批都按这个键隔离：群里的每个人各自一份上下文。"""
-        return f"g:{group_openid}:{user_openid}" if group_openid else f"c:{user_openid}"
+        """会话/限流/审批都按这个键隔离。
+        群聊按群共享上下文：群里所有人共用一份对话，任务串行排队执行。
+        """
+        return f"g:{group_openid}" if group_openid else f"c:{user_openid}"
 
     @staticmethod
     def norm_key(key: str) -> str:
@@ -511,11 +519,15 @@ class QQBotBridge:
 
     @staticmethod
     def split_key(key: str) -> tuple:
-        """把 scope key 拆回 (group_openid, user_openid)。"""
-        parts = str(key or "").split(":", 2)
-        if len(parts) == 3 and parts[0] == "g":
-            return parts[1], parts[2]
-        return "", (parts[1] if len(parts) > 1 else str(key or ""))
+        """把 scope key 拆回 (group_openid, user_openid)。
+        群聊键 g:群openid（共享会话，无用户维度）。
+        """
+        s = str(key or "")
+        if s.startswith("g:"):
+            return s[2:], ""
+        if s.startswith("c:"):
+            return "", s[2:]
+        return "", s
 
     # ---------------- 实时画面 / 截图（A+B） ----------------
 
@@ -538,10 +550,15 @@ class QQBotBridge:
         import httpx
         url = self.config.dashboard_url.rstrip("/") + "/api/frame"
         headers = {"X-Frame-Token": self.config.frame_token}
+        link_sent = False
         while not stop.is_set():
             session = self.sessions.get(key)
             data, fmt = session.screenshot() if session else ("", "png")
             if data:
+                if not link_sent:
+                    link_sent = True
+                    novnc_url = (self.config.live_link() or self.config.dashboard_url or "").rstrip("/") + "/vnc.html"
+                    self._send_sync(key, "🌐 agent 正在操作浏览器，点这里实时查看画面：\n" + novnc_url)
                 try:
                     httpx.post(url, json={"data": data, "format": fmt},
                                headers=headers, timeout=5.0)
@@ -601,14 +618,106 @@ class QQBotBridge:
     async def _send_plain(self, key: str, text: str) -> None:
         await self._send(key, text)
 
-    async def _upload_base64(self, api, user_openid: str, group_openid: str, data: str):
-        """把 base64 截图直接传给平台（官方文档未明确此字段，故失败即降级）。"""
+    async def send_local_images(self, key: str, text: str) -> None:
+        """把回复文字里提到的本地图片文件直接发进 QQ（画图等工具的产物）。
+
+        agent 生成的图片默认只回一个服务器路径；这里扫描回复里的本地图片
+        路径，找到就把图片本体也发过去，用户不用登录服务器取图。
+        返回成功发出的路径列表：调用方据此把文字里的路径替换掉（发失败则保留兜底）。
+        """
+        import base64
+        import re
+        from agent import run_log
+        key = self.norm_key(key)
+        ctx = self._ctx_for(key)
+        api = ctx.get("api")
+        if api is None:
+            return []
+        paths: List[str] = []
+        for m in re.finditer(r"(?:/[A-Za-z0-9_.\-]+)+\.(?:png|jpe?g|gif|webp|bmp)",
+                             str(text or "")):
+            if m.group(0) not in paths:
+                paths.append(m.group(0))
+        if not paths:
+            return []
+        group_openid, user_openid = self.split_key(key)
+        sent: List[str] = []
+        for path in paths[:3]:                 # 最多补发 3 张，避免刷屏
+            try:
+                with open(path, "rb") as f:
+                    data = base64.b64encode(f.read()).decode("ascii")
+            except OSError as e:               # noqa: BLE001
+                run_log.log(f"QQ 补发图片跳过（读不到 {path}）：{type(e).__name__}", "warn")
+                continue
+            media = await self._upload_base64(api, user_openid, group_openid, data)
+            if media is None:
+                run_log.log(f"QQ 补发图片失败（{path}）：无可用上传通道", "warn")
+                continue
+            try:
+                if group_openid:
+                    await api.post_group_message(group_openid=group_openid, msg_type=7,
+                                                 media=media)
+                else:
+                    await api.post_c2c_message(openid=user_openid, msg_type=7, media=media)
+                sent.append(path)
+            except Exception as e:              # noqa: BLE001
+                run_log.log(f"QQ 补发图片失败（{path}）：{type(e).__name__}: {str(e)[:120]}",
+                            "warn")
+        return sent
+
+    async def send_voice(self, key: str, text: str) -> bool:
+        """把回复文字转成语音发进 QQ（TTS 合成 + 富媒体上传，file_type=3）。"""
+        import base64
+        from agent import run_log
+        key = self.norm_key(key)
+        ctx = self._ctx_for(key)
+        api = ctx.get("api")
+        if api is None or not str(text or "").strip():
+            return False
+
+        def _synth() -> str:
+            try:
+                from models.tts import TTSModel
+                r = TTSModel().synthesize(str(text)[:500])
+                return str((r or {}).get("path") or "")
+            except Exception as e:              # noqa: BLE001
+                run_log.log(f"QQ 语音合成失败：{type(e).__name__}: {str(e)[:120]}", "warn")
+                return ""
+
+        path = await asyncio.to_thread(_synth)
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode("ascii")
+        except OSError as e:                    # noqa: BLE001
+            run_log.log(f"QQ 语音读取失败：{type(e).__name__}", "warn")
+            return False
+        group_openid, user_openid = self.split_key(key)
+        media = await self._upload_base64(api, user_openid, group_openid, data, file_type=3)
+        if media is None:
+            run_log.log("QQ 语音上传失败：无可用上传通道", "warn")
+            return False
+        try:
+            if group_openid:
+                await api.post_group_message(group_openid=group_openid, msg_type=7,
+                                             media=media)
+            else:
+                await api.post_c2c_message(openid=user_openid, msg_type=7, media=media)
+            return True
+        except Exception as e:                  # noqa: BLE001
+            run_log.log(f"QQ 语音发送失败：{type(e).__name__}: {str(e)[:120]}", "warn")
+            return False
+
+    async def _upload_base64(self, api, user_openid: str, group_openid: str, data: str,
+                             file_type: int = 1):
+        """把 base64 媒体直接传给平台（1=图片 3=语音；官方文档未明确此字段，故失败即降级）。"""
         try:
             from botpy.http import Route
             route = (Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
                      if group_openid else
                      Route("POST", "/v2/users/{openid}/files", openid=user_openid))
-            resp = await api._http.request(route, json={"file_type": 1, "file_data": data,
+            resp = await api._http.request(route, json={"file_type": file_type, "file_data": data,
                                                         "srv_send_msg": False})
         except Exception:                            # noqa: BLE001
             return None
@@ -664,11 +773,16 @@ class QQBotBridge:
             from agent import run_log
             run_log.log(f"QQ 私聊被拒（不在白名单）: openid 尾号 {openid[-6:]}", "warn")
             return
-        if self.plan(key, text) == "task":
+        if self.config.ack_enabled and self.plan(key, text) == "task":
             await self._send(key, self.ack_text())
         reply = await asyncio.to_thread(self.handle_text, openid, text)
         if reply:
+            sent = await self.send_local_images(key, reply)
+            for p in sent:                      # 图片已发出的路径不再留在文字里
+                reply = reply.replace(p, "（图片已发上图）")
             await self._send(key, reply)
+            if self.config.voice_reply:
+                await self.send_voice(key, reply)
 
     async def handle_group_message(self, message) -> None:
         """QQ 群 @机器人：群白名单 + 发言人白名单都通过才执行（每个人独立上下文）。"""
@@ -683,11 +797,16 @@ class QQBotBridge:
             run_log.log(f"QQ 群消息被拒：群 {group_openid[-6:]} 成员 {member[-6:]}", "warn")
             await self._send(key, self.reject_hint(member, group_openid))
             return
-        if self.plan(key, text) == "task":
+        if self.config.ack_enabled and self.plan(key, text) == "task":
             await self._send(key, self.ack_text())
         reply = await asyncio.to_thread(self.handle_text, member, text, group_openid)
         if reply:
+            sent = await self.send_local_images(key, reply)
+            for p in sent:                      # 图片已发出的路径不再留在文字里
+                reply = reply.replace(p, "（图片已发上图）")
             await self._send(key, reply)
+            if self.config.voice_reply:
+                await self.send_voice(key, reply)
 
     async def _send(self, key: str, payload: str) -> None:
         """按 scope key 发消息（群/私聊自动分流）；单条失败只记日志，不炸掉事件处理。"""
@@ -794,17 +913,26 @@ class QQBotBridge:
                       kind: str = "task") -> str:
         """执行路径：走完整 agent 循环（含工具、审批、检查点）。
 
-        kind="chat" 时是闲聊：不推帧、不自动发截图（页面本来就没动）。
+        kind="chat" 时是闲聊：也推帧（agent 可能在聊天中开浏览器）。
         """
         from agent import run_log
         run_log.log(f"QQ {'任务' if kind == 'task' else '聊天'}：会话 {session.session_name()}，"
                     f"{len(goal)} 字，档位 {session.preset}")
         runner = self._run_task or session.run
-        pusher = self._start_frame_pusher(key) if kind == "task" else None
+        pusher = self._start_frame_pusher(key)
+        # 长任务提示：超过 20 秒还没出结果就先说一声，避免用户以为卡死
+        hint = threading.Timer(
+            20.0, lambda: self._send_sync(
+                key, "⏳ 还在处理中（遇到上游限流会自动重试），请稍候，不用重发。"))
+        hint.daemon = True
+        hint.start()
         try:
             output = runner(goal)
         finally:
+            hint.cancel()
             if pusher is not None:
+                # 保留 5 分钟让用户看完最后画面再停止推帧
+                pusher.wait(timeout=300.0)
                 pusher.set()
         if kind == "task" and self.config.send_frame and self._run_task is None:
             self.schedule_frame(key)                 # B：任务收尾把画面发到 QQ

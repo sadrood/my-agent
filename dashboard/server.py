@@ -323,6 +323,8 @@ if HAS_FASTAPI:
     @app.middleware("http")
     async def _block_dns_rebinding(request, call_next):
         """Host 头白名单：挡 DNS rebinding（把恶意域名解析到 127.0.0.1）。"""
+        if os.getenv("DASHBOARD_SKIP_HOST_CHECK", "").lower() in ("1", "true", "yes"):
+            return await call_next(request)
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
         allowed = {"127.0.0.1", "localhost", "::1", "[::1]", ""}
         allowed |= {h.strip().lower()

@@ -140,14 +140,15 @@ class TestAgentChatEngine:
         assert b.sessions["c:me"] is first, "闲聊与任务不能各起一个会话"
         assert len(goals) == 2, "两条都进了同一个 agent 循环"
 
-    def test_chat_does_not_push_frames_or_screenshot(self):
+    def test_chat_also_pushes_frames(self):
         b, _ = self._bridge()
         calls = {"pusher": 0, "frame": 0}
         b._start_frame_pusher = lambda key: calls.__setitem__("pusher", calls["pusher"] + 1)
         b.schedule_frame = lambda key: calls.__setitem__("frame", calls["frame"] + 1)
-        b.handle_text("me", "/chat")                  # 切到对话模式，避免被当成任务
+        b.handle_text("me", "/chat")                  # 切到对话模式
         b.handle_text("me", "今天有什么好玩的")
-        assert calls == {"pusher": 0, "frame": 0}, "闲聊不该抓帧/发截图"
+        assert calls["pusher"] == 1, "闲聊也推帧（agent 可能在聊天中开浏览器）"
+        assert calls["frame"] == 0, "闲聊不自动发截图"
 
     def test_task_path_still_pushes_frames(self):
         b, _ = self._bridge()

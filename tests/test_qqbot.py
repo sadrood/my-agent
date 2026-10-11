@@ -183,16 +183,14 @@ class TestApproval:
         assert "已按你的答复" in reply
         assert bridge.sessions == {}, "审批答复不能被当成新任务"
 
-    def test_group_approval_is_keyed_per_member(self):
-        """群里 A 的审批答复不能替 B 处理，也不能被别人消费掉。"""
+    def test_group_approval_is_keyed_per_group(self):
+        """群里审批按群共享：任何人都能答复群里的审批。"""
         b = QQBotBridge(_cfg(allow_group="true", allow_groups="G1"),
                         runner=lambda goal: "ok")
         b.approve_timeout = 0.05
-        b._pending["g:G1:me"] = {"event": threading.Event(), "allow": False, "tool": "t"}
+        b._pending["g:G1"] = {"event": threading.Event(), "allow": False, "tool": "t"}
         reply = b.handle_text("friend", "y", "G1")
-        assert "已按你的答复" not in reply, "别人的答复不能替 A 处理审批"
-        assert b._pending["g:G1:me"]["event"].is_set() is False, "A 的审批还挂着"
-        assert "已按你的答复" in b.handle_text("me", "y", "G1")
+        assert "已按你的答复" in reply, "群里任何人都能答复审批"
 
     def test_approver_factory_binds_the_user(self, bridge):
         seen = []
@@ -246,29 +244,27 @@ class TestGroupChat:
         reply = b.handle_text("me", "干活", "G9")
         assert "群白名单" in reply and "G9" in reply
 
-    def test_each_member_gets_its_own_session(self):
+    def test_group_members_share_session(self):
         b = self._group_bridge()
         b.handle_text("me", "一", "G1")
         b.handle_text("friend", "二", "G1")
-        assert set(b.sessions) == {"g:G1:me", "g:G1:friend"}
-        assert b.sessions["g:G1:me"].session_name() != b.sessions["g:G1:friend"].session_name()
+        assert set(b.sessions) == {"g:G1"}
 
     def test_same_user_in_group_and_private_are_different_scopes(self):
         b = self._group_bridge()
         b.handle_text("me", "私聊任务")
         b.handle_text("me", "群任务", "G1")
-        assert set(b.sessions) == {"c:me", "g:G1:me"}
+        assert set(b.sessions) == {"c:me", "g:G1"}
 
     def test_scope_key_roundtrip(self):
         key = QQBotBridge.scope_key("user-1", "group-9")
-        assert QQBotBridge.split_key(key) == ("group-9", "user-1")
+        assert QQBotBridge.split_key(key) == ("group-9", "")
         assert QQBotBridge.split_key(QQBotBridge.scope_key("user-1")) == ("", "user-1")
 
-    def test_group_rate_limit_is_per_member(self):
+    def test_group_rate_limit_is_per_group(self):
         b = self._group_bridge(rate_per_minute=1)
         assert b.handle_text("me", "1", "G1") == "已执行: 1"
-        assert "频繁" in b.handle_text("me", "2", "G1")
-        assert b.handle_text("friend", "3", "G1") == "已执行: 3", "别人不该被连坐"
+        assert "频繁" in b.handle_text("friend", "2", "G1"), "群内共享限流"
 
     def test_group_handler_is_registered_on_the_right_event(self):
         """QQ 群的 @ 事件是 on_group_at_message_create；on_at_message_create 是频道事件。"""
