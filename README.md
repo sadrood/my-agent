@@ -192,14 +192,8 @@ python -m agent.recover --run <run-id> --dry-run :: 先从事件流还原，确�
 - 改 `.py` 用精确替换；新配置进 `config.py` 并同步 `.env.example`；新提示词进 `models/prompts.py`。
 - 安全功能必须走 `agent/approval.py` 审批门；黑名单与沙箱等级不可被任何扩展层豁免。
 - 公共文件（`config.py` / `.env.example` / `AGENTS.md` / `main.py`）提交时**逐 hunk 暂存**，避免把别人未完成的改动卷进来。
-- **当天改动汇总成一笔提交（一天一条）**。用钩子把它变成命令级约束：
-
-```bash
-bash scripts/install-hooks.sh      # 启用仓库自带钩子（core.hooksPath=.githooks）
-# 同一天已在远端推过提交时，再次 git push 会被拦下并列出当天已推的提交；
-# 紧急例外：ALLOW_MULTI_PUSH_TODAY=1 git push ...
-# 关闭：bash scripts/install-hooks.sh --uninstall
-```
+- **当天改动汇总成一笔提交（一天一条）**。这不靠仓库文件强制：推送频率约束是**本地个人选择**，
+  想加的人在自己机器上放一个 pre-push 钩子即可（本仓库不随带 `.githooks/`）。
 
 详见 [`AGENTS.md`](AGENTS.md)。
 

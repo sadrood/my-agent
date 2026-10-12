@@ -38,6 +38,9 @@ tmp_exec.txt
 
 # 任务输出产物（统一存放目录，禁止散落根目录）
 output/
+# 本地个人 git 钩子（不入库；想约束推送频率自己放一个，见 README「提交纪律」）
+.githooks/
+scripts/install-hooks.sh
 # 打包/测试产物（不入库；别人电脑自行生成）
 packaging/build/
 packaging/dist/
