@@ -135,6 +135,202 @@ class TestParseCommand:
         # /helpx 英文连写不算命令
         assert _parse_command("/helpx") == (None, None)
 
+    def test_rename_and_title_commands(self):
+        """会话名：/rename 自己指定，/title 让 agent 按对话重新总结。"""
+        assert _parse_command("/rename 我的调研") == ("rename", "我的调研")
+        assert _parse_command("/rename") == ("rename", "")
+        assert _parse_command("/title") == ("title", "")
+        assert _parse_command("/renamex") == (None, None), "英文连写不算命令"
+        assert _parse_command("/titlex") == (None, None)
+
+
+class TestSessionTitle:
+    """会话名（title）：只改给人看的名字，会话 id 与历史不动。"""
+
+    def _store(self, tmp_path):
+        from agent.session import SessionStore
+        store = SessionStore(config={"dir": str(tmp_path)})
+        store.save_conversation("conv-1", messages=[{"role": "user", "content": "帮我调研向量库"}],
+                                title="旧名字")
+        return store
+
+    def test_set_title_keeps_history_and_id(self, tmp_path):
+        store = self._store(tmp_path)
+        assert store.set_title("conv-1", "向量库调研") is True
+        conv = store.load_conversation("conv-1")
+        assert conv["title"] == "向量库调研"
+        assert conv["id"] == "conv-1", "改名不能动会话 id（/open 与 --session 的引用要保住）"
+        assert conv["messages"], "历史必须保留"
+        listed = {c["id"]: c["title"] for c in store.list_conversations()}
+        assert listed["conv-1"] == "向量库调研", "/sessions 列表要显示新名字"
+
+    def test_set_title_rejects_unknown_conversation(self, tmp_path):
+        store = self._store(tmp_path)
+        assert store.set_title("conv-不存在", "x") is False
+
+    def test_set_title_trims_and_caps(self, tmp_path):
+        store = self._store(tmp_path)
+        store.set_title("conv-1", "  带空格的  ")
+        assert store.load_conversation("conv-1")["title"] == "带空格的"
+        store.set_title("conv-1", "长" * 300)
+        assert len(store.load_conversation("conv-1")["title"]) == 120
+
+    def test_title_for_prefers_small_model(self):
+        from main import _session_title_for
+
+        class _Small:
+            def title_for(self, messages):
+                return "小模型起的名字"
+
+        class _Agent:
+            small_model = _Small()
+            llm = None
+
+        assert _session_title_for(_Agent(), [{"role": "user", "content": "x"}]) == "小模型起的名字"
+
+    def test_title_for_falls_back_to_main_model(self):
+        from main import _session_title_for
+
+        class _LLM:
+            def __init__(self):
+                self.calls = []
+
+            def chat(self, messages, **kw):
+                self.calls.append(messages)
+                return '"回退起的名字"\n多余的一行'
+
+        class _Agent:
+            small_model = None
+            llm = _LLM()
+
+        agent = _Agent()
+        title = _session_title_for(agent, [{"role": "user", "content": "聊聊向量库"}])
+        assert title == "回退起的名字", "取首行并去掉引号"
+        assert agent.llm.calls, "回退路径必须真的问过模型"
+
+    def test_title_for_returns_empty_when_nothing_works(self):
+        from main import _session_title_for
+
+        class _Boom:
+            def title_for(self, messages):
+                raise RuntimeError("小模型坏了")
+
+        class _Agent:
+            small_model = _Boom()
+            llm = None
+
+        assert _session_title_for(_Agent(), [{"role": "user", "content": "x"}]) == ""
+        assert _session_title_for(_Agent(), []) == "", "没有对话内容时不该编名字"
+
+
+class TestPreflight:
+    """入口预检：缺密钥立刻停下（元命令必须放行，环境没配好时人先跑的就是 --doctor）。"""
+
+    class _Args:
+        doctor = upgrade = upgrade_check = upgrade_stash = llm_health = list_tools = False
+
+    def test_missing_key_gives_actionable_message(self, monkeypatch):
+        from config import LLM_CONFIG
+        from main import _preflight_error
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "")
+        msg = _preflight_error(self._Args())
+        assert "LLM_API_KEY" in msg and ".env" in msg and "--doctor" in msg
+
+    def test_key_present_passes(self, monkeypatch):
+        from config import LLM_CONFIG
+        from main import _preflight_error
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "sk-test")
+        assert _preflight_error(self._Args()) == ""
+
+    def test_meta_commands_are_never_blocked(self, monkeypatch):
+        from config import LLM_CONFIG
+        from main import _preflight_error
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "")
+        for flag in ("doctor", "upgrade", "upgrade_check", "upgrade_stash",
+                     "llm_health", "list_tools"):
+            args = self._Args()
+            setattr(args, flag, True)
+            assert _preflight_error(args) == "", f"--{flag} 不该被预检拦住"
+
+
+class TestPrintAndJsonOutput:
+    """一行式与机读输出：脚本/cron/CI 要靠它们消费结果。"""
+
+    def _run(self, monkeypatch, capsys, argv, result):
+        import main
+        from config import LLM_CONFIG
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "sk-test")
+        monkeypatch.setattr(main, "run_once", lambda **kw: result)
+        monkeypatch.setattr(main.sys, "argv", ["main.py"] + argv)
+        code = main.main()
+        return code, capsys.readouterr().out
+
+    def test_print_flag_becomes_the_goal(self, monkeypatch, capsys):
+        import main
+        seen = {}
+
+        class _R:
+            success = True
+            output = "干完了"
+            error = ""
+
+        from config import LLM_CONFIG
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "sk-test")
+        monkeypatch.setattr(main, "run_once", lambda **kw: seen.update(kw) or _R())
+        monkeypatch.setattr(main.sys, "argv", ["main.py", "-p", "把日志清一下"])
+        main.main()
+        assert seen.get("goal") == "把日志清一下", "-p 的文本要当成任务"
+
+    def test_json_output_is_machine_readable(self, monkeypatch, capsys):
+        import json as _json
+
+        class _R:
+            success = True
+            output = "结果正文"
+            error = ""
+
+        code, out = self._run(monkeypatch, capsys, ["-p", "任务", "--output", "json"], _R())
+        assert code == 0
+        payload = _json.loads(out.strip().splitlines()[-1])
+        assert payload["ok"] is True and payload["output"] == "结果正文"
+        assert set(payload) == {"ok", "session", "output", "error"}
+
+    def test_json_output_reports_failure_and_exit_code(self, monkeypatch, capsys):
+        import json as _json
+
+        class _R:
+            success = False
+            output = ""
+            error = "上游 401"
+
+        code, out = self._run(monkeypatch, capsys, ["-p", "任务", "--output", "json"], _R())
+        assert code == 1, "失败要给非零退出码，脚本才能判断"
+        payload = _json.loads(out.strip().splitlines()[-1])
+        assert payload["ok"] is False and payload["error"] == "上游 401"
+
+    def test_json_mode_is_quiet(self, monkeypatch, capsys):
+        """机读模式不能往 stdout 混富文本（否则调用方解析不了）。"""
+        import main
+        from config import LLM_CONFIG
+
+        class _R:
+            success = True
+            output = "x"
+            error = ""
+
+        seen = {}
+        monkeypatch.setitem(LLM_CONFIG, "api_key", "sk-test")
+        monkeypatch.setattr(main, "run_once", lambda **kw: seen.update(kw) or _R())
+        monkeypatch.setattr(main.sys, "argv", ["main.py", "-p", "任务", "--output", "json"])
+        main.main()
+        assert seen.get("verbose") is False, "json 模式必须关掉富文本渲染"
+
+    def test_json_flag_is_registered(self):
+        from main import build_parser
+        args = build_parser().parse_args(["-p", "x", "--output", "json"])
+        assert args.print_prompt == "x" and args.output == "json"
+        assert build_parser().parse_args(["x"]).output == "text"
+
 
 class TestAutoModeRouting:
     def test_research_keywords(self):

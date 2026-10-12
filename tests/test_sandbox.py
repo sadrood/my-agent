@@ -251,7 +251,9 @@ class TestForegroundTimeout:
         assert result.success is False
         assert "超时" in result.error
         assert "background" in result.error or "后台" in result.error
-        assert elapsed < 2.5    # 没等满 3s 睡眠
+        # 超时后还有约 2s 的终止/回收收尾（terminate → wait → kill），实测总耗时≈2.5s；
+        # 原来的 2.5 阈值正好压在这条线上，负载一高就 0.001s 之差判失败。
+        assert elapsed < 2.9, f"应在 3s 睡眠结束前返回（实测 {elapsed:.2f}s）"
 
     def test_fg_timeout_default_from_config(self, monkeypatch):
         from config import TOOL_CONFIG

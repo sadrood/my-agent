@@ -454,7 +454,11 @@ class TestDenyReasonNamesTheTrigger:
         p = self._never()
         req = ApprovalRequest(tool_name="x", arguments={}, command="x", approval="on-request")
         d = p.decide(req)
-        assert d.allowed is False and d.reason == "工具要求批准，但策略为 never。"
+        assert d.allowed is False
+        # 文案要自带"怎么放行"：只说"要求批准"的话，人和模型都不知道下一步该做什么
+        assert d.reason.startswith("工具要求批准，但策略为 never")
+        assert "/permission ask" in d.reason and "/permission full" in d.reason
+        assert "APPROVAL_HONOR_ON_REQUEST=0" in d.reason
 
 
 class TestFullPermissionMode:

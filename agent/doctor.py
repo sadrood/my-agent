@@ -539,12 +539,44 @@ def _check_sandbox() -> dict:
         return {"name": "OS 级沙箱", "ok": False, "message": f"检查失败: {str(e)[:80]}", "hint": ""}
 
 
+def _check_exposure() -> dict:
+    """本地暴露面：面板绑定地址 + 常见 CDP 调试端口是否在监听。"""
+    import socket as _socket
+    host = ""
+    for var in ("DASHBOARD_HOST", "MY_AGENT_DASHBOARD_HOST", "HOST"):
+        host = (os.getenv(var) or "").strip()
+        if host:
+            break
+    notes, issues = [], []
+    if host and host.lower() not in ("127.0.0.1", "localhost", "::1"):
+        notes.append(f"面板绑在 {host}（非本机）→ 访问需 memory/ipc.json 里的凭据")
+    else:
+        notes.append("面板仅本机可达（默认，无需凭据）")
+    open_ports = []
+    for port in (9222, 9223):
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                open_ports.append(port)
+        except Exception:                       # noqa: BLE001
+            pass
+    if open_ports:
+        issues.append(f"CDP 调试端口在监听: {open_ports}（本机任何程序都能遥控浏览器）")
+    return {
+        "name": "本地暴露面",
+        "ok": not issues,
+        "message": "；".join(issues + notes),
+        "hint": ("改用 --remote-debugging-pipe（管道不走端口）并做到用完即关"
+                 if issues else ""),
+    }
+
+
 def run_doctor(include_llm: bool = True) -> List[dict]:
     """执行全部自检，返回结果列表。"""
     checks: List[Callable[[], dict]] = [
         _check_python, _check_deps, _check_browser,
         _check_git, _check_env, _check_env_sync, _check_tools, _check_ws_support,
         _check_policy, _check_hooks, _check_exec_policy, _check_skills, _check_sandbox,
+        _check_exposure,
     ]
     if include_llm:
         checks.insert(5, _check_llm)

@@ -475,12 +475,17 @@ class ApprovalPolicy:
         # honor_on_request=False = 完全权限模式：跳过本步，落到第 4 步按策略处理（never → 放行）
         if (getattr(request, "approval", "auto") == "on-request"
                 and self.honor_on_request()):
-            # 把"为什么要求批准"带上（如命中了哪个安全关键文件）：
+            # 把"为什么要求批准"带上（如命中了哪个安全关键文件），并给出该怎么放行：
             # 只回一句"工具要求批准"，人和模型都不知道该改什么。
             why = str(getattr(request, "reason", "") or "").strip()
             detail = f"（{why}）" if why else ""
             if self.mode == "never":
-                decision = ApprovalDecision(False, f"工具要求批准{detail}，但策略为 never。")
+                decision = ApprovalDecision(
+                    False,
+                    f"工具要求批准{detail}，但策略为 never（never = 不问就放行，与该工具的"
+                    f"\"必须人工确认\"冲突，冲突时按拒绝处理）。放行方式：/permission ask "
+                    f"改成逐次确认（推荐），或 /permission full 跳过确认，"
+                    f"或设 APPROVAL_HONOR_ON_REQUEST=0。")
             else:
                 decision = self._ask(request, f"该工具主动要求人工确认{detail}")
             self._record(request, decision)

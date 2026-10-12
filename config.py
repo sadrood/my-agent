@@ -186,6 +186,7 @@ RUN_LOG_CONFIG = {
 # ============================================================
 # QQ 机器人桥配置（agent/qqbot.py：用 QQ 私聊 / 群内 @ 驱动 agent）
 # 凭证只从环境变量读；白名单为空时拒绝所有人。
+# 还没凭证：`python -m agent.qqbot --bind` 扫码绑定（agent/qqbot_bind.py）。
 # ============================================================
 QQBOT_CONFIG = {
     "app_id": os.getenv("QQBOT_APP_ID", ""),

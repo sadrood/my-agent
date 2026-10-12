@@ -8,7 +8,10 @@
 ```cmd
 my-agent                          # 交互模式
 my-agent "任务描述"                # 单次任务
+my-agent -p "任务描述"             # 一行式（等价于上面的位置参数，便于脚本/cron 调用）
+my-agent -p "任务" --output json   # 机读输出：只往 stdout 打一行 JSON（ok/session/output/error）
 my-agent -q "任务"                 # 安静模式（无渲染输出）
+my-agent --ps                     # 运行态：面板/QQ 桥在不在跑、最近的运行有没有收尾
 my-agent --list-tools             # 查看全部工具（含 JSON Schema）
 my-agent --team "复杂任务"         # 多 Agent 团队协作
 my-agent --research "主题"         # 深度研究模式
@@ -76,6 +79,8 @@ my-agent --session <对话ID>        # 恢复指定对话（见下方对话管�
 | `/consent` | **Guardian 放行台账**：被拦下待放行的调用 + 已生效的人工授权 |
 | `/help` | 查看全部可用命令 |
 | `/sessions` | **查看全部对话 ID**（● 标记当前对话） |
+| `/rename <名字>` | 给当前对话改会话名（只改名字，对话 ID 与历史不动） |
+| `/title` | 让 agent 按当前对话重新总结会话名（小模型优先，失败回退主模型） |
 | `/open <对话ID>` | 打开并恢复某对话的全部记录，继续聊 |
 | `/new` | 新开一个对话 |
 | `Ctrl+C` | 中断当前任务，回到提示符（不会退出程序） |
@@ -744,6 +749,7 @@ BROWSER_EGO_CURSOR_NAME=my_agent             # 浮层上显示的名字
 
 ```cmd
 pip install qq-botpy                 :: 可选依赖，不装不影响其它功能
+python -m agent.qqbot --bind         :: 没凭证时：手机 QQ 扫码，密钥自动写进 .env
 python -m agent.qqbot                :: 启动桥（长驻）
 ```
 

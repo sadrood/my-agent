@@ -990,6 +990,29 @@ def _build_client(bridge: QQBotBridge):
     return _Client(intents=intents, is_sandbox=bool(bridge.config.sandbox))
 
 
+def _write_pid_file() -> str:
+    """写 memory/qqbot.pid（`main.py --ps` 靠它判断桥在不在跑）；退出时删。"""
+    import json as _json
+    from datetime import datetime as _dt
+    from config import PROJECT_ROOT
+    path = os.path.join(PROJECT_ROOT, "memory", "qqbot.pid")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump({"pid": os.getpid(), "started_at": _dt.now().isoformat(timespec="seconds")},
+                       fh, ensure_ascii=False, indent=2)
+    except Exception:                           # noqa: BLE001
+        pass
+    return path
+
+
+def _clear_pid_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except Exception:                           # noqa: BLE001
+        pass
+
+
 def main(argv: Optional[list] = None) -> int:
     """`python -m agent.qqbot`：连上 QQ，把私聊消息转给 agent。"""
     import argparse
@@ -998,10 +1021,15 @@ def main(argv: Optional[list] = None) -> int:
                                      description="QQ 机器人桥：用 QQ 私聊驱动 agent")
     parser.add_argument("--probe-media", action="store_true", dest="probe_media",
                         help="查看截图上传通道现状（真正验证在会话内用 /shot）")
+    parser.add_argument("--bind", action="store_true",
+                        help="扫码绑定机器人并写进 .env（细节参数见 python -m agent.qqbot_bind --help）")
     # 只在显式传参（或 __main__ 传 sys.argv[1:]）时解析：main() 也会被测试/宿主直接调用，
     # 那时去解析 pytest 的 argv 会直接报"无法识别的参数"。
     args = parser.parse_args(list(argv) if argv is not None else [])
     config = QQBotConfig()
+    if args.bind:
+        from agent.qqbot_bind import main as bind_main
+        return bind_main([])
     if args.probe_media:
         print(QQBotBridge(config).probe_media())
         return 0
@@ -1016,11 +1044,15 @@ def main(argv: Optional[list] = None) -> int:
           + ("—— 只有沙箱配置里列出的账号/群能收到回复" if config.sandbox else ""))
     if config.workspace:
         os.chdir(config.workspace)
-    run_log.start(tag="qqbot", extra={"qqbot": repr(config)})
-    bridge = QQBotBridge(config)
-    client = _build_client(bridge)
-    run_log.log(f"QQ 桥启动（{where}环境），等待消息")
-    client.run(appid=config.app_id, secret=config.secret)
+    _pid_file = _write_pid_file()
+    try:
+        run_log.start(tag="qqbot", extra={"qqbot": repr(config)})
+        bridge = QQBotBridge(config)
+        client = _build_client(bridge)
+        run_log.log(f"QQ 桥启动（{where}环境），等待消息")
+        client.run(appid=config.app_id, secret=config.secret)
+    finally:
+        _clear_pid_file(_pid_file)
     return 0
 
 

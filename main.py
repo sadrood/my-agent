@@ -4,6 +4,7 @@
 import sys
 import os
 import argparse
+import json
 import threading
 import time
 
@@ -163,11 +164,54 @@ def start_desktop_app():
     launch_desktop()
 
 
+def _preflight_error(args) -> str:
+    """入口预检：缺主模型密钥时立刻给一行可执行指引，别等第一次调用才报 Missing credentials。
+
+    元命令（--doctor / --upgrade* / --llm-health / --list-tools）不需要模型，必须放行——
+    环境没配好时人第一个跑的就是 --doctor。
+    """
+    if any(getattr(args, f, False) for f in ("doctor", "upgrade", "upgrade_check",
+                                            "upgrade_stash", "llm_health", "list_tools",
+                                            "ps")):
+        return ""
+    from config import LLM_CONFIG
+    if not str(LLM_CONFIG.get("api_key") or "").strip():
+        return ("未配置主模型密钥：把 LLM_API_KEY（连同 LLM_BASE_URL / LLM_MODEL）写进 .env，"
+                "或用 --api-key 传入；想先逐项看环境就跑 main.py --doctor。")
+    return ""
+
+
+def _session_title_for(agent, messages) -> str:
+    """按对话内容起一个短会话名：优先小模型（与自动起名同一实现），失败回退主模型。"""
+    small = getattr(agent, "small_model", None)
+    if small is not None:
+        try:
+            title = str(small.title_for(messages) or "").strip()
+            if title:
+                return title
+        except Exception:               # noqa: BLE001 — 起名失败不能影响命令
+            pass
+    try:
+        from agent.small_model import TITLE_SYSTEM_PROMPT
+        head = "\n".join(
+            f"{m.get('role', '')}: {str(m.get('content', ''))[:200]}"
+            for m in messages[-12:] if str(m.get("content", "")).strip()
+        )
+        if not head:
+            return ""
+        raw = str(agent.llm.chat([{"role": "system", "content": TITLE_SYSTEM_PROMPT},
+                                  {"role": "user", "content": head}],
+                                 max_tokens=40, temperature=0.2) or "").strip()
+        return raw.splitlines()[0].strip().strip('"“”')[:40] if raw else ""
+    except Exception:                   # noqa: BLE001
+        return ""
+
+
 def _parse_command(goal: str):
     """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
     for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model",
                 "config", "image", "memory", "compact", "goal", "consent", "permission",
-                "upgrade", "history", "help"):
+                "upgrade", "history", "rename", "title", "help"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -372,6 +416,29 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                         f"[dim]  {mark} {cv['id']}  {cv['title'][:36]}  "
                         f"{cv['count']} 条 · {cv['updated_at'][:16].replace('T', ' ')}[/dim]"
                     )
+            continue
+        if cmd == "rename":
+            new_name = (cmd_args or "").strip()
+            if not new_name:
+                print_warning("用法: /rename <新会话名>（只改名字，会话 id 与历史不动）", use_rich=True)
+                continue
+            if store.set_title(conv_id, new_name):
+                print_info(f"会话名已改为：{new_name}", style="success")
+            else:
+                print_warning(f"改名失败：找不到会话 {conv_id}", use_rich=True)
+            continue
+        if cmd == "title":
+            msgs = agent.memory.get_messages()
+            if not msgs:
+                print_info("还没有对话内容，先聊两句再总结。", style="info")
+                continue
+            old_title = (store.load_conversation(conv_id) or {}).get("title", "")
+            new_title = _session_title_for(agent, msgs)
+            if not new_title:
+                print_warning("总结失败（小模型不可用或返回为空）。可用 /rename 手动指定。", use_rich=True)
+                continue
+            if store.set_title(conv_id, new_title):
+                print_info(f"会话名：{old_title or '（空）'} → {new_title}", style="success")
             continue
         if cmd == "open":
             if not cmd_args:
@@ -659,6 +726,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/article <主题>      文章工坊（多模型互审写作，可用 | 附要求）",
                 "/consent             Guardian 放行台账（被拦待放行 / 已授权）",
                 "/permission [档]     权限档：ask（每次确认）/ auto（自动执行）/ full（完全权限）/ block（全禁）",
+                "/rename <名字>       给当前会话改名（只改名字，会话 id 与历史不动）",
+                "/title               让 agent 按当前对话重新总结一个会话名",
                 "/upgrade [check]     升级到远端最新版本（只快进；check = 只看不升）",
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
@@ -681,7 +750,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/rename", "/title", "/help"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
                 f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"
@@ -770,6 +839,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dash-port", type=int, default=8080, help="Dashboard端口")
     parser.add_argument("--dash-host", default="127.0.0.1",
                         help="Dashboard 绑定地址（默认 127.0.0.1 仅本机；局域网访问用 0.0.0.0）")
+    parser.add_argument("--ps", action="store_true",
+                        help="看运行态：面板/QQ 桥在不在跑、最近的运行有没有收尾")
     parser.add_argument("--llm-health", action="store_true", dest="llm_health",
                         help="查看 LLM 限流/延迟累计数据（memory/llm_health.json）")
     parser.add_argument("--doctor", action="store_true",
@@ -833,6 +904,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcp-server", action="store_true",
                         help="以 MCP server 运行（stdio）")
     parser.add_argument("--list-tools", action="store_true", help="列出全部工具")
+    parser.add_argument("-p", "--print", dest="print_prompt", default="",
+                        help="一行式执行：等价于把提示当任务参数（便于脚本/cron 调用）")
+    parser.add_argument("--output", choices=["text", "json"], default="text",
+                        help="结果输出格式：text（默认，富文本）或 json（机读，脚本消费）")
 
     # ---- Skills 技能包安装 / 更新（带完整性校验） ----
     parser.add_argument("--skills-install", metavar="SOURCE_DIR", default=None,
@@ -947,11 +1022,23 @@ def main():
         except Exception:
             pass
 
+    if args.ps:
+        from agent.status import collect, render as render_status
+        print(render_status(collect()))
+        return 0
+
     # LLM 限流/延迟累计数据（my-agent --llm-health）
     if args.llm_health:
         from agent.llm_health import LLMHealth, render
         print(render(LLMHealth().snapshot()))
         return
+
+    # 入口预检：缺密钥就在这里停下（元命令已在 _preflight_error 里放行）
+    _preflight = _preflight_error(args)
+    if _preflight:
+        from agent.ui_theme import print_warning
+        print_warning(_preflight, use_rich=True)
+        return 2
 
     # 环境自检（my-agent --doctor）
     if args.doctor:
@@ -1030,6 +1117,22 @@ def main():
     if args.dashboard:
         print("  [Dashboard] 浏览器版控制面板已禁用（web 端已停用）。")
         print("  [Dashboard] 如需浏览器版页面，设置 MY_AGENT_WEB_UI=1 后启动服务。")
+
+    if args.print_prompt and not args.goal:
+        args.goal = args.print_prompt
+
+    if args.output == "json" and args.goal and not (args.team or args.research or args.article):
+        # 机读模式：不渲染富文本（只留这一行 JSON 到 stdout），失败也返回结构化结果
+        result = run_once(goal=args.goal, verbose=False,
+                          enable_vision=not args.no_vision, config=config)
+        payload = {
+            "ok": bool(getattr(result, "success", True)),
+            "session": str(getattr(config, "session_name", "") or ""),
+            "output": str(getattr(result, "output", None) or result or ""),
+            "error": str(getattr(result, "error", "") or ""),
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0 if payload["ok"] else 1
 
     if args.article and args.goal:
         run_article(args.goal)

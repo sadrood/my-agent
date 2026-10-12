@@ -7,9 +7,16 @@
 
 ```bash
 cd ~/my_agent
-cp .env.example .env && nano .env      # 填 LLM_API_KEY 与 QQBOT_APP_ID/SECRET
+cp .env.example .env && nano .env      # 填 LLM_API_KEY
+.venv/bin/python -m agent.qqbot --bind # 手机 QQ 扫码，AppID/AppSecret 自动写进 .env
 .venv/bin/python -m agent.qqbot        # 前台跑通后，交给 systemd 常驻
 ```
+
+`--bind` 走腾讯轻量绑定接口（`agent/qqbot_bind.py`）：手机 QQ 扫一次码就把 AppID/AppSecret
+写进 `.env`，密钥不回显、不进日志；比去开放平台手动复制省事。细节参数见
+`python -m agent.qqbot_bind --help`（`--timeout` 等扫码秒数、`--no-write-env` 只看不写）。
+选 `--no-write-env` 时密钥**既不落盘也不回显**，需要它请同时加 `--print-secret`
+（会打到终端，注意别贴进聊天/日志）。
 
 平台侧必须先做两件事（否则一条消息都收不到）：
 

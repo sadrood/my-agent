@@ -13,3 +13,6 @@ Pillow>=10.0.0
 
 # 可选：QQ 机器人桥（python -m agent.qqbot）。不装不影响其它功能，模块内惰性导入。
 # qq-botpy>=1.2.1
+
+# 可选：QQ 机器人扫码绑定（python -m agent.qqbot --bind）的二维码生成。
+# qrcode>=8.0

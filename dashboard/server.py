@@ -9,6 +9,7 @@ import asyncio
 import secrets
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -54,6 +55,56 @@ def _local_host_ips() -> set:
             pass
         _LOCAL_IPS = [sorted(ips)]
     return set(_LOCAL_IPS[0])
+
+
+#: 本次运行的访问凭据（每次启动重新生成；绑非回环地址时强制校验）
+_IPC_TOKEN = ""
+_IPC_COOKIE = "my_agent_token"
+
+
+def _bearer_token(header: str) -> str:
+    """从 `Authorization: Bearer xxx` 里取出 xxx。"""
+    raw = str(header or "").strip()
+    return raw[7:].strip() if raw.lower().startswith("bearer ") else ""
+
+
+def ipc_file_path() -> str:
+    """凭据文件位置（`memory/` 已被 gitignore，不会入库）。"""
+    from config import PROJECT_ROOT
+    return os.path.join(PROJECT_ROOT, "memory", "ipc.json")
+
+
+def write_ipc_file(host: str, port: int, uds: str = "", token: str = "") -> str:
+    """把「地址 + 本次运行凭据」写到 memory/ipc.json（600），供本机桌面端/CLI 连接。
+
+    借鉴本机 IPC 的常规做法：凭据随进程生命周期，不写进仓库、不打印进日志。
+    """
+    path = ipc_file_path()
+    payload = {
+        "host": host, "port": int(port), "uds": uds or "",
+        "token": token or _IPC_TOKEN, "pid": os.getpid(),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(path, 0o600)               # Windows 上是 no-op，不报错
+        except Exception:                       # noqa: BLE001
+            pass
+    except Exception as e:                      # noqa: BLE001
+        print(f"[dashboard] 写凭据文件失败（不影响运行）: {type(e).__name__}", file=sys.stderr)
+    return path
+
+
+def clear_ipc_file() -> None:
+    """退出时清掉凭据文件（进程没了，凭据也不该留着）。"""
+    try:
+        os.remove(ipc_file_path())
+    except Exception:                           # noqa: BLE001
+        pass
+
 
 class _LivePermission:
     """运行中实时权限模式：桌面端任务进行中切换 auto/ask/block 立即生效
@@ -319,6 +370,34 @@ if HAS_FASTAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _require_ipc_token(request, call_next):
+        """非回环绑定时要求「本次运行凭据」：面板不再是"谁都能调"。
+
+        只绑本机（默认）时不介入，保持桌面端/CLI 零摩擦；一旦绑到 0.0.0.0/网卡 IP，
+        就必须带 memory/ipc.json 里的 token（Authorization / X-Agent-Token / cookie / ?token=）。
+        """
+        if not _binds_non_loopback() or not _IPC_TOKEN:
+            return await call_next(request)
+        if os.getenv("DASHBOARD_NO_AUTH", "").lower() in ("1", "true", "yes"):
+            return await call_next(request)
+        query_token = request.query_params.get("token") or ""
+        supplied = (_bearer_token(request.headers.get("authorization"))
+                    or request.headers.get("x-agent-token")
+                    or request.cookies.get(_IPC_COOKIE)
+                    or query_token)
+        if supplied and secrets.compare_digest(str(supplied), _IPC_TOKEN):
+            response = await call_next(request)
+            if query_token:                       # 首次带 ?token= 打开页面：换成 cookie，后续请求不用再带
+                response.set_cookie(_IPC_COOKIE, _IPC_TOKEN, httponly=True, samesite="strict")
+            return response
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"ok": False, "error": "需要访问凭据：读 memory/ipc.json 的 token，"
+                                   "或用 http://<host>:<port>/?token=<token> 打开一次"},
+            status_code=401,
+        )
 
     @app.middleware("http")
     async def _block_dns_rebinding(request, call_next):
@@ -1522,18 +1601,42 @@ def _get_lan_ip() -> str:
 
 
 def start_server(host: str = "127.0.0.1", port: int = 8080):
-    """启动 Dashboard 服务器（默认仅本机可达，安全对齐本地服务）。"""
+    """启动 Dashboard 服务器（默认仅本机可达，安全对齐本地服务）。
+
+    启动时生成"本次运行凭据"并写入 memory/ipc.json：绑非回环地址时必须带它才能访问，
+    退出时清掉。设 MY_AGENT_IPC_UDS=1（非 Windows）可改走 Unix 域套接字，完全不占端口。
+    """
+    global _IPC_TOKEN
     if not HAS_FASTAPI:
         print("[Dashboard] FastAPI/uvicorn 未安装，请运行: pip install fastapi uvicorn")
         return
+    _IPC_TOKEN = secrets.token_urlsafe(24)
+    uds = ""
+    if (os.name != "nt" and os.getenv("MY_AGENT_IPC_UDS", "").lower() in ("1", "true", "yes")):
+        uds = os.path.join(os.path.dirname(ipc_file_path()), "agent.sock")
+    ipc_path = write_ipc_file(host, port, uds=uds)
     # 用 127.0.0.1 而非 localhost：uvicorn 仅监听 IPv4，浏览器解析 localhost 可能优先走 IPv6 (::1) 导致"打不开"
     print(f"\n  Dashboard: http://127.0.0.1:{port}")
     if host not in ("127.0.0.1", "localhost"):
         lan_ip = _get_lan_ip()
         if lan_ip:
-            print(f"  局域网访问: http://{lan_ip}:{port}（远程浏览器访问需防火墙放行 {port} 端口）")
-    print(f"  API 文档:  http://127.0.0.1:{port}/docs\n")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+            print(f"  局域网访问: http://{lan_ip}:{port}/?token={_IPC_TOKEN}"
+                  f"（首次带上 token 换 cookie；不带 token 一律 401）")
+    print(f"  API 文档:  http://127.0.0.1:{port}/docs")
+    print(f"  访问凭据:  {ipc_path}（本机工具可读；退出时自动删除）\n")
+    try:
+        if uds:
+            print(f"  传输方式:  Unix 域套接字 {uds}（不占端口，仅本机可达）\n")
+            uvicorn.run(app, uds=uds, log_level="info")
+        else:
+            uvicorn.run(app, host=host, port=port, log_level="info")
+    finally:
+        clear_ipc_file()
+        if uds:
+            try:
+                os.remove(uds)
+            except Exception:                   # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":

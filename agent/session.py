@@ -175,6 +175,21 @@ class SessionStore:
             )
             return path
 
+    def set_title(self, conv_id: str, title: str) -> bool:
+        """只改标题（会话名），保留全部记录；对话不存在返回 False。
+
+        会话 id/文件名不动：`/open`、`--session` 的引用继续有效，改的是给人看的名字。
+        """
+        path = self._path(conv_id)
+        with _dump_lock_for(path):
+            payload = self._read_raw(conv_id)
+            if payload is None:
+                return False
+            payload["title"] = str(title or "").strip()[:120]
+            payload["updated_at"] = datetime.now().isoformat()
+            _atomic_dump(path, payload)
+        return True
+
     def load_conversation(self, conv_id: str) -> Optional[dict]:
         """加载对话（含全部记录）；不存在返回 None。"""
         return self._read_raw(conv_id)
