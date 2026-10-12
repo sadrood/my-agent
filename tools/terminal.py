@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any, Dict
 
-from tools.base import BaseTool, ToolResult
+from tools.base import BaseTool, StreamPreview, ToolResult
 from tools.terminal_session import TerminalSessionManager
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -454,6 +454,7 @@ class TerminalTool(BaseTool):
             stdout_chunks: list = []
             stderr_chunks: list = []
             cb = self._output_callback
+            preview = StreamPreview.from_config() if cb else None
 
             def _pump(pipe, sink):
                 try:
@@ -461,9 +462,10 @@ class TerminalTool(BaseTool):
                     for line in iter(pipe.readline, b""):
                         text = _decode_console(line)
                         sink.append(text)
-                        if cb:
+                        if cb and preview is not None:
                             try:
-                                cb(text)
+                                if preview.allow():
+                                    cb(text)
                             except Exception:
                                 pass
                 except Exception:
@@ -473,6 +475,14 @@ class TerminalTool(BaseTool):
                         pipe.close()
                     except Exception:
                         pass
+                    # 折叠过就补一行说明（stdout/stderr 两个 reader 只会有一个真正发出）
+                    if cb and preview is not None:
+                        note = preview.notice()
+                        if note:
+                            try:
+                                cb(note)
+                            except Exception:
+                                pass
 
             t_out = threading.Thread(target=_pump, args=(proc.stdout, stdout_chunks), daemon=True)
             t_err = threading.Thread(target=_pump, args=(proc.stderr, stderr_chunks), daemon=True)

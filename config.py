@@ -856,6 +856,9 @@ SANDBOX_EXEC_CONFIG = {
 # ============================================================
 TOOL_CONFIG = {
     "output_max_chars": int(os.getenv("TOOL_OUTPUT_MAX_CHARS", "8000")),
+    # 实时输出只预览前 N 行（-1 = 不限）：terminal/delegate 的长输出否则会刷屏，
+    # 把本该一眼看到的结果摘要挤出屏幕。
+    "stream_head_lines": int(os.getenv("TOOL_STREAM_HEAD_LINES", "6")),
     "max_step_ops": int(os.getenv("MAX_STEP_OPS", "12")),   # 单个计划步骤内最多工具操作数
     # 单轮 LLM 重试的两个预算（秒）。普通错误（网络抖动/5xx）用短的；429 限流用长的——
     # 配额按分钟窗口重置，等得起才熬得过去，否则一次限流就把能续跑的任务判死。

@@ -143,12 +143,28 @@ class TestCommandMapping:
         ("scroll top", "window.scrollTo(0, 0)"),
         ("snapshot", "await page.snapshot()"),
         ("text", "document.body.innerText"),
-        ("screenshot", "await page.screenshot()"),
+        ("screenshot", "await page.screenshot({ path:"),
         ("url", "await page.info()"),
         ("title", "await page.info()"),
     ])
     def test_command_script(self, monkeypatch, captured, command, fragment):
         assert fragment in self._script_for(monkeypatch, captured, command)
+
+    def test_screenshot_target_is_timestamped_png_under_project_dir(self, monkeypatch):
+        """截图落点必须是工程内 screenshots/（与 Playwright 后端同一目录）。"""
+        tool = _tool(monkeypatch)
+        target = tool._screenshot_target()
+        assert os.path.dirname(target) == tool._screenshot_dir
+        assert os.path.basename(target).startswith("ego_") and target.endswith(".png")
+
+    def test_screenshot_passes_explicit_path_to_runtime(self, monkeypatch, captured):
+        """必须显式给 path：不给的话运行时会写系统临时目录，且永不回收（ego 只写不删）。"""
+        tool = _tool(monkeypatch)
+        fixed = os.path.join(tool._screenshot_dir, "ego_20261012_000000_000.png")
+        monkeypatch.setattr(tool, "_screenshot_target", lambda: fixed)
+        tool.execute("screenshot")
+        # 路径按 JSON 转义进脚本（Windows 反斜杠不能裸写）
+        assert json.dumps(fixed, ensure_ascii=False) in captured["scripts"][-1]
 
     def test_missing_argument_is_rejected_without_running(self, monkeypatch, captured):
         tool = _tool(monkeypatch)
@@ -178,13 +194,16 @@ class TestResults:
 
     def test_screenshot_base64_goes_to_metadata(self, monkeypatch, captured, tmp_path):
         png = tmp_path / "shot.png"
-        png.write_bytes(b"\x89PNG-fake-bytes")
+        raw = b"\x89PNG-fake-bytes"
+        png.write_bytes(raw)
         captured["payloads"].append({"ok": True, "__out": {"path": str(png)}})
         result = _tool(monkeypatch).execute("screenshot_base64")
         assert result.success
         payload = result.metadata["screenshot_base64"]
-        assert base64.b64decode(payload) == png.read_bytes()
+        assert base64.b64decode(payload) == raw
         assert "FULL_BASE64" not in result.output, "负载不该回灌 output（会被截断成坏图）"
+        # 中间文件读完即删：运行时不给 path 就写系统临时目录且永不回收
+        assert not png.exists(), "截图中间文件应被删除"
 
     def test_screenshot_reports_path(self, monkeypatch, captured, tmp_path):
         png = tmp_path / "s.png"

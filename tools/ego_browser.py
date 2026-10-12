@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, Dict
 
 from tools import human_check
@@ -433,7 +434,9 @@ class EgoBrowserTool(BrowserTool):
         if command == "snapshot":
             return "  __out = { snapshot: await page.snapshot() }\n"
         if command == "screenshot":
-            return "  __out = { path: await page.screenshot() }\n"
+            # 必须显式给 path：不给的话运行时自己写系统临时目录，且永不回收（ego 无清理逻辑）
+            return ("  __out = { path: await page.screenshot({ path: %s }) }\n"
+                    % _js(self._screenshot_target()))
         if command == "humancheck":
             return ("  const __info = await page.info()\n"
                     "  __out = { url: __info.url, snapshot: await page.snapshot() }\n")
@@ -532,8 +535,19 @@ class EgoBrowserTool(BrowserTool):
                               metadata={"human_check": True, "reasons": info["reasons"]})
         return ToolResult(success=True, output=text[:12000])
 
+    def _screenshot_target(self) -> str:
+        """本次截图的落盘路径：工程内 screenshots/（与 Playwright 后端同一目录）。
+
+        毫秒精度：只到秒的话同一秒内两次截图会互相覆盖，而两次调用都返回 success。
+        """
+        stamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
+        return os.path.join(self._screenshot_dir, f"ego_{stamp}.png")
+
     def _screenshot_base64(self) -> ToolResult:
-        """截图 → 读文件 → base64 放 metadata（不走 output，免得被截断成坏图）。"""
+        """截图 → 读文件 → base64 放 metadata（不走 output，免得被截断成坏图）。
+
+        中间文件读完即删：ego 只写不删，而图片数据已随 metadata 传下去。
+        """
         payload = self._run("  __out = { path: await page.screenshot() }\n")
         if not payload.get("ok"):
             return ToolResult(success=False, output="",
@@ -541,12 +555,19 @@ class EgoBrowserTool(BrowserTool):
         path = str((payload.get("__out") or {}).get("path") or "")
         if not path or not os.path.exists(path):
             return ToolResult(success=False, output="", error=f"ego 截图文件不存在: {path!r}")
-        with open(path, "rb") as fh:
-            data = base64.b64encode(fh.read()).decode("ascii")
+        try:
+            with open(path, "rb") as fh:
+                data = base64.b64encode(fh.read()).decode("ascii")
+        finally:
+            # 删不掉也不能让整次截图失败（Windows 上文件可能刚被别的进程打开）
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
         return ToolResult(
             success=True,
-            output=f"截图已获取（ego）。\n文件: {path}\n大小: {len(data) * 3 // 4} 字节",
-            metadata={"screenshot_base64": data, "path": path})
+            output=f"截图已获取（ego）。\n大小: {len(data) * 3 // 4} 字节",
+            metadata={"screenshot_base64": data})
 
     def _status(self) -> ToolResult:
         """后端自检：CLI/node/浏览器路径 + 浏览器连接状态。"""

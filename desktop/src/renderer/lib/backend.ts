@@ -110,6 +110,15 @@ export function __setRunSessionId(id: string | null): void {
 export function __eventSessionId(): string | null {
   return eventSessionId();
 }
+// 仅测试用：单独喂一条工具事件给配对逻辑（正常路径由 connectBackend 分发）
+export function __applyToolEvent(type: 'tool_result' | 'tool_output',
+                                 data: Record<string, any>): boolean {
+  if (type === 'tool_output') {
+    appendToolOutput(data as { tool?: string; text?: string; call_id?: string });
+    return true;
+  }
+  return resolvePendingToolCall(data);
+}
 
 /** 用户选过「总是允许」的工具：本次应用运行期间对该工具的审批自动放行（不持久化，重启后重置更安全） */
 const alwaysAllowedTools = new Set<string>();
@@ -152,7 +161,9 @@ export function eventToMessage(e: AgentEvent): ChatMessage | null {
       const tool = String(d.tool || '');
       const cmd = formatToolCall(tool, args);
       const path = String(args?.file_path ?? args?.path ?? '') || undefined;
-      return { id, role: 'system', content: '', kind: 'command', meta: { cmd, tool, path, success: undefined as boolean | undefined }, timestamp: e.timestamp };
+      // call_id：tool_output / tool_result 会带同一个值，同名批次靠它精确配对，不再依赖事件顺序
+      const callId = d.call_id ? String(d.call_id) : undefined;
+      return { id, role: 'system', content: '', kind: 'command', meta: { cmd, tool, path, callId, success: undefined as boolean | undefined }, timestamp: e.timestamp };
     }
     case 'tool_result': {
       // 结果事件同样带 arguments：补进 meta.cmd，避免"调用参数在 call 里丢、result 又没接"时
@@ -274,59 +285,75 @@ export function skillsMatchedView(d: Record<string, any> | null | undefined): { 
   return { skills, goal: String(d.goal || '') };
 }
 
-/** 工具输出增量：追加到最近一条同名、执行中的工具行（保留末尾 4000 字防止超长刷屏） */
-function appendToolOutput(d: { tool?: string; text?: string }): void {
+type ToolRowMeta = { tool?: string; success?: boolean | undefined; callId?: string };
+
+/**
+ * 定位一条尚未回填的工具行。
+ * 优先按 call_id 精确命中——同名批次（如两条 terminal）与并行批都靠它，与事件到达顺序无关；
+ * 事件流没带 call_id（旧后端）时回退"按工具名找未完成行"。
+ * stopAtFinished=true：遇到已完成行即停（流式输出的旧语义，避免贴到更早的陈旧卡片）。
+ */
+function findToolRow(list: any[], wantId: string, tool: string, stopAtFinished: boolean): number {
+  if (wantId) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      const meta = (m.meta || {}) as ToolRowMeta;
+      if (m.kind === 'command' && meta.success === undefined && String(meta.callId ?? '') === wantId) return i;
+    }
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    const meta = (m.meta || {}) as ToolRowMeta;
+    if (m.kind !== 'command') continue;
+    if (stopAtFinished && meta.success !== undefined) break;
+    if (meta.success === undefined && String(tool ?? meta.tool) === String(meta.tool)) return i;
+  }
+  return -1;
+}
+
+/** 工具输出增量：追加到对应的工具行（保留末尾 4000 字防止超长刷屏） */
+function appendToolOutput(d: { tool?: string; text?: string; call_id?: string }): void {
   const text = String(d.text || "");
   if (!text) return;
   const { messages } = useSessionStore.getState();
   const activeSessionId = eventSessionId();
   if (!activeSessionId) return;
   const list = messages[activeSessionId] || [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    const meta = (m.meta || {}) as { tool?: string; success?: boolean };
-    if (m.kind === 'command' && meta.success !== undefined) break; // 只找最近的执行中行
-    if (m.kind === 'command' && meta.success === undefined && String(d.tool ?? meta.tool) === String(meta.tool)) {
-      useSessionStore.setState((st) => ({
-        messages: {
-          ...st.messages,
-          [activeSessionId]: st.messages[activeSessionId].map((x, j) => {
-            if (j !== i) return x;
-            const next = x.content + text;
-            return { ...x, content: next.length > 4000 ? next.slice(next.length - 4000) : next };
-          }),
-        },
-      }));
-      return;
-    }
-  }
+  const target = findToolRow(list, d.call_id ? String(d.call_id) : "", String(d.tool ?? ""), true);
+  if (target < 0) return;
+  useSessionStore.setState((st) => ({
+    messages: {
+      ...st.messages,
+      [activeSessionId]: st.messages[activeSessionId].map((x, j) => {
+        if (j !== target) return x;
+        const next = x.content + text;
+        return { ...x, content: next.length > 4000 ? next.slice(next.length - 4000) : next };
+      }),
+    },
+  }));
 }
 
-/** 把 tool_result 回填到当前会话最近一条同名、未完成的 tool_call 行上；配对成功返回 true */
+/** 把 tool_result 回填到对应的 tool_call 行上；配对成功返回 true */
 function resolvePendingToolCall(d: Record<string, any>): boolean {
   const { messages } = useSessionStore.getState();
   const activeSessionId = eventSessionId();
   if (!activeSessionId) return false;
   const list = messages[activeSessionId] || [];
   const now = Date.now();
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    const meta = (m.meta || {}) as { tool?: string; success?: boolean | undefined };
-    if (m.kind === 'command' && meta.success === undefined && String(d.tool ?? meta.tool) === String(meta.tool)) {
-      useSessionStore.setState((st) => ({
-        messages: {
-          ...st.messages,
-          [activeSessionId]: st.messages[activeSessionId].map((x, j) =>
-            j === i
-              ? { ...x, role: 'tool' as const, content: String(d.output || d.error || ''), meta: { ...(x.meta || {}), success: Boolean(d.success), durationMs: now - x.timestamp } }
-              : x,
-          ),
-        },
-      }));
-      return true;
-    }
-  }
-  return false;
+  const target = findToolRow(list, d.call_id ? String(d.call_id) : "",
+                             String(d.tool ?? ""), false);
+  if (target < 0) return false;
+  useSessionStore.setState((st) => ({
+    messages: {
+      ...st.messages,
+      [activeSessionId]: st.messages[activeSessionId].map((x, j) =>
+        j === target
+          ? { ...x, role: 'tool' as const, content: String(d.output || d.error || ''), meta: { ...(x.meta || {}), success: Boolean(d.success), durationMs: now - x.timestamp } }
+          : x,
+      ),
+    },
+  }));
+  return true;
 }
 
 /** 任务结束时把仍未回填的工具调用卡片标记为失败（停止/中断场景，避免卡片永远"执行中"） */

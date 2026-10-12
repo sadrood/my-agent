@@ -1977,7 +1977,9 @@ class Agent:
                 return
             from rich.markup import escape as _esc_markup
             label = str(data.get("label") or data.get("tool") or "").strip()
-            head = f"[{tag}{label}] " if (tag or label) else ""
+            tool_name = str(data.get("tool") or "").strip()
+            # 前缀只在能提供信息时加：`[terminal]` 是废话（上一行已写工具名），子 agent 才有用
+            head = f"[{tag}{label}] " if (tag or (label and label != tool_name)) else ""
             console = get_console(True)
             body = text if text.endswith("\n") else text + "\n"
             for line in body.splitlines(keepends=True):
@@ -2013,11 +2015,17 @@ class Agent:
                     print_unified_diff(old_text, new_text)
                 else:
                     print_edit_diff(args.get("old_string", ""), args.get("new_string", ""))
+            # 结果块带归属：同名批次（两条 terminal 之类）光看内容分不清哪块是谁的。
+            # 单调用且非团队成员时不加：上一行已写 ⏺ terminal(...)，再加 `terminal: ` 是噪音。
+            _ri, _rt = int(data.get("index") or 0), int(data.get("total") or 0)
+            _rl = f"{tag}{tool}" if (tag or _rt > 1) else ""
             if data.get("streamed"):
                 # 输出已经实时逐段打过了，这里只留一行收尾（否则同一段内容会被打印两次）
-                print_tool_result(data.get("success", False), "（输出已实时显示）")
+                print_tool_result(data.get("success", False), "（输出已实时显示）",
+                                  label=_rl, index=_ri, total=_rt)
             else:
-                print_tool_result(data.get("success", False), data.get("output", ""))
+                print_tool_result(data.get("success", False), data.get("output", ""),
+                                  label=_rl, index=_ri, total=_rt)
 
     # ================================================================
     # 向后兼容

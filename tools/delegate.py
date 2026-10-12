@@ -3,7 +3,7 @@ import json
 import os
 from typing import Any, Dict
 
-from tools.base import BaseTool, ToolResult
+from tools.base import BaseTool, StreamPreview, ToolResult
 
 # 嵌套委托深度上限（env 由 delegate 自身维护：委托前 +1，结束后还原）
 MAX_DEPTH = int(os.getenv("MY_AGENT_DELEGATE_MAX_DEPTH", "2"))
@@ -137,6 +137,7 @@ class DelegateTool(BaseTool):
         lines: list = []
         status = {"ok": False}
         saw_delta = False
+        preview = StreamPreview.from_config()     # 实时预览限流：子 agent 也可能吐很长
 
         def on_event(kind: str, data: dict):
             nonlocal saw_delta
@@ -147,7 +148,7 @@ class DelegateTool(BaseTool):
                         saw_delta = True
                         lines.append(text)
                         cb = self._output_callback
-                        if cb is not None:
+                        if cb is not None and preview.allow():
                             try:
                                 cb(text)
                             except Exception:
@@ -175,6 +176,12 @@ class DelegateTool(BaseTool):
             os.environ[_DEPTH_ENV] = str(depth)
 
         output = "".join(lines).strip() or "(引擎无输出)"
+        note = preview.notice()                   # 折叠过就补一行说明，别让读者以为输出就这么点
+        if note and self._output_callback is not None:
+            try:
+                self._output_callback(note)
+            except Exception:
+                pass
         return ToolResult(
             success=status["ok"],
             output=output,

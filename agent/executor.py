@@ -850,28 +850,40 @@ class Executor:
                 for tc in batch if "_raw" in tc.arguments
             }
             dispatch = [tc for tc in batch if id(tc) not in bad]
-            for tc in batch:
-                if event_sink is not None:
-                    try:
-                        event_sink("tool_call", {"tool": tc.name, "arguments": tc.arguments})
-                    except Exception:
-                        pass
+            # 显示 id：tool_call / tool_output / tool_result 三处必须取同一个值，前端才能精确配对。
+            # 模型未必给 tool_call.id，缺失时按与 messages 侧相同的 call_{n} 规则补齐。
+            base_call_idx = len(tool_calls_log)
+            display_ids = {
+                id(tc): (str(tc.id) if getattr(tc, "id", None) else f"call_{base_call_idx + i}")
+                for i, tc in enumerate(batch)
+            }
 
             if dispatch and self._batch_parallelizable(dispatch):
+                # 并行：执行期间没有流式输出，先逐条告知在跑什么；配对靠 id，不依赖顺序
+                for tc in dispatch:
+                    self._emit_tool_call_display(event_sink, tc.name, tc.arguments,
+                                                 display_ids[id(tc)])
                 executed = self._run_tool_calls_parallel(dispatch, goal)
             else:
                 # 串行执行；批处理中途响应停止：后续未执行的调用标记为取消，避免"停了但批里剩下的工具还在跑"
                 executed = []
                 for i, tc in enumerate(dispatch):
                     if stop_event is not None and stop_event.is_set() and i > 0:
-                        for _ in dispatch[i:]:
+                        for skipped in dispatch[i:]:
+                            self._emit_tool_call_display(event_sink, skipped.name,
+                                                         skipped.arguments,
+                                                         display_ids[id(skipped)])
                             executed.append((
                                 ToolResult(success=False, output="",
                                            error="已按要求停止：该调用未执行。"),
                                 "已按要求停止", 0.0,
                             ))
                         break
-                    executed.append(self._execute_one_tool_call(tc, goal))
+                    # header 紧贴自己的输出：下一行就是该命令的流式输出
+                    self._emit_tool_call_display(event_sink, tc.name, tc.arguments,
+                                                 display_ids[id(tc)])
+                    executed.append(self._execute_one_tool_call(
+                        tc, goal, display_id=display_ids[id(tc)]))
             # 把参数解析失败的调用按原顺序插回 executed，保证 zip 一一对应
             if bad:
                 merged = []
@@ -883,7 +895,12 @@ class Executor:
                         merged.append(executed.pop(0))
                 executed = merged
 
-            for tc, (result, blocked_reason, seconds) in zip(batch, executed):
+            for batch_i, (tc, (result, blocked_reason, seconds)) in enumerate(
+                    zip(batch, executed), 1):
+                if id(tc) in bad:
+                    # 参数解析失败、未执行：header 在这里补，紧贴它自己的失败结果
+                    self._emit_tool_call_display(event_sink, tc.name, tc.arguments,
+                                                 display_ids[id(tc)])
                 # 进展信号（预算判定依赖它，所以不能只在 metrics 开启时才算）：文件被改动是最硬的"有进展"证据。
                 changed = self._changed_file(tc.name, tc.arguments) if result.success else None
                 if changed:
@@ -929,6 +946,11 @@ class Executor:
                         event_sink("tool_result", {
                             "tool": tc.name,
                             "arguments": tc.arguments,
+                            # 与 tool_call/tool_output 同一个 id：前端据此精确配对，不依赖事件顺序
+                            "call_id": call_id,
+                            # 批次内序号（仅在多调用批次里显示）：同名批次靠它区分结果块
+                            "index": batch_i,
+                            "total": len(batch),
                             "success": result.success,
                             "output": (result.output or result.error or blocked_reason or "")[:ui_cap],
                             "metadata": getattr(result, "metadata", {}) or {},
@@ -1428,7 +1450,7 @@ class Executor:
 
     def _dispatch_tool_call(self, tool_name: str, arguments: dict, goal: str,
                             checkpoint: bool = True, stream_output: bool = True,
-                            inflight_token=None):
+                            inflight_token=None, display_id: str = ""):
         """执行一次工具调用（含审批 + Guardian 把关）。"""
         # 兜底解包：任何入口进来的参数都先还原嵌套 _raw（审批/Guardian/工具拿到的都必须是真正的命名参数，而不是 {"_raw": ...} 字符串）
         if isinstance(arguments, dict):
@@ -1472,12 +1494,14 @@ class Executor:
         if stream_tool is not None and hasattr(stream_tool, "set_output_callback"):
             label = stream_label(tool_name, arguments)
 
-            def _on_output(text: str, _sink=self._event_sink, _name=tool_name, _label=label):
+            def _on_output(text: str, _sink=self._event_sink, _name=tool_name,
+                           _label=label, _cid=display_id):
                 streamed[0] = True
                 if _sink is None:
                     return
                 try:
-                    _sink("tool_output", {"tool": _name, "label": _label, "text": text})
+                    _sink("tool_output", {"tool": _name, "label": _label, "text": text,
+                                          "call_id": _cid})
                 except Exception:
                     pass
             stream_tool.set_output_callback(_on_output)
@@ -1690,7 +1714,7 @@ class Executor:
             self._maybe_reset_if_idle(tool_name)
 
     def _execute_one_tool_call(self, tc, goal: str, checkpoint: bool = True,
-                               stream_output: bool = True):
+                               stream_output: bool = True, display_id: str = ""):
         """执行一次工具调用并计时；日志/指标/事件回喂由主线程统一按序处理。"""
         _t0 = time.time()
         token = object()             # 超时移交令牌：被 watcher 认领后由它回收 inflight
@@ -1698,7 +1722,8 @@ class Executor:
         try:
             result, blocked_reason = self._dispatch_tool_call(
                 tc.name, tc.arguments, goal, checkpoint=checkpoint,
-                stream_output=stream_output, inflight_token=token)
+                stream_output=stream_output, inflight_token=token,
+                display_id=display_id)
         finally:
             # 超时移交后不能立刻减计数：僵尸线程还活着，减了就等于"这次调用已结束"
             if not self._claim_handoff(token):
@@ -1732,6 +1757,17 @@ class Executor:
         for t in threads:
             t.join()
         return [results[i] for i in range(len(tcs))]
+
+    def _emit_tool_call_display(self, event_sink, tool: str, arguments: dict,
+                                call_id: str = "") -> None:
+        """工具调用行（仅显示层；rollout 顺序不受影响）。call_id 供前端精确配对同名批次。"""
+        if event_sink is None:
+            return
+        try:
+            event_sink("tool_call", {"tool": tool, "arguments": arguments,
+                                     "call_id": call_id})
+        except Exception:       # noqa: BLE001 — 显示失败不能中断执行
+            pass
 
     def _emit(self, event_type: str, data: dict):
         if self.rollout is not None:

@@ -328,8 +328,10 @@ def print_unified_diff(old_text: str, new_text: str, use_rich: bool = True,
 
 
 def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
-                      max_lines: int = 4, max_chars: int = 400):
-    """工具结果行：⎿ ...，失败时红色。多行输出截取前几行。"""
+                      max_lines: int = 4, max_chars: int = 400,
+                      label: str = "", index: int = 0, total: int = 0):
+    """工具结果行：⎿ ...，失败时红色。多行输出截取前几行。
+    label/index/total 给结果块加归属——同名批次（如两条 terminal）光看工具名分不清哪块是谁的。"""
     c = get_console(use_rich)
     if not output:
         output = "（无输出）"
@@ -342,8 +344,13 @@ def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
     if len(lines) > max_lines:
         text += f"\n…（共 {len(lines)} 行）"
 
+    # 归属头只加在首行；单调用批次不加序号，避免噪音
+    head = ""
+    if label:
+        head = f"[{index}/{total}] {label}: " if total > 1 else f"{label}: "
+
     for i, line in enumerate(text.split("\n")):
-        prefix = "⎿ " if i == 0 else "  "
+        prefix = f"⎿ {head}" if i == 0 else "  "
         if use_rich:
             from rich.text import Text
             style = "muted" if success else "error"

@@ -41,6 +41,66 @@ def _executor(sink):
     return ex
 
 
+class TestStreamPreviewCap:
+    """实时预览限流：`dir /b` 这类命令不该把上百行刷满控制台。"""
+
+    def test_forwards_only_the_head(self):
+        from tools.base import StreamPreview
+        p = StreamPreview(3)
+        assert [p.allow() for _ in range(5)] == [True, True, True, False, False]
+        assert (p.shown, p.skipped) == (3, 5 - 3)
+
+    def test_notice_is_emitted_once(self):
+        from tools.base import StreamPreview
+        p = StreamPreview(2)
+        for _ in range(4):
+            p.allow()
+        note = p.notice()
+        assert "前 2 行" in note and "2 行未实时显示" in note
+        assert p.notice() == "", "两个 reader 线程只能补一次说明"
+
+    def test_no_folding_means_no_notice(self):
+        from tools.base import StreamPreview
+        p = StreamPreview(10)
+        for _ in range(3):
+            p.allow()
+        assert p.notice() == ""
+
+    def test_negative_means_unlimited(self):
+        from tools.base import StreamPreview
+        p = StreamPreview(-1)
+        assert all(p.allow() for _ in range(50))
+        assert p.notice() == ""
+
+    def test_limit_comes_from_config(self, monkeypatch):
+        from config import TOOL_CONFIG
+        from tools.base import StreamPreview
+        monkeypatch.setitem(TOOL_CONFIG, "stream_head_lines", 2)
+        assert StreamPreview.from_config().limit == 2
+
+
+class TestTerminalPreviewCap:
+    def _run(self, lines: int, sink: list):
+        from tools.terminal import TerminalTool
+        tool = TerminalTool()
+        tool.set_output_callback(sink.append) if hasattr(tool, "set_output_callback") else None
+        tool._output_callback = sink.append
+        cmd = f'python -c "for i in range({lines}): print(i)"'
+        result = tool.execute_json({"command": cmd})
+        return result
+
+    def test_long_output_is_capped_but_result_is_complete(self, monkeypatch):
+        from config import TOOL_CONFIG
+        monkeypatch.setitem(TOOL_CONFIG, "stream_head_lines", 5)
+        sink: list = []
+        result = self._run(30, sink)
+        streamed = [s for s in sink if "未实时显示" not in s]
+        assert len(streamed) <= 5, f"实时行数应被限流，实际 {len(streamed)}"
+        assert any("未实时显示" in s for s in sink), "折叠了就要说明"
+        body = result.output if hasattr(result, "output") else str(result)
+        assert body.count("\n") >= 25, "工具结果必须是完整输出（不能跟着被截断）"
+
+
 class TestStreamLabel:
     def test_terminal_label_is_plain(self):
         assert stream_label("terminal", {}) == "terminal"
@@ -146,6 +206,20 @@ class TestCliRendering:
         out = capsys.readouterr().out
         assert "sub:codex" in out and "正在读文件" in out
 
+    def test_tool_name_prefix_is_dropped(self, capsys):
+        """工具名做前缀是废话（上一行已写 ⏺ terminal(...)），只在 label 携带信息时才加。"""
+        agent = self._agent()
+        agent._loop_tool_event("tool_output", {"tool": "terminal", "label": "terminal",
+                                               "text": "hello\n"})
+        out = capsys.readouterr().out
+        assert "hello" in out and "[terminal]" not in out
+
+    def test_worker_tag_is_still_shown(self, capsys):
+        agent = self._agent()
+        agent._loop_tool_event("tool_output", {"tool": "terminal", "worker": "w1",
+                                               "text": "hi\n"})
+        assert "团队·w1" in capsys.readouterr().out
+
     def test_tool_output_is_silent_when_not_verbose(self, capsys):
         agent = self._agent(verbose=False)
         agent._loop_tool_event("tool_output", {"tool": "terminal", "label": "terminal",
@@ -166,6 +240,28 @@ class TestCliRendering:
         agent._loop_tool_event("tool_result", {"tool": "file", "success": True,
                                                "output": "文件内容ABC", "streamed": False})
         assert "文件内容ABC" in capsys.readouterr().out
+
+    def test_single_call_result_has_no_tool_name_prefix(self, capsys):
+        """单调用结果不加 `terminal: ` 前缀（上一行已写工具名）；多调用批次才要归属。"""
+        agent = self._agent()
+        agent._loop_tool_event("tool_result", {"tool": "terminal", "success": True,
+                                               "output": "结果内容", "index": 1, "total": 1})
+        out = capsys.readouterr().out
+        assert "结果内容" in out and "terminal:" not in out
+
+    def test_multi_call_batch_keeps_attribution(self, capsys):
+        agent = self._agent()
+        agent._loop_tool_event("tool_result", {"tool": "terminal", "success": True,
+                                               "output": "第二条结果", "index": 2, "total": 2})
+        out = capsys.readouterr().out
+        assert "[2/2]" in out and "terminal" in out
+
+    def test_team_worker_result_keeps_attribution(self, capsys):
+        agent = self._agent()
+        agent._loop_tool_event("tool_result", {"tool": "file", "worker": "researcher",
+                                               "success": True, "output": "查到的东西",
+                                               "index": 1, "total": 1})
+        assert "researcher" in capsys.readouterr().out
 
     def test_team_worker_shows_up_in_the_terminal(self, capsys):
         agent = self._agent()

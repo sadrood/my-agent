@@ -2,6 +2,7 @@
 每个工具用 schema 暴露 function calling 参数，并声明 risk_level / approval / min_sandbox_mode。
 旧接口 execute(input_str) 保留；execute_json(arguments) 默认把结构化参数转成字符串。"""
 import re
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict
@@ -208,3 +209,41 @@ def truncate_output(output: str, max_chars: int) -> tuple:
         + output[-tail_chars:]
     )
     return truncated, True, original_length
+
+
+class StreamPreview:
+    """实时输出的行数限流：只放行前 N 行，其余折叠。
+
+    没有它时 `dir /b` 这类命令会把上百行实时刷到控制台，把结果摘要挤出屏幕。
+    limit < 0 表示不限；被折叠时补一行说明（只补一次，stdout/stderr 两个 reader 共用）。
+    """
+
+    def __init__(self, limit: int = 6):
+        self.limit = int(limit)
+        self.shown = 0
+        self.skipped = 0
+        self._lock = threading.Lock()
+        self._notified = False
+
+    @classmethod
+    def from_config(cls) -> "StreamPreview":
+        from config import TOOL_CONFIG
+        return cls(int(TOOL_CONFIG.get("stream_head_lines", 6)))
+
+    def allow(self) -> bool:
+        """这一行要不要实时转发。"""
+        with self._lock:
+            if self.limit < 0 or self.shown < self.limit:
+                self.shown += 1
+                return True
+            self.skipped += 1
+            return False
+
+    def notice(self) -> str:
+        """被折叠时的说明行；没折叠过或已说明过则返回空串。"""
+        with self._lock:
+            if self._notified or not self.skipped:
+                return ""
+            self._notified = True
+            return (f"…（实时预览只显示前 {self.limit} 行，另有 {self.skipped} 行未实时显示，"
+                    f"完整输出见工具结果）\n")
