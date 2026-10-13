@@ -123,9 +123,27 @@ def qr_png(url: str, path: str) -> str:
     return target
 
 
-def save_env(app_id: str, app_secret: str, env_path: str = ".env") -> str:
-    """把两个键写进 .env：已有行（含占位注释行）就地填，没有则追加；别处不动。"""
+def read_env_value(env_path: str, key: str) -> str:
+    """读 .env 里某键的当前值：注释行/空行跳过，没有就返回空串。"""
+    if not os.path.exists(env_path):
+        return ""
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            if name.strip() == key:
+                return value.strip()
+    return ""
+
+
+def save_env(app_id: str, app_secret: str, env_path: str = ".env",
+             extra: Optional[Dict[str, str]] = None) -> str:
+    """把键写进 .env：已有行（含占位注释行）就地填，没有则追加；别处不动。"""
     want = {"QQBOT_APP_ID": app_id, "QQBOT_APP_SECRET": app_secret}
+    if extra:
+        want.update({k: v for k, v in extra.items() if v})
     lines = []
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as fh:
@@ -229,9 +247,16 @@ def main(argv: Optional[list] = None) -> int:
         else:
             print("AppSecret 未落盘也未回显；需要它请加 --print-secret 再跑一次")
     else:
-        save_env(result["app_id"], result["app_secret"], args.env_file)
+        extra: Dict[str, str] = {}
+        openid = str(result.get("user_openid") or "")
+        if openid and not read_env_value(args.env_file, "QQBOT_ALLOW_FROM"):
+            # 绑定人就是第一个使用者：顺手进白名单，省掉"发消息被拒→抄 openid"这一步。
+            extra["QQBOT_ALLOW_FROM"] = openid
+        save_env(result["app_id"], result["app_secret"], args.env_file, extra=extra)
         print(f"绑定成功：AppID={result['app_id']}"
               f"，AppSecret 已写入 {args.env_file}（不回显）")
+        if extra:
+            print(f"白名单已写入 QQBOT_ALLOW_FROM={openid}（绑定人本人）")
     print("下一步：python -m agent.qqbot 启动桥（先 pip install qq-botpy）")
     return 0
 

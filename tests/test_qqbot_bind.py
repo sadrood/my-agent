@@ -96,11 +96,25 @@ class TestEnvFile:
         assert path.read_text(encoding="utf-8").splitlines() == [
             "QQBOT_APP_ID=190", "QQBOT_APP_SECRET=SEC"]
 
+    def test_extra_keys_are_written_too(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("A=1\n", encoding="utf-8")
+        qb.save_env("190", "SEC", str(path), extra={"QQBOT_ALLOW_FROM": "OPENID-1"})
+        assert "QQBOT_ALLOW_FROM=OPENID-1" in path.read_text(encoding="utf-8")
+
+    def test_read_env_value_skips_comments_and_blank(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("# QQBOT_ALLOW_FROM=old\n\nQQBOT_APP_ID=190\nQQBOT_ALLOW_FROM=u1\n",
+                        encoding="utf-8")
+        assert qb.read_env_value(str(path), "QQBOT_ALLOW_FROM") == "u1"
+        assert qb.read_env_value(str(path), "QQBOT_APP_SECRET") == ""
+        assert qb.read_env_value(str(tmp_path / "nope"), "QQBOT_ALLOW_FROM") == ""
+
 
 class TestCliOutput:
     """CLI 的落盘/回显策略：默认不回显密钥，选择不落盘时必须给出出口。"""
 
-    def _run(self, monkeypatch, capsys, argv, secret="SECRET-XYZ"):
+    def _run(self, monkeypatch, capsys, argv, secret="SECRET-XYZ", allow_from=""):
         import sys
         import types
         monkeypatch.setitem(sys.modules, "qrcode", types.ModuleType("qrcode"))
@@ -110,7 +124,8 @@ class TestCliOutput:
             "app_id": "1903204272", "app_secret": secret, "user_openid": "u"})
         written = []
         monkeypatch.setattr(qb, "save_env",
-                            lambda a, s, p: written.append((a, s, p)) or p)
+                            lambda a, s, p, extra=None: written.append((a, s, p, extra)) or p)
+        monkeypatch.setattr(qb, "read_env_value", lambda p, k: allow_from)
         code = qb.main(argv)
         return code, capsys.readouterr().out, written
 
@@ -138,6 +153,15 @@ class TestCliOutput:
         import inspect
         src = inspect.getsource(qb.main)
         assert "--print-secret" in src
+
+    def test_bind_writes_openid_into_allow_from(self, monkeypatch, capsys):
+        code, out, written = self._run(monkeypatch, capsys, [])
+        assert code == 0 and written[0][3] == {"QQBOT_ALLOW_FROM": "u"}, "绑定人应自动进白名单"
+        assert "白名单" in out
+
+    def test_existing_allow_from_is_not_overwritten(self, monkeypatch, capsys):
+        code, out, written = self._run(monkeypatch, capsys, [], allow_from="someone-else")
+        assert code == 0 and written[0][3] == {}, "已有白名单不许被绑定流程覆盖"
 
 
 class TestBindFlow:
