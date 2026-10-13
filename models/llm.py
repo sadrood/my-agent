@@ -69,16 +69,27 @@ def unwrap_raw_arguments(arguments: dict, max_depth: int = 5) -> dict:
 RETRYABLE_ERRORS = ()
 
 
+class _EmptyChoicesError(RuntimeError):
+    """HTTP 200 但 choices 为空：网关把上游错误（实测是 TPM/RPM 打满）包成了正常响应。
+
+    单看 HTTP 状态码它是"成功"，所以必须显式识别——否则不会触发限流等待，也不会切备用端点。
+    """
+
+
+def _require_choices(response) -> None:
+    """非流式响应必须有候选；没有就抛 _EmptyChoicesError（按限流处理）。"""
+    if not (getattr(response, "choices", None) or []):
+        raise _EmptyChoicesError(
+            "上游返回了空的 choices（HTTP 200 但无候选）。常见原因：网关把限流/上游错误"
+            "包成了 200，或内容被安全策略拦截。请调整输入后重试。")
+
+
 def _first_choice_message(response):
     """取第一个 choice 及其 message。
     网关会把上游错误包成 HTTP 200 + {"choices": []}，直接取下标只会抛晦涩的 IndexError。
     """
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        raise RuntimeError(
-            "上游返回了空的 choices（HTTP 200 但无候选）。常见原因：内容被安全策略"
-            "拦截，或网关把上游错误包成了 200。请调整输入后重试。")
-    choice = choices[0]
+    _require_choices(response)
+    choice = response.choices[0]
     message = getattr(choice, "message", None)
     if message is None:
         raise RuntimeError("上游返回的 choice 缺少 message 字段（响应不完整）。")
@@ -89,6 +100,9 @@ def _is_minute_quota_error(e: Exception) -> bool:
     """是否为按分钟窗口重置的配额耗尽（TPM/RPM）。
     这类错误必须跨过分钟边界再试——退避 6s/12s 会全部撞在同一窗口内。
     """
+    if isinstance(e, _EmptyChoicesError):
+        # 实测这类"200 空响应"就是 TPM/RPM 打满的伪装（sensenova 网关），同样要跨分钟窗口
+        return True
     msg = str(e).lower()
     return any(k in msg for k in (
         "tpm", "rpm", "tokens per minute", "requests per minute",
@@ -421,11 +435,33 @@ class LLM:
             t0 = time.time()
             try:
                 resp = self.client.chat.completions.create(**kwargs)
+                # "200 + 空 choices"本质是限流：必须在循环内拦下，才走得到等待与切端点
+                if not kwargs.get("stream"):
+                    _require_choices(resp)
                 self.success_labels.add(self._active_meta()["label"])
                 self.auth_retry_left = self.auth_retry_max
                 self._notify_health(dict(self._active_meta(), event="call_ok",
                                          seconds=round(time.time() - t0, 3)))
                 return resp
+            except _EmptyChoicesError as e:
+                # 网关把限流包成 200：按限流处理（等下一分钟窗口 → 备用端点），
+                # 否则只是原地重试到"连续失败"，整轮任务判死（表现为"跑了很久没反应"）
+                last_error = e
+                if attempt >= self.max_retries:
+                    self._notify_health(dict(self._active_meta(), event="quota_limited",
+                                             wait=0.0, attempt=attempt + 1,
+                                             message=str(e)[:120]))
+                    if switches < max_switches and self._failover(kwargs, "空 choices（限流伪装）"):
+                        switches += 1
+                        attempt = 0        # 换了端点：重新给满重试预算
+                        continue
+                    raise
+                wait = self._quota_wait(e, attempt)
+                self._notify_health(dict(self._active_meta(), event="quota_limited",
+                                         wait=round(wait, 1), attempt=attempt + 1,
+                                         message=str(e)[:120]))
+                time.sleep(wait)
+                attempt += 1
             except _bad_request_error() as e:
                 if _is_quota_error(e):
                     # 429 变体（包装成 invalid_request_error 的配额错误）：提取不出参数名，直接 raise 会导致零重试——按限流处理
