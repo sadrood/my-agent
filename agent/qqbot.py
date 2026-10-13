@@ -1025,11 +1025,13 @@ def main(argv: Optional[list] = None) -> int:
                         help="扫码绑定机器人并写进 .env（细节参数见 python -m agent.qqbot_bind --help）")
     # 只在显式传参（或 __main__ 传 sys.argv[1:]）时解析：main() 也会被测试/宿主直接调用，
     # 那时去解析 pytest 的 argv 会直接报"无法识别的参数"。
-    args = parser.parse_args(list(argv) if argv is not None else [])
-    config = QQBotConfig()
-    if args.bind:
+    raw = list(argv) if argv is not None else []
+    if "--bind" in raw:
+        # 绑定链路的参数（--timeout/--png/--no-write-env…）交给 qqbot_bind 自己解析
         from agent.qqbot_bind import main as bind_main
-        return bind_main([])
+        return bind_main([a for a in raw if a != "--bind"])
+    args = parser.parse_args(raw)
+    config = QQBotConfig()
     if args.probe_media:
         print(QQBotBridge(config).probe_media())
         return 0

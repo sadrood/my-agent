@@ -280,6 +280,20 @@ class TestEntryPoint:
         assert qqbot.main() == 2
         assert "QQBOT_APP_ID" in capsys.readouterr().out
 
+    def test_bind_passes_extra_args_through(self, monkeypatch):
+        from agent import qqbot, qqbot_bind
+        seen = []
+        monkeypatch.setattr(qqbot_bind, "main", lambda argv: seen.append(list(argv)) or 0)
+        assert qqbot.main(["--bind", "--timeout", "60"]) == 0
+        assert seen == [["--timeout", "60"]], "--bind 之外的参数该透传给绑定流程"
+
+    def test_bind_alone_passes_empty_argv(self, monkeypatch):
+        from agent import qqbot, qqbot_bind
+        seen = []
+        monkeypatch.setattr(qqbot_bind, "main", lambda argv: seen.append(list(argv)) or 0)
+        assert qqbot.main(["--bind"]) == 0
+        assert seen == [[]]
+
     def test_lazy_import_keeps_other_features_working(self):
         """没装 qq-botpy 时也不该在导入期炸掉（只有真正建客户端才需要它）。"""
         import importlib.util
