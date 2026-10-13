@@ -290,3 +290,68 @@ class TestCredentialCheck:
         self._fake_requests(monkeypatch, {"code": 100016, "message": "invalid appid or secret"})
         ok, detail = qb.check_credentials("190", "SEC")
         assert not ok and "100016" in detail
+
+
+
+class TestVerifyEnv:
+    """`--verify`：不扫码也能说清"这对凭据到底能不能用"。
+
+    关键一条：读的是 .env **文件**。原来读 `os.getenv`，于是长驻进程里出现"文件明明有、
+    自检说没有"，把人带偏成"腾讯拒绝了凭据"（真实原因是那个进程的环境变量是旧的）。
+    """
+
+    def _env_file(self, tmp_path, text):
+        path = tmp_path / ".env"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_env_duplicate_keys(self, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("QQBOT_APP_ID=1\nQQBOT_APP_ID=2\n# QQBOT_APP_ID=3\nOTHER=1\n",
+                        encoding="utf-8")
+        assert qb.env_duplicate_keys(str(path)) == ["QQBOT_APP_ID"]
+        assert qb.env_duplicate_keys(str(tmp_path / "nope")) == []
+
+    def test_uses_the_file_even_when_env_is_empty(self, monkeypatch, tmp_path, capsys):
+        """环境里空着（或还是旧值）时，自检要按文件里的凭据去验 —— 这正是它存在的意义。"""
+        import config
+        monkeypatch.setattr(config, "QQBOT_CONFIG", {"app_id": "", "app_secret": ""})
+        seen = []
+        monkeypatch.setattr(qb, "check_credentials",
+                            lambda a, s, **kw: (seen.append((a, s)) or (True, "通了")))
+        path = self._env_file(tmp_path, "QQBOT_APP_ID=190\nQQBOT_APP_SECRET=SEC\n")
+        assert qb.verify_env(path) == 0
+        assert seen == [("190", "SEC")], "要拿文件里的值去验，不是环境变量里的"
+
+    def test_warns_when_env_differs_from_file(self, monkeypatch, tmp_path, capsys):
+        import config
+        monkeypatch.setattr(config, "QQBOT_CONFIG", {"app_id": "190", "app_secret": ""})
+        monkeypatch.setattr(qb, "check_credentials", lambda a, s, **kw: (True, "通了"))
+        path = self._env_file(tmp_path, "QQBOT_APP_ID=190\nQQBOT_APP_SECRET=NEWSECRET\n")
+        assert qb.verify_env(path) == 0
+        out = capsys.readouterr().out
+        assert "不一致" in out and "新开的终端" in out, "这个坑必须点出来，否则又要查一小时"
+        assert "NEWSECRET" not in out, "别把 secret 本体打出来"
+
+    def test_silent_when_env_matches_file(self, monkeypatch, tmp_path, capsys):
+        import config
+        monkeypatch.setattr(config, "QQBOT_CONFIG", {"app_id": "190", "app_secret": "SEC"})
+        monkeypatch.setattr(qb, "check_credentials", lambda a, s, **kw: (True, "通了"))
+        path = self._env_file(tmp_path, "QQBOT_APP_ID=190\nQQBOT_APP_SECRET=SEC\n")
+        qb.verify_env(path)
+        assert "不一致" not in capsys.readouterr().out
+
+    def test_returns_4_when_rejected(self, monkeypatch, tmp_path, capsys):
+        import config
+        monkeypatch.setattr(config, "QQBOT_CONFIG", {"app_id": "190", "app_secret": "SEC"})
+        monkeypatch.setattr(qb, "check_credentials", lambda a, s, **kw: (False, "100016 不认"))
+        path = self._env_file(tmp_path, "QQBOT_APP_ID=190\nQQBOT_APP_SECRET=SEC\n")
+        assert qb.verify_env(path) == 4
+        assert "100016" in capsys.readouterr().out
+
+    def test_returns_2_without_credentials_in_file(self, monkeypatch, tmp_path, capsys):
+        import config
+        monkeypatch.setattr(config, "QQBOT_CONFIG", {"app_id": "190", "app_secret": "SEC"})
+        path = self._env_file(tmp_path, "# 还没绑\n")
+        assert qb.verify_env(path) == 2
+        assert "--bind" in capsys.readouterr().out
