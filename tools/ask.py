@@ -49,6 +49,7 @@ class AskTool(BaseTool):
     #: 阻塞等人，不能和其他工具并跑（否则问题会和别的输出/输入缠在一起）
     parallel_safe = False
 
+    @property
     def schema(self) -> Dict[str, Any]:
         return {
             "type": "object",

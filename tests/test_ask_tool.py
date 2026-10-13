@@ -115,7 +115,7 @@ class TestToolMetadata:
     def test_low_risk_and_auto_approval(self):
         t = _tool()
         assert t.risk_level == "low" and t.approval == "auto"
-        assert "question" in t.schema()["properties"]
+        assert "question" in t.schema["properties"]
 
 
 class TestGuideMatchesExistingPolicy:
