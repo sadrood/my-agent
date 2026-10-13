@@ -1053,3 +1053,63 @@ class TestEndlessQuotaRetry:
 
         assert 2 <= llm.calls <= 4, "预算有限时按预算停；保底次数仍要满足"
         assert result["stop_reason"] == "interrupted"
+
+
+class TestVerifyGate:
+    """宿主侧收尾验证闸门：改过代码/配置却没跑测试 → 推一次先验证（不依赖模型自愿列清单）。"""
+
+    def _run(self, monkeypatch, script, tests_ran: bool):
+        # 用 think（无副作用、必成功）当"改了代码"的载体：打桩 _changed_file 让它算作改代码，
+        # 打桩 _tests_ran 控制"是否跑过测试"，从而不真跑测试套件。
+        monkeypatch.setattr(Executor, "_changed_file",
+                            staticmethod(lambda name, args: "a.py" if name == "think" else ""))
+        monkeypatch.setattr(Executor, "_tests_ran", staticmethod(lambda log: tests_ran))
+        ex = _make_executor(
+            FakeLLM(script),
+            approval=ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False),
+        )
+        events = []
+        result = ex.execute_goal_loop(**_loop_args(),
+                                      event_sink=lambda t, d: events.append((t, d)))
+        return result, events
+
+    def test_nudges_when_code_changed_without_tests(self, monkeypatch):
+        result, events = self._run(monkeypatch, [
+            LLMToolResponse(content="", tool_calls=[ToolCall("1", "think", {"thought": "x"})]),
+            LLMToolResponse(content="做完了"),
+            LLMToolResponse(content="已运行测试，完成"),
+        ], tests_ran=False)
+        assert any(t == "verify_nudge" for t, _ in events)
+        assert "已运行测试" in result["output"]
+
+    def test_no_nudge_when_tests_ran(self, monkeypatch):
+        result, events = self._run(monkeypatch, [
+            LLMToolResponse(content="", tool_calls=[ToolCall("1", "think", {"thought": "x"})]),
+            LLMToolResponse(content="测试通过，完成"),
+        ], tests_ran=True)
+        assert not any(t == "verify_nudge" for t, _ in events)
+
+    def test_no_nudge_when_no_code_changed(self, monkeypatch):
+        # 没改任何代码 → 不该插手（浏览器/内容类任务不受影响）
+        monkeypatch.setattr(Executor, "_changed_file", staticmethod(lambda name, args: ""))
+        ex = _make_executor(FakeLLM([LLMToolResponse(content="纯文字交付，完成")]))
+        events = []
+        ex.execute_goal_loop(**_loop_args(), event_sink=lambda t, d: events.append((t, d)))
+        assert not any(t == "verify_nudge" for t, _ in events)
+
+
+class TestVerifyGateHelpers:
+    def test_is_code_path(self):
+        assert Executor._is_code_path("src/a.py") is True
+        assert Executor._is_code_path("cfg/app.YAML") is True
+        assert Executor._is_code_path("notes.txt") is False
+        assert Executor._is_code_path("") is False
+
+    def test_tests_ran_matches_test_command(self):
+        from config import TEST_CONFIG
+        needle = str(TEST_CONFIG.get("command", "")).strip().split()[0]
+        hit = [{"name": "terminal", "arguments": {"command": "run " + needle + " now"}}]
+        miss = [{"name": "terminal", "arguments": {"command": "ZZZ_unrelated_ZZZ"}}]
+        assert Executor._tests_ran(hit) is True
+        assert Executor._tests_ran(miss) is False
+        assert Executor._tests_ran([]) is False

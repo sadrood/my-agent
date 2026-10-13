@@ -47,3 +47,20 @@ def test_tick_triggers_due(isolate):
     assert due[0]["goal"] == "到期任务"
     # next_run 已推进
     assert mod.list_tasks()[0]["next_run"] > time.time()
+
+
+def test_restart_after_stop(isolate):
+    """stop() 后再 start() 必须真的起新线程（旧实现 _stop 未清 → 新线程立刻退出，重启变空操作）。"""
+    mod.stop()
+    try:
+        mod.start(lambda t: None)
+        time.sleep(0.1)               # 留出时间：若 _stop 未清，线程会在毫秒内自行退出
+        assert mod._thread is not None and mod._thread.is_alive()
+        mod.stop()
+        assert mod._thread is None
+
+        mod.start(lambda t: None)     # 第二次启动：若 _stop 未清，线程会立即退出
+        time.sleep(0.1)
+        assert mod._thread is not None and mod._thread.is_alive()
+    finally:
+        mod.stop()

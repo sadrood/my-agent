@@ -10,10 +10,12 @@ import agent.ui_theme as ui
 
 
 @pytest.fixture
-def buf():
+def buf(monkeypatch):
     b = io.StringIO()
     console = Console(file=b, force_terminal=False, highlight=False)
-    ui.get_console = lambda use_rich=True: console  # monkeypatch 全局 console
+    # 必须走 monkeypatch：直接赋值不会还原，会把 ui.get_console 永久指向这个 StringIO
+    # console，后面按字母序跑的 test_status_bar 就抓不到 capsys 输出了。
+    monkeypatch.setattr(ui, "get_console", lambda use_rich=True: console)
     return b
 
 
@@ -230,3 +232,255 @@ class TestStreamingMarkdown:
         r.flush()
         out = buf.getvalue()
         assert "普通文本，没有标记" in out
+
+
+class TestShortcutsAndDiffPanel:
+    """`/shortcuts` 面板与 `/diff` 渲染（对应同类 CLI 的 ? 面板与 /diff mod）。"""
+
+    def test_shortcuts_panel_lists_input_and_commands(self, buf):
+        ui.print_shortcuts(use_rich=False)
+        out = buf.getvalue()
+        assert "Ctrl+C" in out
+        assert "/diff" in out and "/help" in out
+        assert "多行" in out or "换行" in out
+
+    def test_shortcuts_panel_rich_renders_table(self, buf):
+        ui.print_shortcuts(use_rich=True)
+        out = buf.getvalue()
+        assert "输入" in out and "查看" in out
+        assert "/sessions" in out
+
+    def test_git_diff_marks_lines(self, buf):
+        ui.print_git_diff("diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")
+        out = buf.getvalue()
+        assert "@@" in out and "-a" in out and "+b" in out
+        assert "diff --git" in out
+
+    def test_git_diff_empty_worktree(self, buf):
+        ui.print_git_diff("")
+        assert "无未提交改动" in buf.getvalue()
+
+    def test_git_diff_truncates_long_output(self, buf):
+        ui.print_git_diff("\n".join(f"+line{i}" for i in range(30)), max_lines=5)
+        out = buf.getvalue()
+        assert "line4" in out and "line5" not in out
+        assert "共 30 行" in out
+
+    def test_git_diff_brackets_not_eaten_by_markup(self, buf):
+        """diff 内容里的 `[doc](url)` 不能被 rich 当标签吞掉（Text 渲染）。"""
+        ui.print_git_diff('+const x = "[doc](http://a)"\n')
+        assert "[doc](http://a)" in buf.getvalue()
+
+
+class TestFoldedCallsLine:
+    """连续同名调用的汇总行（折叠后替代逐次输出）。"""
+
+    def test_rich_line_has_counts(self, buf):
+        ui.print_folded_calls("terminal", 10, 7)
+        out = buf.getvalue()
+        assert "terminal" in out and "×10" in out and "7 次同名调用已折叠" in out
+
+    def test_plain_text_mode(self, buf):
+        ui.print_folded_calls("terminal", 10, 7, use_rich=False)
+        assert "⏺ terminal ×10" in buf.getvalue()
+
+    def test_key_with_special_chars_rendered_raw(self, buf):
+        """工具名前缀可能带团队 worker 归属，不能被 markup 当标签吞掉。"""
+        ui.print_folded_calls("团队·w1 ▸ terminal", 6, 3)
+        assert "团队·w1 ▸ terminal" in buf.getvalue()
+
+
+class TestTranscriptPanel:
+    """`/transcript` 事件回放（折叠摘要的展开入口）。"""
+
+    def _events(self):
+        from agent.rollout import RolloutEvent
+        return [
+            RolloutEvent(ts=1700000000.0, event_type="run_start", data={"goal": "跑测试"}),
+            RolloutEvent(ts=1700000001.0, event_type="tool_call",
+                         data={"tool": "terminal", "args": {"command": "pytest -q"}}),
+            RolloutEvent(ts=1700000002.0, event_type="tool_result",
+                         data={"tool": "terminal", "success": True, "output": "3 passed"}),
+            RolloutEvent(ts=1700000003.0, event_type="tool_result",
+                         data={"tool": "terminal", "success": False, "error": "boom"}),
+        ]
+
+    def test_renders_calls_and_results(self, buf):
+        ui.print_transcript(self._events())
+        out = buf.getvalue()
+        assert "terminal" in out and "pytest -q" in out      # 完整参数
+        assert "3 passed" in out                             # 输出正文
+        assert "✗" in out and "boom" in out                  # 失败标记
+        assert "事件回放 4/4 条" in out
+
+    def test_limit_keeps_latest_and_says_omitted(self, buf):
+        ui.print_transcript(self._events(), max_events=2)
+        out = buf.getvalue()
+        assert "事件回放 2/4 条" in out and "更早 2 条省略" in out
+        assert "pytest -q" not in out
+
+    def test_accepts_jsonl_dict_events(self, buf):
+        """磁盘上的 rollout jsonl 是 dict 形态，同样要能回放。"""
+        ui.print_transcript([{"ts": 1700000001.0, "event": "tool_call",
+                              "data": {"tool": "file", "input": '{"operation": "read"}'}}])
+        assert "file" in buf.getvalue()
+
+    def test_empty_events_hint(self, buf):
+        ui.print_transcript([])
+        assert "没有 rollout 事件" in buf.getvalue()
+
+    def test_brackets_in_args_not_eaten(self, buf):
+        ui.print_transcript([{"ts": 1.0, "event": "tool_call",
+                              "data": {"tool": "browser", "args": {"sel": "[data-x](y)"}}}])
+        assert "[data-x](y)" in buf.getvalue()
+
+    def test_plain_text_mode(self, buf):
+        ui.print_transcript(self._events(), use_rich=False, max_events=3)
+        out = buf.getvalue()
+        assert "事件回放 3/4 条" in out and "3 passed" in out
+
+
+class TestThemePanel:
+    """`/theme` 切换配色（会话内生效，不动 .env）。"""
+
+    def test_theme_list_and_switch(self, buf):
+        assert ui.current_theme() == "claude", "出厂默认是 claude（暗灰克制冷）"
+        ui.set_theme("mono")
+        try:
+            assert ui.current_theme() == "mono"
+            assert ui.COLORS["primary"] == ui.THEMES["mono"]["primary"]
+            ui.print_theme()
+            out = buf.getvalue()
+            assert "● mono" in out and "default" in out and "claude" in out
+        finally:
+            ui.set_theme("claude")
+
+    def test_colors_dict_identity_is_kept(self):
+        """原地更新 COLORS：别的模块 `from agent.ui_theme import COLORS` 的引用跟着变。"""
+        ref = ui.COLORS
+        ui.set_theme("ocean")
+        try:
+            assert ref["primary"] == ui.THEMES["ocean"]["primary"]
+        finally:
+            ui.set_theme("claude")
+
+    def test_console_rebuilt_on_switch(self):
+        before = ui.get_console()
+        ui.set_theme("paper")
+        try:
+            assert ui.get_console() is not before
+        finally:
+            ui.set_theme("claude")
+
+    def test_unknown_theme_raises(self):
+        with pytest.raises(ValueError):
+            ui.set_theme("nope")
+
+    def test_all_themes_have_full_palette(self):
+        keys = set(ui.THEMES["default"])
+        for name, colors in ui.THEMES.items():
+            assert set(colors) == keys, name
+
+
+class TestPermissionLabels:
+    """状态栏的中文档名（取值来自 approval 的预设）。"""
+
+    @pytest.mark.parametrize("raw,zh", [("never", "不拦"), ("on-request", "逐次确认"),
+                                        ("untrusted", "全禁"), ("on-failure", "失败时确认")])
+    def test_policy_labels(self, raw, zh):
+        assert ui.label_policy(raw) == zh
+
+    def test_unknown_policy_passthrough(self):
+        assert ui.label_policy("whatever") == "whatever"
+        assert ui.label_policy("") == ""
+
+    def test_sandbox_labels_and_suffix(self):
+        assert ui.label_sandbox("read-only") == "只读"
+        assert ui.label_sandbox("workspace-write") == "可写"
+        assert ui.label_sandbox("danger-full-access") == "完全访问"
+        assert ui.label_sandbox("workspace-write+AppContainer") == "可写+AppContainer"
+
+    def test_approval_presets_are_all_labeled(self):
+        """新增权限档却没配中文名时这条会红。"""
+        from agent.approval import PERMISSION_PRESETS
+        for name, preset in PERMISSION_PRESETS.items():
+            assert ui.label_policy(preset["mode"]) != preset["mode"], name
+
+
+class TestClaudeLikeChrome:
+    """对齐同类 CLI 的三件：输入框、待办清单、截断提示。"""
+
+    def test_prompt_box_borders_are_aligned(self, buf):
+        from rich.cells import cell_len
+        ui.print_prompt_box_top()
+        ui.print_prompt_box_bottom()
+        lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+        assert len(lines) == 2, lines
+        top, bottom = lines
+        assert top.startswith("╭") and top.endswith("╮")
+        assert bottom.startswith("╰") and bottom.endswith("╯")
+        assert "/shortcuts" in bottom, "提示语应嵌在下框线上"
+        # 中文提示语的**显示宽度**要按双宽算，否则右边缘对不齐
+        assert cell_len(top) == cell_len(bottom), (cell_len(top), cell_len(bottom))
+
+    def test_prompt_box_plain_mode_is_ascii(self, buf):
+        ui.print_prompt_box_top(use_rich=False)
+        out = buf.getvalue()
+        assert out.startswith("+") and "╭" not in out
+
+    def test_todos_use_the_same_glyphs_as_the_tool(self, buf):
+        ui.print_todos([{"id": "t1", "title": "甲", "status": "done"},
+                        {"id": "t2", "title": "乙", "status": "in_progress"},
+                        {"id": "t3", "title": "丙", "status": "todo"}])
+        out = buf.getvalue()
+        assert "待办 1/3" in out
+        assert "✓" in out and "▶" in out and "○" in out
+
+    def test_todos_empty_says_cleared(self, buf):
+        ui.print_todos([])
+        assert "已清空" in buf.getvalue()
+
+    def test_tool_result_truncation_points_to_transcript(self, buf):
+        ui.print_tool_result(True, "\n".join(f"行{i}" for i in range(9)))
+        assert "/transcript" in buf.getvalue(), "截断了要告诉用户去哪看完整输出"
+
+    def test_tips_rotate_over_the_whole_pool(self):
+        seen = [ui._pick_tip() for _ in range(len(ui._TIPS))]
+        assert set(seen) == set(ui._TIPS), "轮换应覆盖全部提示"
+
+
+class TestPromptBoxPreDraw:
+    """能移光标时，敲字前就把框画全（否则打字期间框没封口）。"""
+
+    def test_open_draws_full_frame_then_returns_cursor(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: True)
+        assert ui.prompt_box_open() is True
+        out = buf.getvalue()
+        lines = [l for l in out.splitlines() if l.strip()]
+        # 三段式：上框线 / 空输入行（只有左竖线）/ 下框线
+        assert lines[0].startswith("╭") and lines[0].endswith("╮")
+        assert lines[1].strip() == "│"
+        assert lines[2].startswith("╰") and lines[2].endswith("╯")
+        # 光标移回输入行（上移 2 行、右移 2 列）——没有这一步，用户就打在框下面了
+        assert "\x1b[2A\x1b[2C" in out, out[-40:]
+
+    def test_open_falls_back_when_cursor_cannot_move(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: False)
+        assert ui.prompt_box_open() is False
+        out = buf.getvalue()
+        assert out.count("\n") == 1                 # 只画了上框线
+        assert "╭" in out and "╰" not in out
+        assert "\x1b[" not in out                   # 不许往不支持 ANSI 的终端里灌转义序列
+
+    def test_close_clears_line_then_repaints_border(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: True)
+        ui.prompt_box_close(drawn=True)
+        out = buf.getvalue()
+        assert "\r\x1b[K" in out, "收框前要回到行首清行，否则会和用户输入挤在同一行"
+        assert "╰" in out and "/shortcuts" in out
+
+    def test_close_plain_path_still_draws_border(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: False)
+        ui.prompt_box_close(drawn=False)
+        out = buf.getvalue()
+        assert "╰" in out and "\x1b[" not in out

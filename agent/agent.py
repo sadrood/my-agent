@@ -587,9 +587,12 @@ class Agent:
             llm = build_supervisor_llm(self.llm)
             sup = Supervisor(llm=llm)
             if llm is self.llm and SUPERVISOR_CONFIG.get("model"):
-                # 没配独立端点 → 与执行同一个模型，效果打折，但明确告诉用户
-                sup.config = dict(sup.config)
-                sup.config["same_vendor_warning"] = True
+                # 没配独立端点 → 与执行同一个模型，"独立复核"退化为自我确认；必须让用户看见，不能静默降级。
+                print_warning(
+                    "监管者未配置独立端点（SUPERVISOR_BASE_URL / SUPERVISOR_API_KEY 为空），"
+                    "将用主模型自评完成度，复核强度打折。",
+                    use_rich=self.config.verbose,
+                )
             return sup
         except Exception:                       # noqa: BLE001
             return None
@@ -1641,6 +1644,10 @@ class Agent:
         if self.tool_manager.get_tool("computer") is not None:
             from models.prompts import COMPUTER_USE_PROMPT_GUIDE
             system_prompt += "\n\n" + COMPUTER_USE_PROMPT_GUIDE
+        # 能中途向用户提问时，明确"什么时候该问、什么时候别问"
+        if self.tool_manager.get_tool("ask_user") is not None:
+            from models.prompts import ASK_USER_PROMPT_GUIDE
+            system_prompt += "\n\n" + ASK_USER_PROMPT_GUIDE
         # 多引擎协作：内置 Agent 主动委托外部 CLI 引擎（delegate 工具存在时）
         if self.tool_manager.get_tool("delegate") is not None:
             from models.prompts import DELEGATE_GUIDE_PROMPT
@@ -1656,13 +1663,14 @@ class Agent:
             )
         if self.instructions_text:
             system_prompt += f"\n\n## 项目指令（必须遵守）\n{self.instructions_text}"
-        # Skills 技能包（技能包式能力扩展）：放在 AGENTS.md 指令之后；未启用 / 无技能 / 异常时静默，不影响主流程。
+        # Skills 技能包按 goal 渲染（命中哪条技能随目标变）→ 放进**首条用户消息**而非系统提示：
+        # 系统提示才可能逐字稳定、命中提示缓存，把每目标都变的内容混进去会整段失效。未启用/无技能/异常时静默。
         try:
             skills_prompt = self._render_skills_prompt(planning_goal)
         except Exception:
             skills_prompt = ""
         if skills_prompt:
-            system_prompt += "\n\n" + skills_prompt
+            context_text = (skills_prompt + "\n\n" + context_text).strip() if context_text else skills_prompt
 
         # 5. 单循环执行（流式渲染：思考转圈 → 逐字输出答案，加粗实时生效）
         self._stop_turn_spinner()            # 连带收掉上一轮可能残留的秒表线程
@@ -1803,6 +1811,9 @@ class Agent:
         if not self.config.verbose:
             return
         try:
+            from config import TUI_CONFIG
+            if not TUI_CONFIG.get("thinking_indicator", True):
+                return
             self._stop_turn_spinner()
             if sys.stdout.isatty():
                 console = get_console(True)
@@ -1820,7 +1831,13 @@ class Agent:
         def _tick():
             while not stop.wait(SPINNER_TICK_SECONDS):
                 try:
-                    spinner.update(f"✻ 思考中… {_time.monotonic() - started:.1f}s")
+                    # 带上 token 计数与中断方式（对齐同类 CLI 的状态行）：
+                    # 光有秒数看不出"在等什么"，而"↑N ↓M"能让人判断是不是长上下文在慢慢爬。
+                    m = getattr(self, "metrics", None)
+                    up = int(getattr(m, "input_tokens", 0) or 0)
+                    down = int(getattr(m, "output_tokens", 0) or 0)
+                    spinner.update(f"✻ 思考中… {_time.monotonic() - started:.1f}s"
+                                   f" · ↑{up} ↓{down} · Ctrl+C 中断")
                 except Exception:
                     return                      # 转圈已被外部停掉，秒表自行退出
 
@@ -1870,11 +1887,14 @@ class Agent:
         """构造常驻状态栏聚合文本（token 计数/沙箱等级/审批策略）。"""
         try:
             from agent.sandbox import sandbox_enabled
+            from agent.ui_theme import label_policy, label_sandbox
             metrics = getattr(self, "metrics", None)
             if metrics is None:
                 return ""
-            policy = self.approval.mode if self.approval is not None else ""
-            sandbox_label = self.approval.sandbox_mode if self.approval is not None else ""
+            # 状态栏显示中文档名（取值仍是 approval 的原值，未知值原样透传）
+            policy = label_policy(self.approval.mode if self.approval is not None else "")
+            sandbox_label = label_sandbox(
+                self.approval.sandbox_mode if self.approval is not None else "")
             if sandbox_enabled():
                 # OS 级沙箱（AppContainer）开启时叠加显示
                 sandbox_label = (
@@ -1900,6 +1920,48 @@ class Agent:
             )
         except Exception:
             pass
+
+    #: 参与"连续同名调用折叠"的工具：只挑高频读取类，避免长任务刷屏。
+    #: edit / 写文件（diff 是要看的内容）、团队 worker 的调用（带归属）都不参与。
+    _FOLDABLE_TOOLS = frozenset({"terminal", "python", "file", "browser", "web_search", "ocr"})
+
+    def _fold_repeat_call(self, tool: str) -> bool:
+        """累计连续同名调用；返回 True = 本次调用行（及其结果摘要）折叠不打印。"""
+        from config import TUI_CONFIG
+        after = int(TUI_CONFIG.get("repeat_call_fold_after", 3) or 0)
+        if tool not in self._FOLDABLE_TOOLS or after <= 0:
+            return False
+        st = getattr(self, "_repeat_call_state", None)
+        if st is None:
+            st = self._repeat_call_state = {"tool": "", "seen": 0, "folded": 0, "pending": 0}
+        if tool != st["tool"]:
+            self._flush_repeat_calls()
+            st["tool"] = tool
+            st["seen"] = 0
+        st["seen"] += 1
+        if st["seen"] <= after:
+            return False
+        st["folded"] += 1
+        st["pending"] += 1
+        return True
+
+    def _flush_repeat_calls(self) -> None:
+        """一串连续同名调用结束（换工具 / 换轮 / 收工）：把折叠掉的补成一行汇总。"""
+        st = getattr(self, "_repeat_call_state", None)
+        if not st:
+            return
+        if st["folded"]:
+            from agent.ui_theme import print_folded_calls
+            print_folded_calls(st["tool"], st["seen"], st["folded"])
+        st["tool"], st["seen"], st["folded"], st["pending"] = "", 0, 0, 0
+
+    def _consume_folded_result(self) -> bool:
+        """折叠掉的那次调用的结果摘要一并折叠（返回 True = 跳过打印）。"""
+        st = getattr(self, "_repeat_call_state", None)
+        if st and st["pending"]:
+            st["pending"] -= 1
+            return True
+        return False
 
     def _loop_tool_event(self, event_type: str, data: dict):
         """单循环模式事件回调：转发 Dashboard + 主流风格终端渲染。"""
@@ -1944,10 +2006,20 @@ class Agent:
         if not self.config.verbose:
             return
 
+        if event_type in ("run_end", "turn_start"):
+            # 一串连续同名调用到此为止：折叠掉的那些在这里补一行汇总
+            self._flush_repeat_calls()
+
         from agent.ui_theme import (
             print_tool_call, print_tool_result, print_edit_call,
             print_edit_diff, print_unified_diff, print_file_write_call,
+            print_todos,
         )
+
+        # 待办清单：todo 工具每次变更都会发这个事件，UI 刷新一遍（✓/▶/○ 与工具输出同字形）
+        if event_type == "todo":
+            print_todos(data.get("todos") or [])
+            return
 
         # 团队成员/子 agent 的归属：面板靠 worker 字段，命令行靠这行前缀
         worker = str(data.get("worker") or "").strip()
@@ -1964,9 +2036,13 @@ class Agent:
             args = data.get("arguments") or data.get("args") or {}
             if not isinstance(args, dict):
                 args = {"input": args}
+            _is_write = (tool == "file"
+                         and str(args.get("operation", "") or "").lower() == "write")
+            if not tag and tool != "edit" and not _is_write and self._fold_repeat_call(tool):
+                return                       # 连续同名调用：本金与结果摘要都不再逐次打印
             if tool == "edit":
                 print_edit_call(args.get("file_path", ""))
-            elif tool == "file" and str(args.get("operation", "") or "").lower() == "write":
+            elif _is_write:
                 print_file_write_call(args.get("path", ""))
             else:
                 print_tool_call(f"{tag}{tool}", args)
@@ -1988,6 +2064,8 @@ class Agent:
             tool = str(data.get("tool") or data.get("name") or "")
             if tool == "think":
                 return
+            if self._consume_folded_result():
+                return                       # 调用行已被折叠，结果摘要一起折叠
             args = data.get("arguments") or data.get("args") or {}
             if not isinstance(args, dict):
                 args = {}

@@ -59,7 +59,7 @@ class _FakeSession:
         self._data = data
         self._fmt = fmt
 
-    def screenshot(self):
+    def screenshot(self, only_live=False):
         return self._data, self._fmt
 
 
@@ -266,3 +266,80 @@ class TestPanelEndpoints:
         b = QQBotBridge(_cfg(public_frame_url="https://cdn/x.png"))
         text = b.probe_media()
         assert "base64" in text and "https://cdn/x.png" in text
+
+
+class TestStatusFrameNeedsLiveBrowser:
+    """任务收尾那张"顺带一发"的截图：没开着浏览器就跳过，绝不为了拍白图启动浏览器。
+
+    实测踩到：用户只问了一句"你叫什么名字"，任务收尾仍然去抓画面——而抓图会顺手把
+    Chromium 启动起来（`BrowserTool._ensure_page` 没有活页面就 launch），于是用户收到
+    一张空白网页截图，机器还白起了一个浏览器。
+    """
+
+    def _run(self, bridge, **kw):
+        asyncio.run(bridge.send_frame("c:me", **kw))
+        asyncio.set_event_loop(asyncio.new_event_loop())   # 别把线程的 loop 留空（botpy 要用）
+
+    def test_no_live_page_skips_silently(self):
+        api = _FakeAPI()
+        b = _bridge_with_api(api)
+        b.sessions["c:me"] = _FakeSession(data="")         # 没有活页面 → 抓不到帧
+        captured = []
+
+        async def _capture(key, text):
+            captured.append(text)
+
+        b._send_plain = _capture
+        self._run(b, only_live=True)
+        assert captured == [], "顺带发的状态图没内容就该静默跳过，别说话"
+        assert not api.sent, "更不该发图"
+
+    def test_explicit_shot_still_explains(self):
+        """/shot 是用户主动要图：没画面必须说清楚（别被上面那条顺手改没了）。"""
+        api = _FakeAPI()
+        b = _bridge_with_api(api)
+        b.sessions["c:me"] = _FakeSession(data="")
+        captured = []
+
+        async def _capture(key, text):
+            captured.append(text)
+
+        b._send_plain = _capture
+        self._run(b, only_live=False)
+        assert captured and "没有可用画面" in captured[0]
+
+    def test_only_live_never_touches_the_tool(self):
+        """only_live 且没有活页面时，连 browser 工具都不该调（调了就会启动浏览器）。"""
+        from agent.qqbot import UserSession
+
+        called = []
+
+        class _Tool:
+            def has_live_page(self):
+                return False
+
+            def execute(self, cmd):
+                called.append(cmd)
+                return type("R", (), {"success": True, "metadata": {}})()
+
+        class _TM:
+            def get_tool(self, name):
+                return _Tool() if name == "browser" else None
+
+        session = UserSession("c:me")
+        session.agent = type("A", (), {"tool_manager": _TM()})()
+        assert session.screenshot(only_live=True) == ("", "png")
+        assert called == [], "没活页面就不该调用 screenshot_base64"
+
+    def test_task_end_asks_for_live_only(self, monkeypatch):
+        """任务收尾那次调度必须带 only_live=True。"""
+        b = _bridge_with_api(_FakeAPI())
+        seen = []
+        monkeypatch.setattr(b, "schedule_frame",
+                            lambda key, only_live=False: seen.append(only_live))
+        session = b.sessions["c:me"]
+        session.preset = "ask"
+        session.run = lambda goal: "我叫小悟"
+        session.session_name = lambda: "qq-2402347b61"
+        assert b._execute_task(session, "c:me", "你叫什么名字", kind="task") == "我叫小悟"
+        assert seen == [True]

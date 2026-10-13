@@ -151,11 +151,11 @@ BROWSER_EGO_HEADLESS=false              # true = 无窗口运行，完全不弹�
 > 两个进程同时驱动同一浏览器会互相抢标签页：各自用不同任务空间才互不干扰。
 > **不想被浏览器弹窗打扰**：会话隔离 + 快路径让它只在"真要换页面"时抢前台；`BROWSER_EGO_HEADLESS=true` 则完全不弹（代价是看不到页面）。
 
-## 🧰 工具（26 个）
+## 🧰 工具（27 个）
 
-**常驻 15** —— 每轮都在提示词里，拿来就用：
+**常驻 16** —— 每轮都在提示词里，拿来就用：
 
-`terminal` · `file` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context`
+`terminal` · `file` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context` · `ask_user`
 
 **按需装载 10** —— schema 不进提示词，用时先装载（也支持目标关键词自动装载）：
 

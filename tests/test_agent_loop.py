@@ -3,6 +3,8 @@ Agent 单循环模式（exec_mode="loop"）集成测试：FakeLLM，无网络。
 """
 import json
 
+import pytest
+
 from agent import Agent, AgentConfig
 from agent.memory import Memory
 from models.llm import LLMToolResponse, ToolCall
@@ -235,7 +237,11 @@ class TestTurnSpinnerTimer:
         agent._stop_turn_spinner()
 
         assert len(spinner.texts) >= 2, "秒表应持续刷新"
-        assert spinner.texts[0].endswith("s"), f"应带秒数，实际 {spinner.texts[0]!r}"
+        text = spinner.texts[0]
+        assert "思考中" in text and "s" in text, f"应带秒数，实际 {text!r}"
+        # token 计数与中断方式是后来补的：光有秒数看不出"在等什么"
+        assert "↑" in text and "↓" in text, f"应带 token 计数，实际 {text!r}"
+        assert "Ctrl+C" in text, f"应告诉用户怎么中断，实际 {text!r}"
         assert spinner.stopped is True
 
     def test_timer_thread_is_reclaimed(self):
@@ -264,3 +270,181 @@ class TestTurnSpinnerTimer:
         agent._stop_turn_spinner()
         agent._stop_turn_spinner()          # 再来一次也不该抛
         assert agent._turn_spinner_timer is None
+
+
+class TestRepeatedCallFolding:
+    """连续同名工具调用折叠成一行汇总（长任务防刷屏）。
+
+    edit / 写文件 / 团队 worker 的调用不参与折叠：那些是要看的内容。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_console(self, monkeypatch):
+        """重置 ui_theme 的 Console 单例，让输出进入当前测试的 capsys。"""
+        import agent.ui_theme as ui
+        monkeypatch.setattr(ui, "_console", None)
+        monkeypatch.setattr(ui, "_legacy_console", None)
+        yield
+
+    @staticmethod
+    def _make_agent(tmp_path, verbose=True):
+        config = AgentConfig(
+            verbose=verbose,
+            rollout_enabled=False,
+            guardian_enabled=False,
+            approval_policy="never",
+            sandbox_mode="workspace-write",
+            approval_interactive=False,
+            instructions_enabled=False,
+            enable_vision=False,
+            enable_frame_compare=False,
+            enable_anomaly_detect=False,
+            snapshot_enabled=False,
+            checkpoint_per_tool=False,
+            repomap_enabled=False,
+        )
+        return Agent(llm=FakeLLM([]), tool_manager=ToolManager(),
+                     memory=Memory(db_path=str(tmp_path)), config=config)
+
+    @staticmethod
+    def _call(agent, tool, **args):
+        agent._loop_tool_event("tool_call", {"tool": tool, "arguments": args})
+
+    def test_first_three_printed_fourth_onwards_folded(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(6):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        out = capsys.readouterr().out
+
+        assert "cmd0" in out and "cmd2" in out
+        assert "cmd3" not in out and "cmd5" not in out
+
+    def test_summary_line_when_switching_tool(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(6):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        capsys.readouterr()                      # 丢掉前半段，只看换工具时的那一行
+        self._call(agent, "file", operation="read", path="a.py")
+        out = capsys.readouterr().out
+
+        assert "×6" in out and "3 次同名调用已折叠" in out
+        assert "a.py" in out
+
+    def test_run_end_flushes_summary(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 2)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(5):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        capsys.readouterr()
+        agent._loop_tool_event("run_end", {"status": "completed"})
+
+        assert "×5" in capsys.readouterr().out
+
+    def test_short_streak_has_no_summary(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(3):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        agent._loop_tool_event("run_end", {"status": "completed"})
+        out = capsys.readouterr().out
+
+        assert "cmd0" in out and "cmd2" in out
+        assert "已折叠" not in out
+
+    def test_folded_call_result_is_suppressed(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(5):
+            self._call(agent, "terminal", command=f"cmd{i}")
+            agent._loop_tool_event("tool_result",
+                                   {"tool": "terminal", "success": True, "output": f"out{i}"})
+        out = capsys.readouterr().out
+
+        assert "out0" in out and "out2" in out
+        assert "out3" not in out and "out4" not in out
+
+    def test_edit_never_folds(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(6):
+            self._call(agent, "edit", file_path=f"f{i}.py", old_string="a", new_string="b")
+        out = capsys.readouterr().out
+
+        assert out.count("✏") == 6, "edit 的每一处改动都要看得见"
+        assert "已折叠" not in out
+
+    def test_file_write_never_folds(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 3)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(6):
+            self._call(agent, "file", operation="write", path=f"w{i}.txt")
+        out = capsys.readouterr().out
+
+        assert "w5.txt" in out
+        assert "已折叠" not in out
+
+    def test_team_worker_calls_never_fold(self, tmp_path, capsys, monkeypatch):
+        """带归属前缀的团队调用不折叠（前缀是分辨谁在干活的关键）。"""
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 2)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(4):
+            agent._loop_tool_event("tool_call", {"tool": "terminal",
+                                                 "arguments": {"command": f"cmd{i}"},
+                                                 "worker": "w1"})
+        out = capsys.readouterr().out
+
+        assert "cmd3" in out and "已折叠" not in out
+
+    def test_zero_disables_folding(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 0)
+        agent = self._make_agent(tmp_path)
+
+        for i in range(8):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        agent._loop_tool_event("run_end", {"status": "completed"})
+        out = capsys.readouterr().out
+
+        assert "cmd7" in out and "已折叠" not in out
+
+    def test_folding_does_not_swallow_events(self, tmp_path, monkeypatch, capsys):
+        """折叠只影响终端渲染；事件照旧发给 Dashboard/监听方。"""
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 2)
+        agent = self._make_agent(tmp_path)
+        seen = []
+        monkeypatch.setattr(agent, "_emit", lambda et, d: seen.append(et))
+
+        for i in range(5):
+            self._call(agent, "terminal", command=f"cmd{i}")
+
+        assert seen == ["tool_call"] * 5
+
+    def test_non_verbose_is_silent(self, tmp_path, capsys, monkeypatch):
+        from config import TUI_CONFIG
+        monkeypatch.setitem(TUI_CONFIG, "repeat_call_fold_after", 2)
+        agent = self._make_agent(tmp_path, verbose=False)
+
+        for i in range(5):
+            self._call(agent, "terminal", command=f"cmd{i}")
+        agent._loop_tool_event("run_end", {"status": "completed"})
+
+        assert capsys.readouterr().out == ""

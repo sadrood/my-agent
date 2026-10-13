@@ -140,7 +140,8 @@ class Rollout:
 
     @staticmethod
     def messages_token_estimate(messages: List[dict]) -> int:
-        """估计消息列表的总 token 数。"""
+        """估计消息列表的总 token 数：含每条消息的协议开销与 tool_calls 负载。
+        主循环压缩与 rollout 压缩共用这一个口径，避免两套估算对同一阈值给出不同结果。"""
         total = 0
         for m in messages:
             content = m.get("content", "")
@@ -148,8 +149,14 @@ class Rollout:
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "text":
                         total += estimate_tokens(part.get("text", ""))
-            elif isinstance(content, str):
-                total += estimate_tokens(content)
+            elif content:
+                total += estimate_tokens(str(content))
+            tc = m.get("tool_calls")
+            if tc:
+                try:
+                    total += estimate_tokens(json.dumps(tc, ensure_ascii=False))
+                except Exception:               # noqa: BLE001 — 非可序列化时退化为整体字符串
+                    total += estimate_tokens(str(tc))
             total += 4  # 每条消息的协议开销
         return total
 

@@ -8,6 +8,8 @@ import re
 import time
 from typing import Optional
 
+from agent.atomic_io import atomic_write_text
+
 POINTER_RE = re.compile(r"\[已折叠\s+#([A-Za-z0-9_\-]+)\s+([\d.]+)KB\]")
 
 
@@ -86,14 +88,12 @@ def path_for(handle: str) -> str:
 
 
 def save(handle: str, text: str) -> str:
-    """把全文写盘；返回路径（失败返回空串，调用方仍可用指针，只是取不回）。"""
+    """把全文写盘（原子写，不留半截）；返回路径（失败返回空串，调用方仍可用指针，只是取不回）。"""
     path = path_for(handle)
     if not path:
         return ""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        atomic_write_text(path, text)
         return path
     except OSError:
         return ""

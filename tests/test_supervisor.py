@@ -291,3 +291,30 @@ class TestVisibility:
         m.turns, m.steps, m.supervisor_rounds = 13, 20, 1
         line = m.render_line()
         assert "13 轮" in line and "监管者推回 1 次" in line
+
+
+class TestFirstTurnReview:
+    """min_turns 是 1 基语义：默认值 1 表示从第 1 轮起就复核。"""
+
+    def test_supervisor_runs_on_first_turn(self):
+        """首轮就收尾也要复核（旧实现 turn 从 0 起，被 off-by-one 整轮漏掉——那正是最该审的"纯文字交付长任务"）。"""
+        judge = FakeJudge(_v("done", "ok"))
+        sup = Supervisor(llm=judge)
+        llm = FakeLLM([LLMToolResponse(content="三章都写完了。")])   # 第 0 轮就给最终答案
+        ex = _make_executor(llm, supervisor=sup)
+        ex.execute_goal_loop(goal="写一部三章的小说，每章至少 300 字，全部写完再统一交付",
+                             system_prompt="你是写作助手")
+        assert judge.calls, "首轮收尾同样要复核"
+
+    def test_min_turns_one_based(self):
+        """min_turns=2 表示前 1 轮不审（不是前 2 轮）。"""
+        judge = FakeJudge(_v("done", "ok"))
+        sup = Supervisor(llm=judge, config={"enabled": True, "max_rounds": 3, "timeout": 30,
+                                            "model": "", "min_turns": 2})
+        # 第 0 轮用一次工具调用（否则拿到最终答案就收尾了），第 1 轮才收尾
+        llm = FakeLLM([_tool_call(1),
+                       LLMToolResponse(content="第 2 稿。")])      # 第 1 轮（1 基第 2 轮）：应复核
+        ex = _make_executor(llm, supervisor=sup)
+        ex.execute_goal_loop(goal="写一部三章的小说，每章至少 300 字，全部写完再统一交付",
+                             system_prompt="你是写作助手")
+        assert judge.calls, "第 2 轮（1 基）起应复核"

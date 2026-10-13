@@ -8,6 +8,8 @@ import threading
 import time
 import weakref
 
+from tools.proc_util import new_process_group_kwargs
+
 _IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -38,10 +40,7 @@ class TerminalSession:
             errors="replace",
             env=env,
         )
-        if _IS_WINDOWS:
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
+        kwargs.update(new_process_group_kwargs())
         if cwd:
             kwargs["cwd"] = cwd
         self._proc = subprocess.Popen([self._shell], **kwargs)

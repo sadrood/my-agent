@@ -123,9 +123,27 @@ def qr_png(url: str, path: str) -> str:
     return target
 
 
-def save_env(app_id: str, app_secret: str, env_path: str = ".env") -> str:
-    """把两个键写进 .env：已有行（含占位注释行）就地填，没有则追加；别处不动。"""
+def read_env_value(env_path: str, key: str) -> str:
+    """读 .env 里某键的当前值：注释行/空行跳过，没有就返回空串。"""
+    if not os.path.exists(env_path):
+        return ""
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            if name.strip() == key:
+                return value.strip()
+    return ""
+
+
+def save_env(app_id: str, app_secret: str, env_path: str = ".env",
+             extra: Optional[Dict[str, str]] = None) -> str:
+    """把键写进 .env：已有行（含占位注释行）就地填，没有则追加；别处不动。"""
     want = {"QQBOT_APP_ID": app_id, "QQBOT_APP_SECRET": app_secret}
+    if extra:
+        want.update({k: v for k, v in extra.items() if v})
     lines = []
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as fh:
@@ -146,6 +164,43 @@ def save_env(app_id: str, app_secret: str, env_path: str = ".env") -> str:
     with open(env_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return os.path.abspath(env_path)
+
+
+def check_credentials(app_id: str, secret: str,
+                      timeout: float = REQUEST_TIMEOUT) -> Tuple[bool, str]:
+    """拿这对凭据换一次 access_token：能换来才算真绑上（失败给人话，不抛异常）。
+
+    只用现行端点（botpy 用的那个）。早期频道机器人域名 `api.sgroup.qq.com` 早已不认这个
+    接口（实测回 11001），把它列进"挨个试"的清单只会让"凭据被拒"的假象更像真的。
+    """
+    import requests
+    try:
+        resp = requests.post("https://bots.qq.com/app/getAppAccessToken",
+                             json={"appId": str(app_id), "clientSecret": str(secret)},
+                             timeout=timeout)
+        data = resp.json()
+    except Exception as exc:                    # noqa: BLE001 —— 网络问题不该伪装成凭据问题
+        return False, f"自检没能连上腾讯（{exc}）"
+    if data.get("access_token"):
+        return True, "凭据自检通过：能换到 access_token"
+    return False, f"腾讯拒绝了这对凭据（{data.get('code')} {data.get('message')}）"
+
+
+def env_duplicate_keys(env_path: str, prefix: str = "QQBOT_") -> list:
+    """列出 .env 里重复出现的 QQBOT_* 键名（只看键，不取值）。"""
+    if not os.path.exists(env_path):
+        return []
+    seen, dupes = set(), []
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            if key.startswith(prefix) and key in seen and key not in dupes:
+                dupes.append(key)
+            seen.add(key)
+    return dupes
 
 
 def bind(source: str = DEFAULT_SOURCE, env: str = "production",
@@ -181,6 +236,39 @@ def bind(source: str = DEFAULT_SOURCE, env: str = "production",
             sleep(interval)
 
 
+def verify_env(env_path: str = ".env") -> int:
+    """不扫码：拿现有 .env 里的凭据做自检，顺带看有没有重复键。
+
+    读的是**文件**，不是 `os.getenv`：长驻进程（agent / 看板）会在启动那一刻把 .env
+    冻结进自己的环境，此后改 .env 都不生效。自检若跟着读环境变量，就会在文件明明有
+    secret 时报"配置里没有 QQBOT_APP_SECRET"，把人往"腾讯拒绝了凭据"上带偏。
+    """
+    app_id = read_env_value(env_path, "QQBOT_APP_ID")
+    secret = read_env_value(env_path, "QQBOT_APP_SECRET")
+    dupes = env_duplicate_keys(env_path)
+    if dupes:
+        print(f"⚠ {env_path} 里这些键重复出现，读到的未必是你要的那行：{', '.join(dupes)}")
+    if not app_id or not secret:
+        print(f"{env_path} 里没有 QQBOT_APP_ID / QQBOT_APP_SECRET。")
+        print("先跑 `python -m agent.qqbot --bind` 扫码绑定。")
+        return 2
+    # 环境变量和文件不一致 = 典型"这个进程是旧启动的"：桥读的是环境变量，必须点出来
+    from config import QQBOT_CONFIG as cfg
+    env_app_id = str(cfg.get("app_id") or "")
+    env_secret = str(cfg.get("app_secret") or "")
+    if (env_app_id, env_secret) != (app_id, secret):
+        print("⚠ 环境变量里的 QQBOT_* 与文件不一致 —— 当前进程读到的不是这份文件里的值。")
+        print(f"   文件：AppID={app_id}，AppSecret {len(secret)} 位")
+        print(f"   环境：AppID={env_app_id or '(空)'}，"
+              f"AppSecret {'(空)' if not env_secret else str(len(env_secret)) + ' 位'}")
+        print(f"   → 从**新开的终端**启动桥，或重启那个长驻 agent；"
+              f"否则改 {env_path} 也不会生效。")
+    print(f"AppID={app_id}")
+    ok, detail = check_credentials(app_id, secret)
+    print(("✔ " if ok else "⚠ ") + detail)
+    return 0 if ok else 4
+
+
 def main(argv: Optional[list] = None) -> int:
     """`python -m agent.qqbot --bind`：打印二维码，扫完把密钥写进 .env。"""
     import argparse
@@ -195,7 +283,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--no-write-env", action="store_true", help="只显示二维码，不落盘")
     parser.add_argument("--print-secret", action="store_true",
                         help="配合 --no-write-env：把 AppSecret 打到终端（会进日志，谨慎）")
+    parser.add_argument("--verify", action="store_true",
+                        help="不扫码：只用现有 .env 里的凭据做一次自检")
     args = parser.parse_args(list(argv) if argv is not None else [])
+
+    if args.verify:
+        return verify_env(args.env_file)
 
     try:
         import qrcode  # noqa: F401  —— 二维码是本命令唯一的展示手段
@@ -229,9 +322,22 @@ def main(argv: Optional[list] = None) -> int:
         else:
             print("AppSecret 未落盘也未回显；需要它请加 --print-secret 再跑一次")
     else:
-        save_env(result["app_id"], result["app_secret"], args.env_file)
+        extra: Dict[str, str] = {}
+        openid = str(result.get("user_openid") or "")
+        if openid and not read_env_value(args.env_file, "QQBOT_ALLOW_FROM"):
+            # 绑定人就是第一个使用者：顺手进白名单，省掉"发消息被拒→抄 openid"这一步。
+            extra["QQBOT_ALLOW_FROM"] = openid
+        save_env(result["app_id"], result["app_secret"], args.env_file, extra=extra)
         print(f"绑定成功：AppID={result['app_id']}"
               f"，AppSecret 已写入 {args.env_file}（不回显）")
+        if extra:
+            print(f"白名单已写入 QQBOT_ALLOW_FROM={openid}（绑定人本人）")
+        ok, detail = check_credentials(result["app_id"], result["app_secret"])
+        print(("✔ " if ok else "⚠ ") + detail)
+        if not ok:
+            print("  这对凭据起不了桥：去 QQ 开放平台核对机器人的 AppID/AppSecret，"
+                  "或换一个属于你自己的机器人。")
+            return 4
     print("下一步：python -m agent.qqbot 启动桥（先 pip install qq-botpy）")
     return 0
 

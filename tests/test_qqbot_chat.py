@@ -1,4 +1,6 @@
 """QQ 桥的对话/任务双通道：寒暄不再被当成任务扔进工具循环。"""
+import asyncio
+
 import pytest
 
 from agent.qqbot import CHITCHAT_HINTS, QQBotBridge, QQBotConfig, UserSession, looks_like_chitchat
@@ -36,6 +38,16 @@ class TestChitchatDetection:
 
     def test_hints_cover_common_greetings(self):
         assert "你好" in CHITCHAT_HINTS and "hi" in CHITCHAT_HINTS
+
+    @pytest.mark.parametrize("text", ["你叫什么名字", "你会什么", "今天几号", "为什么这么慢",
+                                      "这是什么", "有空吗", "在哪儿设置"])
+    def test_short_questions_are_chitchat(self, text):
+        """短问句不该走任务通道：否则先回一句"已收到，开始执行…"，收尾还去抓一张画面。"""
+        assert looks_like_chitchat(text) is True
+
+    @pytest.mark.parametrize("text", ["重启服务", "把日志清掉", "帮我改一下配置", "跑一下测试"])
+    def test_short_orders_stay_tasks(self, text):
+        assert looks_like_chitchat(text) is False
 
 
 class TestChatPath:
@@ -207,3 +219,88 @@ class TestChatSession:
         session = UserSession("c:me")
         session.agent = type("A", (), {"llm": _FakeLLM("   ")})()
         assert session.chat("喂") == ""
+
+
+class TestAckMatchesActualRoute:
+    """回执判定（`plan`）必须和真正的路由一致。
+
+    踩过的坑：路由那侧已经按"短问句=闲聊"改了，回执那侧却还只看"是不是以 / 开头"，
+    于是用户问一句"你叫什么名字"，明明按聊天回答了，却先收到一条"已收到，开始执行…"。
+    两边必须同源，所以这里直接对照"实际走了哪条路"。
+    """
+
+    def _route(self, bridge, text, monkeypatch):
+        """实际走的是哪条路：返回 "chat" 或 "task"。"""
+        went = []
+
+        def _chat(session, key, goal):
+            went.append("chat")
+            return "ok"
+
+        def _task(session, key, goal, kind="task"):
+            went.append(kind)
+            return "ok"
+
+        monkeypatch.setattr(bridge, "_chat_once", _chat)
+        monkeypatch.setattr(bridge, "_execute_task", _task)
+        bridge.handle_text("me", text)
+        return went[0]
+
+    @pytest.mark.parametrize("text", ["你叫什么名字", "你好", "谢谢", "重启服务",
+                                      "把日志清掉", "帮我改一下配置", "这是什么"])
+    def test_plan_agrees_with_route(self, text, monkeypatch):
+        b = QQBotBridge(_cfg())
+        actual_task = self._route(b, text, monkeypatch) == "task"
+        planned_task = b.plan("me", text) == "task"
+        assert planned_task == actual_task, f"{text!r}：回执说是{'任务' if planned_task else '聊天'}，实际走了另一边"
+
+    def test_question_gets_no_ack(self):
+        b = QQBotBridge(_cfg())
+        assert b.plan("c:me", "你叫什么名字") == "chat", "短问句不该发任务回执"
+
+    def test_real_task_still_gets_ack(self):
+        b = QQBotBridge(_cfg())
+        assert b.plan("c:me", "把 output 里的临时文件删掉") == "task"
+
+    def test_chat_mode_never_gets_ack(self):
+        b = QQBotBridge(_cfg())
+        session = b._session_for("c:me")
+        session.mode = "chat"
+        assert b.plan("c:me", "把 output 里的临时文件删掉") == "chat"
+
+
+class TestC2cAckEndToEnd:
+    """端到端过一遍私聊入口：问一句名字，**不能**先收到"已收到，开始执行…"。
+
+    只测 `plan()` 不够 —— 上一轮就是"路由改了、回执没改"漏掉的，所以这里真的跑
+    `handle_c2c`，看实际发出去的消息里有没有那句回执。
+    """
+
+    def _run(self, bridge, text, monkeypatch):
+        sent = []
+
+        async def _send(key, body, *a, **kw):
+            sent.append(body)
+
+        monkeypatch.setattr(bridge, "_send", _send)
+        monkeypatch.setattr(bridge, "handle_text", lambda openid, body: "我叫小悟")
+        msg = type("M", (), {"author": type("A", (), {"user_openid": "me"})(),
+                             "content": text, "id": "M1"})()
+        asyncio.run(bridge.handle_c2c(msg))
+        asyncio.set_event_loop(asyncio.new_event_loop())   # 别把线程 loop 留空
+        return sent
+
+    def test_question_sends_only_the_answer(self, monkeypatch):
+        b = QQBotBridge(_cfg())
+        sent = self._run(b, "你叫什么名字", monkeypatch)
+        assert sent == ["我叫小悟"], f"只该有回答，实际发了：{sent}"
+
+    def test_real_task_still_acks(self, monkeypatch):
+        b = QQBotBridge(_cfg())
+        sent = self._run(b, "把 output 里的临时文件删掉", monkeypatch)
+        assert sent[0].startswith("已收到") and sent[-1] == "我叫小悟"
+
+    def test_ack_disabled_switch_silences_tasks(self, monkeypatch):
+        b = QQBotBridge(_cfg(ack="false"))
+        sent = self._run(b, "把 output 里的临时文件删掉", monkeypatch)
+        assert sent == ["我叫小悟"]

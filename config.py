@@ -622,7 +622,14 @@ APPROVAL_CONFIG = {
     # execpolicy DSL（结构化命令策略，白名单模式的升级）：true = 启用策略文件规则（deny 优先）。
     "exec_policy_enabled": os.getenv("APPROVAL_EXEC_POLICY_ENABLED", "false").lower() == "true",
     # 策略文件路径（规则数组 JSON，格式见 agent/execpolicy.py；文件缺失/损坏时 fail-open：规则置空并告警，回到内建策略，不放大权限）
-    "exec_policy_file": os.getenv("APPROVAL_EXEC_POLICY_FILE", "./execpolicy.json"),
+    "exec_policy_file": resolve_under_root(
+        os.getenv("APPROVAL_EXEC_POLICY_FILE", "./execpolicy.json")),
+    # 参数模式权限规则文件（JSON，格式见 agent/permission_rules.py：allow/ask/deny 三档 +
+    # Tool(pattern) 写法）。留空 = 无规则 = 与接入前行为完全一致。
+    # 显式给相对路径时锚定项目根：路径随 cwd 漂移会让规则**静默失效**。
+    "permission_rules_file": (
+        resolve_under_root(os.getenv("MY_AGENT_PERMISSION_RULES", ""))
+        if os.getenv("MY_AGENT_PERMISSION_RULES", "").strip() else ""),
 }
 
 # ============================================================
@@ -719,7 +726,7 @@ SUPERVISOR_CONFIG = {
     "timeout": float(os.getenv("SUPERVISOR_TIMEOUT", "30")),
     # 监管者异常/超时时是否放行（判完成）。默认 true：坏掉的裁判不该把任务卡死。
     "fail_open": os.getenv("SUPERVISOR_FAIL_OPEN", "true").lower() == "true",
-    # 低于该轮数就收尾时**不惊动监管者**（简单任务没必要多花一次调用）
+    # 收尾早于第几轮就不惊动监管者（1 基：1 = 从第 1 轮起就复核；2 = 前 1 轮不审）
     "min_turns": int(os.getenv("SUPERVISOR_MIN_TURNS", "1")),
     # 目标短于这么多字视为闲聊问答，不审（真任务一律复核）
     "min_goal_chars": int(os.getenv("SUPERVISOR_MIN_GOAL_CHARS", "12")),
@@ -912,6 +919,12 @@ TOOL_CONFIG = {
 TUI_CONFIG = {
     # verbose 模式下每轮模型调用前刷新状态栏（↑输入 ↓输出 token、缓存命中、沙箱等级、审批策略）。false 关闭，只保留运行结束的统计行。
     "status_bar": os.getenv("TUI_STATUS_BAR", "true").lower() == "true",
+    # 连续同名工具调用（terminal/file/python/browser…）超过这个次数后，调用行与结果摘要折叠成一行汇总（实时输出与 edit/写文件不受影响）；0 = 不折叠。
+    "repeat_call_fold_after": int(os.getenv("TUI_REPEAT_CALL_FOLD_AFTER", "3")),
+    # 输入框：把提示符包进一个画出来的框（╭─╮ / │ > / ╰─╯）。窄终端或不喜欢可关掉。
+    "input_box": os.getenv("TUI_INPUT_BOX", "true").lower() == "true",
+    # 等待模型时显示"✻ 思考中… Ns"占位行，首字到达即擦掉换成正文（非流式时等整轮结束）。
+    "thinking_indicator": os.getenv("TUI_THINKING_INDICATOR", "true").lower() == "true",
 }
 
 # ============================================================
@@ -944,15 +957,21 @@ TEST_CONFIG = {
 }
 
 # ============================================================
-# Hooks 配置（工具调用前后钩子，fail-open）
+# Hooks 配置（Python 回调 + 事件化外部命令 hook，均 fail-open）
 # ============================================================
 # enabled: 是否启用钩子（默认关闭，保持旧行为不变）
 # hooks_file: 钩子模块文件路径（Python 文件，可定义可选的
 #   on_pre_tool_use(tool_name, arguments) 与 on_post_tool_use(tool_name, result)；
-#   任何回调异常只记录警告，绝不阻断主流程）
+#   回调可返回决策 dict：{"decision": "block", "reason": "..."}）
+# events_file: 事件化 hook 配置（JSON）。事件名 PreToolUse / PostToolUse / Stop /
+#   SessionStart / UserPromptSubmit；子进程 stdin 收 JSON，退出码 2 阻断、1 只提醒、
+#   0 时读 stdout JSON（decision=block 或 hookSpecificOutput.permissionDecision）
+# event_timeout: 单个外部 hook 的超时秒数
 HOOKS_CONFIG = {
     "enabled": os.getenv("HOOKS_ENABLED", "false").lower() == "true",
     "hooks_file": os.getenv("HOOKS_FILE", "./hooks.py"),
+    "events_file": os.getenv("HOOKS_EVENTS_FILE", "./hooks.json"),
+    "event_timeout": float(os.getenv("HOOKS_EVENT_TIMEOUT", "10")),
 }
 
 # ============================================================

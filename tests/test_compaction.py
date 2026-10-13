@@ -55,10 +55,10 @@ def test_no_compact_under_threshold():
 
 
 def test_estimate_tokens():
-    """估算改为 CJK 感知（英文≈4 字符/token）。"""
+    """估算改为 CJK 感知（英文≈4 字符/token）+ 每条消息 4 token 协议开销。"""
     ex = _make(FakeLLM())
-    assert ex._estimate_tokens([{"role": "user", "content": "a" * 40}]) == 10
-    assert ex._estimate_tokens([{"role": "user", "content": "中" * 10}]) == 10
+    assert ex._estimate_tokens([{"role": "user", "content": "a" * 40}]) == 14    # 40/4 + 4
+    assert ex._estimate_tokens([{"role": "user", "content": "中" * 10}]) == 14    # 10 + 4
 
 
 def test_summarize_failure_is_safe():

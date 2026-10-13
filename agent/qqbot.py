@@ -44,15 +44,23 @@ ALLOWED_MODES = ("task", "chat")
 #: 短问候一律走对话、不当任务执行（"你好"被当成目标去开浏览器是最容易踩的坑）
 CHITCHAT_HINTS = ("你好", "您好", "hi", "hello", "hiya", "在吗", "在么", "在不在", "哈喽",
                   "嗨", "早", "早安", "晚安", "谢谢", "thanks", "thank you", "辛苦了")
+#: 短问句同样是闲聊："你叫什么名字""你会什么""今天几号"。
+#: 这类问题走任务通道的代价是：先回一句"已收到，开始执行…"，收尾还去抓一张画面 —— 用户
+#: 只是想问句话。真任务（"把临时文件删掉""重启服务"）通常更长或带动作词，不会被卷进来；
+#: 万一卷进来也不要紧：对话通道走的是同一个 agent 循环，工具照样能用，只是不来回执。
+CHITCHAT_QUESTION_HINTS = ("什么", "谁", "哪", "吗", "呢", "几", "怎么", "为什么",
+                           "多少", "是不是", "能不能", "有没有")
 CHITCHAT_MAX_CHARS = 12
 
 
 def looks_like_chitchat(text: str) -> bool:
-    """是不是一句寒暄：短 + 命中问候词。任务描述通常更长，不会被误判。"""
+    """是不是一句闲聊：短 + （问候词 或 问句词）。任务描述通常更长，不会被误判。"""
     body = str(text or "").strip().lower()
     if not body or len(body) > CHITCHAT_MAX_CHARS:
         return False
-    return any(hint in body for hint in CHITCHAT_HINTS)
+    if any(hint in body for hint in CHITCHAT_HINTS):
+        return True
+    return any(hint in body for hint in CHITCHAT_QUESTION_HINTS)
 
 
 def _chunk(text: str, limit: int = CHUNK_CHARS) -> List[str]:
@@ -266,8 +274,12 @@ class UserSession:
                     timer.cancel()
             return self.last_output
 
-    def screenshot(self) -> tuple:
-        """抓当前页面一帧，返回 (base64, 格式)；拿不到就返回 ("", "png")。"""
+    def screenshot(self, only_live: bool = False) -> tuple:
+        """抓当前页面一帧，返回 (base64, 格式)；拿不到就返回 ("", "png")。
+
+        only_live=True 只照"已经开着的"页面：抓图会顺手启动浏览器，而"任务收尾顺带发张
+        状态图"这种事不该为了拍一张空白页把 Chromium 拉起来（用户会收到一张白图）。
+        """
         agent = self.agent
         if agent is None:
             return "", "png"
@@ -276,6 +288,8 @@ class UserSession:
         except Exception:                            # noqa: BLE001
             tool = None
         if tool is None or not hasattr(tool, "execute"):
+            return "", "png"
+        if only_live and not getattr(tool, "has_live_page", lambda: False)():
             return "", "png"
         try:
             result = tool.execute("screenshot_base64")
@@ -403,12 +417,23 @@ class QQBotBridge:
         return str(text or "").strip()[: self.config.max_chars]
 
     def plan(self, key: str, text: str) -> str:
-        """纯判定（无副作用）：reject / approval / rate / slash / task —— 给回执用。"""
+        """纯判定（无副作用）：approval / rate / slash / chat / task —— 给回执用。
+
+        必须和默认路由（`handle_text` 里那条 `looks_like_chitchat(...) or mode == "chat"`）
+        得出同一个结论，否则会出现"实际按聊天回答了，却先发一条'已收到，开始执行…'"——
+        回执只在真的要开任务时才有意义。
+        """
         if key in self._pending:
             return "approval"
         if not self.rate_ok(key):
             return "rate"
-        return "slash" if str(text or "").strip().startswith("/") else "task"
+        body = str(text or "").strip()
+        if body.startswith("/"):
+            return "slash"
+        session = self.sessions.get(self.norm_key(key))
+        if looks_like_chitchat(body) or (session is not None and session.mode == "chat"):
+            return "chat"
+        return "task"
 
     def reject_hint(self, user_openid: str, group_openid: str = "") -> str:
         """被门控拦下时回什么：先说清是**哪一道**名单没过，并把要加的那串回显出来。"""
@@ -553,7 +578,7 @@ class QQBotBridge:
         link_sent = False
         while not stop.is_set():
             session = self.sessions.get(key)
-            data, fmt = session.screenshot() if session else ("", "png")
+            data, fmt = session.screenshot(only_live=True) if session else ("", "png")
             if data:
                 if not link_sent:
                     link_sent = True
@@ -566,19 +591,23 @@ class QQBotBridge:
                     pass                             # 推不过去不影响任务本身
             stop.wait(self.config.push_seconds)
 
-    def schedule_frame(self, key: str) -> None:
+    def schedule_frame(self, key: str, only_live: bool = False) -> None:
         """把"发一张当前截图到 QQ"排进事件循环（同步调用点用）。"""
         ctx = self._ctx_for(key)
         loop = ctx.get("loop") or self._loop
         if loop is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(self.send_frame(key), loop)
+            asyncio.run_coroutine_threadsafe(self.send_frame(key, only_live=only_live), loop)
         except Exception:                            # noqa: BLE001
             pass
 
-    async def send_frame(self, key: str) -> None:
-        """把当前页面截图发进 QQ 会话；哪条上传通道可用会自动选，失败会说明原因。"""
+    async def send_frame(self, key: str, only_live: bool = False) -> None:
+        """把当前页面截图发进 QQ 会话；哪条上传通道可用会自动选，失败会说明原因。
+
+        only_live=True 是"任务收尾顺带发一张"：没开着浏览器就静默跳过（不启动浏览器、
+        也不发消息），别为了一条无关任务给用户塞一张空白页截图。
+        """
         from agent import run_log
         key = self.norm_key(key)
         ctx = self._ctx_for(key)
@@ -586,8 +615,10 @@ class QQBotBridge:
         if api is None:
             return
         session = self.sessions.get(key)
-        data, fmt = session.screenshot() if session else ("", "png")
+        data, fmt = session.screenshot(only_live=only_live) if session else ("", "png")
         if not data:
+            if only_live:
+                return
             await self._send_plain(key, "现在没有可用画面（浏览器没打开或任务已经结束）。")
             return
         group_openid, user_openid = self.split_key(key)
@@ -935,7 +966,7 @@ class QQBotBridge:
                 pusher.wait(timeout=300.0)
                 pusher.set()
         if kind == "task" and self.config.send_frame and self._run_task is None:
-            self.schedule_frame(key)                 # B：任务收尾把画面发到 QQ
+            self.schedule_frame(key, only_live=True)   # B：任务收尾把画面发到 QQ（没开浏览器就跳过）
         return output or "（没有输出）"
 
     def _slash(self, key: str, goal: str) -> str:
@@ -982,6 +1013,25 @@ def _build_client(bridge: QQBotBridge):
             # QQ 群的 @机器人 事件（注意：on_at_message_create 是**频道**的事件，不是群）
             await bridge.handle_group_message(message)
 
+        async def on_group_add_robot(self, event):
+            """机器人被拉进群：把群 openid 打进日志。
+
+            群白名单要的是 `group_openid`（腾讯发的不透明 ID），**不是**人看的那个群号 ——
+            群号填进去永远匹配不上；而这个 ID 只有消息/事件送进来才拿得到。私聊那条
+            "第一次握手"（发句话就回你 openid）以前在群里没有对应物，就是这个事件。
+            """
+            from agent import run_log
+            group_openid = str(getattr(event, "group_openid", "") or "")
+            operator = str(getattr(event, "op_member_openid", "") or "")
+            run_log.log(f"QQ 机器人被拉进群：group_openid={group_openid}"
+                        f"（操作人 {operator[-6:]}）。要放行请把它加进 .env 的 "
+                        f"QQBOT_ALLOW_GROUPS 后重启桥。", "warn")
+
+        async def on_group_del_robot(self, event):
+            from agent import run_log
+            run_log.log(f"QQ 机器人被移出群：group_openid="
+                        f"{str(getattr(event, 'group_openid', '') or '')}", "warn")
+
         async def on_at_message_create(self, message):
             from agent import run_log
             run_log.log("收到频道(guild)消息：本桥不支持频道，已忽略", "warn")
@@ -1025,11 +1075,13 @@ def main(argv: Optional[list] = None) -> int:
                         help="扫码绑定机器人并写进 .env（细节参数见 python -m agent.qqbot_bind --help）")
     # 只在显式传参（或 __main__ 传 sys.argv[1:]）时解析：main() 也会被测试/宿主直接调用，
     # 那时去解析 pytest 的 argv 会直接报"无法识别的参数"。
-    args = parser.parse_args(list(argv) if argv is not None else [])
-    config = QQBotConfig()
-    if args.bind:
+    raw = list(argv) if argv is not None else []
+    if "--bind" in raw:
+        # 绑定链路的参数（--timeout/--png/--no-write-env…）交给 qqbot_bind 自己解析
         from agent.qqbot_bind import main as bind_main
-        return bind_main([])
+        return bind_main([a for a in raw if a != "--bind"])
+    args = parser.parse_args(raw)
+    config = QQBotConfig()
     if args.probe_media:
         print(QQBotBridge(config).probe_media())
         return 0
@@ -1050,7 +1102,13 @@ def main(argv: Optional[list] = None) -> int:
         bridge = QQBotBridge(config)
         client = _build_client(bridge)
         run_log.log(f"QQ 桥启动（{where}环境），等待消息")
-        client.run(appid=config.app_id, secret=config.secret)
+        try:
+            client.run(appid=config.app_id, secret=config.secret)
+        except RuntimeError as exc:      # 腾讯网关拒绝凭据时给一句人话，别甩 traceback
+            print(f"QQ 桥启动失败：腾讯拒绝了这对凭据（{exc}）。"
+                  "去 QQ 开放平台核对机器人的 AppID/AppSecret，"
+                  "或重跑 `python -m agent.qqbot --bind` 重新扫码绑定。")
+            return 3
     finally:
         _clear_pid_file(_pid_file)
     return 0

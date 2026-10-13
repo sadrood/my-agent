@@ -443,3 +443,60 @@ class TestEmptyChoicesGuard:
         choice, message = _first_choice_message(
             self._resp([self._Choice(self._Msg())]))
         assert message.content == "hi" and choice.finish_reason == "stop"
+
+
+class TestEmptyChoicesIsQuota:
+    """网关把限流包成 HTTP 200 + 空 choices：必须按限流处理（等窗口 / 切备用端点）。
+
+    实测（2026-10-13）：主端点 TPM 打满时返回的正是这种"200 但无候选"。此前它绕过
+    等待与切端点的全部逻辑，只在原地重试到"连续失败"，整轮任务判死——QQ 机器人桥上
+    表现为"收到消息却不回复"，看着像机器人没连上。
+    """
+
+    def _empty(self):
+        class _R:
+            choices = []
+        return _R()
+
+    def test_retries_with_wait_then_succeeds(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr("models.llm.time.sleep", lambda s: slept.append(s))
+        llm = make_llm([self._empty(), FakeResponse(content="终于答上了")])
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "终于答上了"
+        assert len(llm.client.chat.completions.calls) == 2
+        assert slept and slept[0] > 0, "空 choices 要等一等（对齐分钟窗口），不是原地硬怼"
+
+    def test_exhausted_raises_readable_error(self, monkeypatch):
+        monkeypatch.setattr("models.llm.time.sleep", lambda s: None)
+        llm = make_llm([self._empty(), self._empty(), self._empty()])
+        with pytest.raises(RuntimeError) as ei:
+            llm.chat([{"role": "user", "content": "hi"}])
+        assert "choices" in str(ei.value)
+
+    def test_tools_path_also_guarded(self, monkeypatch):
+        """chat_with_tools 走同一个重试循环，空 choices 同样要等到成功为止。"""
+        monkeypatch.setattr("models.llm.time.sleep", lambda s: None)
+        llm = make_llm([self._empty(), FakeResponse(content="带工具也好")])
+        resp = llm.chat_with_tools([{"role": "user", "content": "hi"}], tools=[])
+        assert resp.content == "带工具也好"
+
+    def test_counts_as_minute_window_quota(self):
+        from models.llm import _EmptyChoicesError, _is_minute_quota_error
+        assert _is_minute_quota_error(_EmptyChoicesError("空"))
+        assert _is_minute_quota_error(_EmptyChoicesError("x")), "要跨分钟窗口等，不能 2s 硬怼"
+
+    def test_falls_over_to_backup_endpoint(self, monkeypatch):
+        monkeypatch.setattr("models.llm.time.sleep", lambda s: None)
+        llm = make_llm([self._empty(), self._empty(), self._empty(),
+                        FakeResponse(content="备用端点答的")])
+        llm.max_retries = 2
+        llm.fallback_after = 1                     # 打满一次就切（.env 的实际配置）
+        llm.providers = [
+            {"model": "primary", "base_url": "http://a/v1", "api_key": "k", "label": "主端点",
+             "client": llm.client},
+            {"model": "backup", "base_url": "http://b/v1", "api_key": "k2", "label": "备用",
+             "client": llm.client},                # 预置 client：测试里不真连网
+        ]
+        assert llm.chat([{"role": "user", "content": "hi"}]) == "备用端点答的"
+        assert llm.provider_index == 1
+        assert llm.client.chat.completions.calls[-1]["model"] == "backup", "切端点要连模型名一起换"

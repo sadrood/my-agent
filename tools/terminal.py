@@ -18,9 +18,15 @@ import time
 from typing import Any, Dict
 
 from tools.base import BaseTool, StreamPreview, ToolResult
+from tools.proc_util import kill_process_tree, new_process_group_kwargs
+from tools.terminal_jobs import TerminalJobsMixin
 from tools.terminal_session import TerminalSessionManager
 
 _IS_WINDOWS = platform.system() == "Windows"
+
+#: 前台命令输出驻留上限（字符）：管道仍被持续 drain，只是超过后不再进内存，
+#: 防止刷屏命令先把内存撑爆、再被上层截断。真上限（回喂模型的）由工具管理器统一施加。
+_CAPTURE_LIMIT = 1_000_000
 
 # 沙箱（AppContainer）内「程序/资源不可访问」类失败的识别特征：命中即回喂引导文案，避免模型在沙箱限制下反复盲试同一类命令
 _SANDBOX_DENIED_MARKERS = (
@@ -129,7 +135,7 @@ def _win_unix_shim(command: str) -> str:
     return cmd
 
 
-class TerminalTool(BaseTool):
+class TerminalTool(TerminalJobsMixin, BaseTool):
     """终端命令执行工具（前台同步执行 + 后台任务管理）。"""
 
     risk_level: str = "medium"            # 具体风险在 execute 内按命令细化
@@ -440,11 +446,8 @@ class TerminalTool(BaseTool):
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **new_process_group_kwargs(),
             )
-            if _IS_WINDOWS:
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                popen_kwargs["start_new_session"] = True
 
             proc = subprocess.Popen(command, **popen_kwargs)
             with self._proc_lock:
@@ -457,11 +460,14 @@ class TerminalTool(BaseTool):
             preview = StreamPreview.from_config() if cb else None
 
             def _pump(pipe, sink):
+                total = 0
                 try:
                     # Windows cmd 默认 GBK：先按 UTF-8 解，失败回退 GBK（消除乱码）
                     for line in iter(pipe.readline, b""):
                         text = _decode_console(line)
-                        sink.append(text)
+                        if total < _CAPTURE_LIMIT:
+                            sink.append(text)
+                            total += len(text)
                         if cb and preview is not None:
                             try:
                                 if preview.allow():
@@ -568,177 +574,3 @@ class TerminalTool(BaseTool):
     # ================================================================
     # 后台任务：启动 / 列表 / 输出 / 结束
     # ================================================================
-
-    def _start_background(self, command: str) -> ToolResult:
-        """后台启动命令：stdout/stderr 重定向到临时日志文件，立即返回任务 ID。"""
-        out_path = ""
-        f_out = None
-        try:
-            job_id = f"job-{int(time.time() * 1000)}-{len(self._jobs) + 1}"
-            out_path = os.path.join(tempfile.gettempdir(), f"my_agent_bg_{job_id}.log")
-            f_out = open(out_path, "w", encoding="utf-8", errors="replace")
-            self._prune_jobs()          # 先按上限淘汰老任务（顺带关句柄、删日志）
-            if _IS_WINDOWS:
-                proc = subprocess.Popen(
-                    command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                )
-            else:
-                proc = subprocess.Popen(
-                    command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-        except Exception as e:
-            # Popen 抛错时句柄既不 close、也没进 `_jobs`（后续 _prune_jobs 永远碰不到它）—— 每失败一次就漏一个句柄 + 一个空日志文件。
-            if f_out is not None:
-                try:
-                    f_out.close()
-                except Exception:
-                    pass
-            if out_path:
-                try:
-                    os.remove(out_path)
-                except OSError:
-                    pass
-            return ToolResult(success=False, output="",
-                              error=f"后台启动失败: {str(e)[:200]}")
-        self._jobs[job_id] = {
-            "proc": proc, "command": command, "out_path": out_path,
-            "started": time.time(), "handle": f_out,   # 保存句柄，结束/淘汰时关闭
-        }
-        return ToolResult(
-            success=True,
-            output=(
-                f"已启动后台任务 {job_id}（PID {proc.pid}）。\n"
-                f'查看输出: 再调用 terminal 工具，command="bg output {job_id} 30"\n'
-                f'结束任务: command="bg kill {job_id}"'
-            ),
-        )
-
-    def _bg_dispatch(self, args: str) -> ToolResult:
-        parts = args.split()
-        sub = parts[0].lower() if parts else ""
-        if sub == "list":
-            return self._bg_list()
-        if sub == "output":
-            job_id = parts[1] if len(parts) > 1 else ""
-            tail = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 20
-            return self._bg_output(job_id, tail)
-        if sub == "kill":
-            return self._bg_kill(parts[1] if len(parts) > 1 else "")
-        return ToolResult(
-            success=False, output="",
-            error="用法: bg list · bg output <任务ID> [行数] · bg kill <任务ID>",
-        )
-
-    def _bg_list(self) -> ToolResult:
-        if not self._jobs:
-            return ToolResult(success=True, output="（无后台任务）")
-        lines = []
-        for job_id, job in self._jobs.items():
-            proc = job.get("proc")
-            alive = bool(proc is not None and proc.poll() is None)
-            status = "运行中" if alive else "已结束"
-            lines.append(f"- {job_id}  [{status}]  {job['command'][:80]}")
-        return ToolResult(success=True, output="后台任务:\n" + "\n".join(lines))
-
-    def _prune_jobs(self, max_jobs: int = 20):
-        """淘汰已结束的老任务：关掉日志句柄并删除临时日志。"""
-        if len(self._jobs) < max_jobs:
-            return
-        finished = [(jid, j) for jid, j in self._jobs.items()
-                    if (j.get("proc") is None or j["proc"].poll() is not None)]
-        finished.sort(key=lambda kv: kv[1].get("started", 0))
-        for jid, job in finished[:max(1, len(self._jobs) - max_jobs + 1)]:
-            self._finish_job(job)
-            self._jobs.pop(jid, None)
-
-    @staticmethod
-    def _release_job(job: dict):
-        """关闭日志句柄（幂等）。"""
-        fh = job.pop("handle", None)
-        if fh is not None:
-            try:
-                fh.close()
-            except Exception:
-                pass
-
-    @classmethod
-    def _finish_job(cls, job: dict):
-        """任务收尾：关句柄 + 删临时日志（幂等）。"""
-        cls._release_job(job)
-        path = job.get("out_path")
-        if path:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError:
-                pass
-
-    def _bg_output(self, job_id: str, tail: int = 20) -> ToolResult:
-        job = self._jobs.get(job_id or "")
-        if job is None:
-            return ToolResult(
-                success=False, output="",
-                error=f"后台任务不存在: {job_id or '（空）'}（用 bg list 查看）",
-            )
-        # 只读末尾：旧实现 f.readlines() 会把整个日志读进内存，一个刷屏的后台任务（几万行/上百 MB）足以把内存打满。
-        try:
-            with open(job["out_path"], "rb") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                block = min(size, 256 * 1024)      # 最多回读 256KB
-                f.seek(size - block)
-                raw = f.read(block)
-            text = raw.decode("utf-8", errors="replace")
-            lines = text.splitlines(keepends=True)
-        except Exception as e:
-            return ToolResult(success=False, output="",
-                              error=f"读取任务输出失败: {str(e)[:200]}")
-        shown = "".join(lines[-tail:]) or "（暂无输出）"
-        proc = job.get("proc")
-        alive = bool(proc is not None and proc.poll() is None)
-        suffix = "（任务仍在运行）" if alive else "（任务已结束）"
-        return ToolResult(
-            success=True,
-            output=f"{job_id} 最近 {tail} 行 {suffix}:\n{shown.rstrip()}",
-        )
-
-    def _bg_kill(self, job_id: str) -> ToolResult:
-        job = self._jobs.get(job_id or "")
-        if job is None:
-            return ToolResult(
-                success=False, output="",
-                error=f"后台任务不存在: {job_id or '（空）'}（用 bg list 查看）",
-            )
-        proc = job.get("proc")
-        if proc is None or proc.poll() is not None:
-            self._release_job(job)     # 幂等：关闭日志句柄（最常见的泄漏点）
-            return ToolResult(success=True, output=(
-                f"{job_id} 已结束（无需终止）。输出仍可查看: bg output {job_id}"))
-        try:
-            if _IS_WINDOWS:
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, timeout=15)
-            else:
-                import signal
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception as e:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return ToolResult(
-                success=True,
-                output=f"{job_id} 已请求终止（{str(e)[:120]}）。",
-            )
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            pass
-        # 关闭日志句柄（修掉"每个后台任务泄漏一个 fd"），但**保留日志文件**：杀掉任务后往往还要看输出排查原因。真正占地方的临时日志由_prune_jobs 在任务表超限时连同文件一起清掉（总量因此有界）。
-        self._release_job(job)
-        return ToolResult(
-            success=True,
-            output=f"{job_id} 已终止。输出仍可查看: bg output {job_id}",
-        )

@@ -211,7 +211,8 @@ def _parse_command(goal: str):
     """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
     for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model",
                 "config", "image", "memory", "compact", "goal", "consent", "permission",
-                "upgrade", "history", "rename", "title", "help"):
+                "upgrade", "history", "rename", "title", "help", "diff", "shortcuts",
+                "transcript", "theme"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -225,6 +226,117 @@ def _parse_command(goal: str):
             if not nxt.isascii():
                 return cmd, rest.strip()
     return None, None
+
+
+def _show_worktree_diff(c) -> None:
+    """`/diff`：把工作区未提交改动渲染出来（对应同类 CLI 的 /diff 面板）。"""
+    import subprocess
+
+    from agent.ui_theme import print_git_diff, print_info, print_warning
+    try:
+        st = subprocess.run(["git", "-c", "core.quotepath=false", "status",
+                             "--porcelain", "--untracked-files=all"],
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:       # git 没装 / 超时
+        print_warning(f"取工作区状态失败：{type(exc).__name__}: {exc}", use_rich=True)
+        return
+    if st.returncode != 0:
+        print_warning("当前目录不是 git 仓库（或 git 不可用），没有 diff 可看。", use_rich=True)
+        return
+
+    lines = [l for l in (st.stdout or "").splitlines() if l.strip()]
+    untracked = [l[3:] for l in lines if l.startswith("??")]
+    tracked = [l for l in lines if not l.startswith("??")]
+
+    if not lines:
+        print_info("工作区干净：没有未提交改动。", style="success")
+        return
+
+    print_info(f"工作区改动：{len(tracked)} 个已跟踪文件 · {len(untracked)} 个未跟踪文件",
+               style="primary")
+    try:
+        # Windows 下 text=True 默认按 GBK 解码，遇到 UTF-8 的 diff 内容会直接抛
+        # UnicodeDecodeError（stdout 变空 → 误报"无改动"），所以显式 utf-8 + 容错。
+        d = subprocess.run(["git", "-c", "core.quotepath=false", "diff",
+                            "--no-color", "--no-ext-diff"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        diff_text = d.stdout or ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        print_warning(f"取 diff 失败：{type(exc).__name__}: {exc}", use_rich=True)
+        return
+    print_git_diff(diff_text, use_rich=True)
+    for path in untracked[:20]:
+        c.print(f"[dim]  ?? {path}（新文件，git diff 不含内容）[/dim]")
+    if len(untracked) > 20:
+        c.print(f"[dim]  …（未跟踪文件共 {len(untracked)} 个）[/dim]")
+
+
+def _load_rollout_events(agent) -> list:
+    """取本轮回放用的事件：优先内存里的 rollout，回退到磁盘上最新的 jsonl。"""
+    import json
+    import os
+
+    from config import ROLLOUT_CONFIG, resolve_under_root
+
+    events = list(getattr(getattr(agent, "rollout", None), "events", None) or [])
+    if events:
+        return events
+    d = resolve_under_root(ROLLOUT_CONFIG.get("dir", "./rollouts"))
+    try:
+        files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")]
+    except OSError:
+        return []
+    if not files:
+        return []
+    out = []
+    try:
+        with open(max(files, key=os.path.getmtime), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:          # 半行写入（进程被杀）跳过即可
+                    continue
+    except OSError:
+        return []
+    return out
+
+
+def _show_transcript(agent, arg: str) -> None:
+    """`/transcript [条数|all]`：回放本轮每个工具的完整参数与输出（折叠摘要的展开入口）。"""
+    import agent.ui_theme as ui
+    limit = 40
+    arg = (arg or "").strip().lower()
+    if arg:
+        if arg == "all":
+            limit = 0
+        else:
+            try:
+                limit = max(0, int(arg))
+            except ValueError:
+                ui.print_warning("用法: /transcript [条数|all]（默认 40 条，all = 全部）",
+                                 use_rich=True)
+                return
+    ui.print_transcript(_load_rollout_events(agent), use_rich=True, max_events=limit)
+
+
+def _switch_theme(arg: str) -> None:
+    """`/theme [名]`：查看或切换终端配色（会话内生效）。"""
+    import agent.ui_theme as ui
+    name = (arg or "").strip().lower()
+    if not name:
+        ui.print_theme(use_rich=True)
+        return
+    try:
+        ui.set_theme(name)
+    except ValueError as exc:
+        ui.print_warning(str(exc), use_rich=True)
+        return
+    ui.print_info(f"已切换主题: {name}（本会话生效，不写 .env）", style="accent")
 
 
 def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
@@ -259,7 +371,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
     """
     from agent.ui_theme import (
         print_welcome, print_goodbye, print_final_result, print_info,
-        print_warning, get_console,
+        print_warning, get_console, print_shortcuts,
+        prompt_box_open, prompt_box_close, print_prompt_box_bottom,
     )
     from agent.session import SessionStore, generate_conversation_id
     from agent import input_reader
@@ -360,13 +473,28 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print()
 
         primary_prompt, continuation_prompt = _prompt_callbacks(c, _AgentPrompt)
+        # 输入框：画出来的框（╭─╮ / │ > / ╰─╯）。窄终端不画，避免框线折行。
+        from config import TUI_CONFIG
+        _box = (bool(TUI_CONFIG.get("input_box", True))
+                and int(getattr(c, "width", 0) or 0) >= 40)
 
         try:
+            # 预画整个框（上框线 / 空输入行 / 下框线）再把光标移回框内 —— 这样打字时框是
+            # **封口**的。终端吃不了 ANSI 光标移动时退回"只画上框线"，见 prompt_box_open。
+            _box_drawn = False
+            _box_mid_line = False
+            if _box:
+                _box_drawn = prompt_box_open()
+                _box_mid_line = not _box_drawn
             # 粘贴感知的多行读取：粘贴整块合并为一条；行尾 \ 续行
+            _p = ("> " if _box_drawn
+                  else ("│ [bold white]>[/bold white] " if _box else "[bold white]>[/bold white] "))
+            _c = ("│ [dim]… [/dim]" if _box else "[dim]… [/dim]")
             goal = input_reader.read_goal(
-                prompt_primary=lambda: primary_prompt("[bold white]>[/bold white] "),
-                prompt_continuation=lambda: continuation_prompt("[dim]… [/dim]"),
+                prompt_primary=lambda: primary_prompt(_p),
+                prompt_continuation=lambda: continuation_prompt(_c),
             )
+            _box_mid_line = False        # 用户按了回车：光标已在新行
         except (EOFError, KeyboardInterrupt):
             print_goodbye(use_rich=True)
             break
@@ -382,6 +510,15 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             print_warning("读取输入失败（%s）：%s%s"
                           % (type(exc).__name__, exc, _exc_where(exc)))
             continue
+        finally:
+            if _box:
+                if _box_drawn:
+                    prompt_box_close(True)          # 光标就在框内那行：原地重画下框线并换行
+                else:
+                    # 退回路径：光标还停在 `│ > ` 同一行时要先换行（异常/EOF，或 stdin 不是终端）
+                    if _box_mid_line or not bool(getattr(sys.stdin, "isatty", lambda: False)()):
+                        get_console(True).print()
+                    print_prompt_box_bottom()
         if goal is None:
             print_goodbye(use_rich=True)
             break
@@ -398,6 +535,18 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
 
         # 斜杠命令解析（容忍 /team任务 连写）
         cmd, cmd_args = _parse_command(goal)
+        if cmd == "shortcuts":
+            print_shortcuts(use_rich=True)
+            continue
+        if cmd == "diff":
+            _show_worktree_diff(c)
+            continue
+        if cmd == "transcript":
+            _show_transcript(agent, cmd_args)
+            continue
+        if cmd == "theme":
+            _switch_theme(cmd_args)
+            continue
         if cmd == "tools":
             from agent.ui_theme import print_step_header
             c.print()
@@ -732,6 +881,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
+                "/diff               工作区未提交改动（含本次 edit 的 diff）",
+                "/shortcuts          快捷键与常用命令面板",
+                "/transcript [N|all] 回放本轮工具调用与输出（折叠摘要的展开入口）",
+                "/theme [名字]       终端配色（default / ocean / paper / mono）",
                 "/sessions           历史对话列表",
                 "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
                 "/history [条数]      查看当前对话的历史记录（默认 20 条）",
@@ -750,7 +903,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/rename", "/title", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/rename", "/title", "/help", "/diff", "/shortcuts", "/theme", "/transcript"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
                 f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"

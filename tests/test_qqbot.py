@@ -64,6 +64,31 @@ class TestSecretsAndConfig:
         assert _build_client(QQBotBridge(_cfg())).http.is_sandbox is True
         assert _build_client(QQBotBridge(_cfg(sandbox="false"))).http.is_sandbox is False
 
+    def test_group_add_event_logs_the_group_openid(self, monkeypatch):
+        """被拉进群时要把 group_openid 记下来 —— 群白名单要的是它，不是群号。
+
+        没有这条，用户就只能看到"拉进群后机器人毫无反应"，然后在群里填群号（永远匹配不上）。
+        """
+        pytest.importorskip("botpy")
+        import asyncio
+
+        from agent import run_log
+        from agent.qqbot import _build_client
+        logged = []
+        monkeypatch.setattr(run_log, "log", lambda msg, level="info": logged.append((msg, level)))
+        client = _build_client(QQBotBridge(_cfg()))
+
+        class _Event:
+            group_openid = "GROUP-OPENID-XYZ"
+            op_member_openid = "OP-1234567890"
+
+        asyncio.run(client.on_group_add_robot(_Event()))
+        asyncio.set_event_loop(asyncio.new_event_loop())   # 别把线程的 loop 留空（botpy 要用）
+        blob = " ".join(m for m, _ in logged)
+        assert "GROUP-OPENID-XYZ" in blob, "要把群 openid 原样打出来"
+        assert "QQBOT_ALLOW_GROUPS" in blob, "并告诉人填到哪儿"
+        assert any(level == "warn" for _, level in logged), "这是要人处理的事，warning 级别"
+
 
 class TestGating:
     def test_unknown_sender_is_rejected_with_his_openid(self, bridge):
@@ -279,6 +304,20 @@ class TestEntryPoint:
         monkeypatch.setattr(qqbot, "QQBotConfig", lambda: QQBotConfig({}))
         assert qqbot.main() == 2
         assert "QQBOT_APP_ID" in capsys.readouterr().out
+
+    def test_bind_passes_extra_args_through(self, monkeypatch):
+        from agent import qqbot, qqbot_bind
+        seen = []
+        monkeypatch.setattr(qqbot_bind, "main", lambda argv: seen.append(list(argv)) or 0)
+        assert qqbot.main(["--bind", "--timeout", "60"]) == 0
+        assert seen == [["--timeout", "60"]], "--bind 之外的参数该透传给绑定流程"
+
+    def test_bind_alone_passes_empty_argv(self, monkeypatch):
+        from agent import qqbot, qqbot_bind
+        seen = []
+        monkeypatch.setattr(qqbot_bind, "main", lambda argv: seen.append(list(argv)) or 0)
+        assert qqbot.main(["--bind"]) == 0
+        assert seen == [[]]
 
     def test_lazy_import_keeps_other_features_working(self):
         """没装 qq-botpy 时也不该在导入期炸掉（只有真正建客户端才需要它）。"""

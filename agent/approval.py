@@ -9,6 +9,7 @@ from typing import Callable, List, Optional
 
 from config import APPROVAL_CONFIG, resolve_under_root
 from agent.execpolicy import ExecPolicy
+from agent.permission_rules import PermissionRules
 from tools.base import SANDBOX_LEVELS, RISK_LEVELS, ApprovalRequest
 
 # ============================================================
@@ -369,6 +370,7 @@ class ApprovalPolicy:
         command_whitelist: Optional[bool] = None,
         command_whitelist_extra: Optional[List[str]] = None,
         exec_policy: Optional["ExecPolicy"] = None,
+        permission_rules: Optional[PermissionRules] = None,
         honor_on_request=None,
     ):
         """Args:
@@ -398,6 +400,12 @@ class ApprovalPolicy:
         if exec_policy is None:
             exec_policy = _load_default_exec_policy()
         self.exec_policy = exec_policy
+        # 参数模式权限规则（terminal(git *) / edit(src/**)）：缺省从
+        # APPROVAL_CONFIG["permission_rules_file"]（锚定项目根）载入。
+        # 注意用 `is not None`：PermissionRules 定义了 __len__，**空规则集是 falsy**，
+        # 写成 `or` 会把调用方显式传入的空集换成环境里加载的规则。
+        self.permission_rules = (PermissionRules.from_env() if permission_rules is None
+                                 else permission_rules)
         self.decision_log: list = []   # [(request, decision)]
 
     def _command_whitelisted(self, command: str) -> bool:
@@ -452,6 +460,29 @@ class ApprovalPolicy:
                 return decision
             if verdict == "ask":
                 decision = self._ask(request, "execpolicy 规则：命中 ask，需要人工确认")
+                self._record(request, decision)
+                return decision
+
+        # 2.6 权限规则（参数模式粒度，如 Bash(git *) / Edit(src/**)）：与 execpolicy 同为结构化规则，
+        # 排在黑名单（1）与沙箱等级（2）之后、白名单（3）与策略（4）之前；空规则集不命中即继续往下走。
+        # 优先级链：黑名单 > 沙箱 > execpolicy > 权限规则 > 命令白名单 > 策略。
+        if self.permission_rules is not None and not self.permission_rules.empty:
+            args = getattr(request, "arguments", None) or {}
+            if not args:
+                args = {"command": request.command}
+            verdict = self.permission_rules.decide(request.tool_name, args)
+            if verdict.rule is not None:
+                if verdict.effect == "deny":
+                    decision = ApprovalDecision(
+                        False, f"权限规则 {verdict.rule.raw}：命中 deny，拒绝执行。")
+                    self._record(request, decision)
+                    return decision
+                if verdict.effect == "allow":
+                    decision = ApprovalDecision(
+                        True, f"权限规则 {verdict.rule.raw}：命中 allow，直接放行。")
+                    self._record(request, decision)
+                    return decision
+                decision = self._ask(request, f"权限规则 {verdict.rule.raw}：命中 ask，需要人工确认")
                 self._record(request, decision)
                 return decision
 
@@ -527,8 +558,10 @@ class ApprovalPolicy:
                 return ApprovalDecision(False, f"approver 调用失败: {e}", required_approval=False)
 
         if not self.interactive:
-            # 无人值守：默认拒绝（保守）
-            return ApprovalDecision(False, "非交互模式下默认拒绝（未提供 approver）。", required_approval=False)
+            # 无人值守：默认拒绝（保守）。带上调用方给的理由，否则日志里只剩"默认拒绝"，
+            # 看不出这次到底是为了什么要批准（规则命中 / 白名单 / 高风险…）。
+            return ApprovalDecision(
+                False, f"{reason}｜非交互模式下默认拒绝（未提供 approver）。", required_approval=False)
 
         # 内置交互（主流风格：一行风险说明 + 命令 + y/N）
         print()

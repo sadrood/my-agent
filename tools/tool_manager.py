@@ -23,6 +23,9 @@ GATED_TOOLS = frozenset({
 #: 门控工具的装载入口（自身必须常驻，否则无从装载）
 META_TOOL_NAME = "tools"
 
+#: 门控工具连续空闲这么多轮就自动卸下（没调用过的不算空闲，从装载那轮起算）
+GATED_IDLE_TURNS = 5
+
 #: 目标文本里出现这些词就自动装载对应门控工具（防"模型忘了 load"）
 GATED_KEYWORDS = {
     "zhihu": ("知乎", "zhihu"),
@@ -110,6 +113,10 @@ class ToolManager:
         self.output_max_chars = output_max_chars or TOOL_CONFIG.get("output_max_chars", 8000)
         #: 本会话已装载的门控工具（只影响 schema 发不发，不影响可调用性）
         self._loaded_gated: set = set()
+        #: 门控工具的"最近使用轮次"与当前轮次：连续空闲超过阈值就自动卸下，
+        #: 否则长会话里被装载的门控工具会让每轮 prompt 逐步涨回去（省 token 变成一次性）。
+        self._gated_last_used: dict = {}
+        self._round: int = 0
 
         # 注册默认内置工具
         browser = _create_browser_tool()
@@ -147,6 +154,13 @@ class ToolManager:
         try:
             from tools.memory_tool import MemoryTool
             self.register(MemoryTool())
+        except Exception:
+            pass
+
+        # 向用户提问（任务中途需要人拍板）：借主循环那套"提示符 + 输出闸门"通道
+        try:
+            from tools.ask import AskTool
+            self.register(AskTool())
         except Exception:
             pass
 
@@ -401,6 +415,7 @@ class ToolManager:
                 if key not in self._loaded_gated:
                     loaded.append(key)
                 self._loaded_gated.add(key)
+                self._gated_last_used[key] = self._round
             else:
                 unknown.append(key)
         return loaded, unknown
@@ -412,10 +427,33 @@ class ToolManager:
             key = str(name).strip()
             if key in self._loaded_gated:
                 self._loaded_gated.discard(key)
+                self._gated_last_used.pop(key, None)
                 dropped.append(key)
             else:
                 unknown.append(key)
         return dropped, unknown
+
+    def begin_round(self) -> list:
+        """进入新一轮：推进轮次并卸下连续空闲的门控工具（返回被卸下的名字）。"""
+        self._round += 1
+        return self._evict_idle_gated()
+
+    def note_tool_used(self, name: str) -> None:
+        """记录某工具本轮被调用过；门控工具据此续命。"""
+        key = str(name or "").strip()
+        if key in self._loaded_gated:
+            self._gated_last_used[key] = self._round
+
+    def _evict_idle_gated(self) -> list:
+        """卸下连续空闲超过阈值的门控工具（装载后从未调用的，从装载那轮起算）。"""
+        dropped = []
+        for key in list(self._loaded_gated):
+            last = self._gated_last_used.get(key, self._round)
+            if self._round - last >= GATED_IDLE_TURNS:
+                self._loaded_gated.discard(key)
+                self._gated_last_used.pop(key, None)
+                dropped.append(key)
+        return dropped
 
     def autoload_for_text(self, text: str) -> list:
         """目标里明确提到某门控工具就自动装载（省掉"忘了 load"的一轮）。"""

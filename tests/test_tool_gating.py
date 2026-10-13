@@ -176,3 +176,58 @@ class TestExecutorWiring:
         ex = Executor.__new__(Executor)
         ex.tool_manager = manager
         assert "gated_a" in ex._tools_hint()
+
+
+class TestSchemaIsSerializable:
+    """每个工具的 schema 必须是可 JSON 序列化的 `@property`。
+
+    背景：base 的 `to_openai_schema()` 取的是 `self.schema` 本身（不是 `self.schema()`），
+    所以子类必须写 `@property`；写成普通方法会把一个 bound method 塞进请求体，
+    后果不是"这个工具不可用"，而是**每次带工具的模型调用都 TypeError**
+    （实测把一个正在跑的会话整个打挂：Object of type method is not JSON serializable）。
+    """
+
+    def test_every_registered_tool_serializes(self):
+        tm = ToolManager()
+        broken = []
+        for item in tm.list_openai_schemas(all_tools=True):
+            try:
+                json.dumps(item, ensure_ascii=False)
+            except TypeError as exc:
+                broken.append(f"{item.get('function', {}).get('name')}: {exc}")
+        assert not broken, "这些工具的 schema 不能序列化（多半是漏了 @property）：" + "; ".join(broken)
+
+    def test_schema_attribute_is_a_dict_not_a_method(self):
+        tm = ToolManager()
+        bad = [n for n, t in tm._tools.items() if not isinstance(getattr(t, "schema", None), dict)]
+        assert not bad, f"schema 不是 dict（应为 @property）：{bad}"
+
+
+class TestGatedAutoUnload:
+    """门控工具不能只增不减：连续空闲超过阈值就自动卸下，长会话才真的省 token。"""
+
+    def _names(self, manager):
+        return [t["function"]["name"] for t in manager.list_openai_schemas()]
+
+    def test_idle_gated_tool_is_evicted(self, manager):
+        from tools.tool_manager import GATED_IDLE_TURNS
+        manager.mark_loaded(["gated_a"])
+        for _ in range(GATED_IDLE_TURNS - 1):          # 空闲到阈值前一轮：仍保留
+            assert manager.begin_round() == []
+        assert "gated_a" in self._names(manager)
+        assert manager.begin_round() == ["gated_a"]    # 到阈值：卸下
+        assert "gated_a" not in self._names(manager)
+
+    def test_used_gated_tool_keeps_alive(self, manager):
+        from tools.tool_manager import GATED_IDLE_TURNS
+        manager.mark_loaded(["gated_a"])
+        for _ in range(GATED_IDLE_TURNS + 3):
+            manager.begin_round()
+            manager.note_tool_used("gated_a")          # 每轮都用到 → 不该被卸
+        assert "gated_a" in self._names(manager)
+
+    def test_reload_restarts_the_clock(self, manager):
+        manager.mark_loaded(["gated_a"])
+        manager.mark_unloaded(["gated_a"])
+        manager.mark_loaded(["gated_a"])               # 重新装载
+        assert manager.begin_round() == []             # 不该因残留的旧计时立刻被卸
