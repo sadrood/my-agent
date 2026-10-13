@@ -37,6 +37,16 @@ class TestChitchatDetection:
     def test_hints_cover_common_greetings(self):
         assert "你好" in CHITCHAT_HINTS and "hi" in CHITCHAT_HINTS
 
+    @pytest.mark.parametrize("text", ["你叫什么名字", "你会什么", "今天几号", "为什么这么慢",
+                                      "这是什么", "有空吗", "在哪儿设置"])
+    def test_short_questions_are_chitchat(self, text):
+        """短问句不该走任务通道：否则先回一句"已收到，开始执行…"，收尾还去抓一张画面。"""
+        assert looks_like_chitchat(text) is True
+
+    @pytest.mark.parametrize("text", ["重启服务", "把日志清掉", "帮我改一下配置", "跑一下测试"])
+    def test_short_orders_stay_tasks(self, text):
+        assert looks_like_chitchat(text) is False
+
 
 class TestChatPath:
     def _bridge(self, **cfg_kw):

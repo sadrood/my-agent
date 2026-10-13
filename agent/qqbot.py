@@ -44,15 +44,23 @@ ALLOWED_MODES = ("task", "chat")
 #: 短问候一律走对话、不当任务执行（"你好"被当成目标去开浏览器是最容易踩的坑）
 CHITCHAT_HINTS = ("你好", "您好", "hi", "hello", "hiya", "在吗", "在么", "在不在", "哈喽",
                   "嗨", "早", "早安", "晚安", "谢谢", "thanks", "thank you", "辛苦了")
+#: 短问句同样是闲聊："你叫什么名字""你会什么""今天几号"。
+#: 这类问题走任务通道的代价是：先回一句"已收到，开始执行…"，收尾还去抓一张画面 —— 用户
+#: 只是想问句话。真任务（"把临时文件删掉""重启服务"）通常更长或带动作词，不会被卷进来；
+#: 万一卷进来也不要紧：对话通道走的是同一个 agent 循环，工具照样能用，只是不来回执。
+CHITCHAT_QUESTION_HINTS = ("什么", "谁", "哪", "吗", "呢", "几", "怎么", "为什么",
+                           "多少", "是不是", "能不能", "有没有")
 CHITCHAT_MAX_CHARS = 12
 
 
 def looks_like_chitchat(text: str) -> bool:
-    """是不是一句寒暄：短 + 命中问候词。任务描述通常更长，不会被误判。"""
+    """是不是一句闲聊：短 + （问候词 或 问句词）。任务描述通常更长，不会被误判。"""
     body = str(text or "").strip().lower()
     if not body or len(body) > CHITCHAT_MAX_CHARS:
         return False
-    return any(hint in body for hint in CHITCHAT_HINTS)
+    if any(hint in body for hint in CHITCHAT_HINTS):
+        return True
+    return any(hint in body for hint in CHITCHAT_QUESTION_HINTS)
 
 
 def _chunk(text: str, limit: int = CHUNK_CHARS) -> List[str]:
