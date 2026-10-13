@@ -372,7 +372,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
     from agent.ui_theme import (
         print_welcome, print_goodbye, print_final_result, print_info,
         print_warning, get_console, print_shortcuts,
-        print_prompt_box_top, print_prompt_box_bottom,
+        prompt_box_open, prompt_box_close, print_prompt_box_bottom,
     )
     from agent.session import SessionStore, generate_conversation_id
     from agent import input_reader
@@ -479,18 +479,22 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 and int(getattr(c, "width", 0) or 0) >= 40)
 
         try:
+            # 预画整个框（上框线 / 空输入行 / 下框线）再把光标移回框内 —— 这样打字时框是
+            # **封口**的。终端吃不了 ANSI 光标移动时退回"只画上框线"，见 prompt_box_open。
+            _box_drawn = False
             _box_mid_line = False
             if _box:
-                print_prompt_box_top()
-                _box_mid_line = True     # 光标停在 `│ > ` 后面；正常读到回车才算换行
+                _box_drawn = prompt_box_open()
+                _box_mid_line = not _box_drawn
             # 粘贴感知的多行读取：粘贴整块合并为一条；行尾 \ 续行
+            _p = ("> " if _box_drawn
+                  else ("│ [bold white]>[/bold white] " if _box else "[bold white]>[/bold white] "))
+            _c = ("│ [dim]… [/dim]" if _box else "[dim]… [/dim]")
             goal = input_reader.read_goal(
-                prompt_primary=lambda: primary_prompt(
-                    "│ [bold white]>[/bold white] " if _box else "[bold white]>[/bold white] "),
-                prompt_continuation=lambda: continuation_prompt(
-                    "│ [dim]… [/dim]" if _box else "[dim]… [/dim]"),
+                prompt_primary=lambda: primary_prompt(_p),
+                prompt_continuation=lambda: continuation_prompt(_c),
             )
-            _box_mid_line = False        # 用户按了回车：光标已在新行，直接收框
+            _box_mid_line = False        # 用户按了回车：光标已在新行
         except (EOFError, KeyboardInterrupt):
             print_goodbye(use_rich=True)
             break
@@ -507,13 +511,14 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                           % (type(exc).__name__, exc, _exc_where(exc)))
             continue
         finally:
-            # 框线必须在每条出口上收尾（含 break/continue 与异常）。两种情况下光标还停在
-            # `│ > ` 同一行，得先换行，否则下框线会挤进提示行：
-            #   ① 异常/EOF（用户没按回车）；② stdin 不是终端（管道喂输入，不回显也不换行）
             if _box:
-                if _box_mid_line or not bool(getattr(sys.stdin, "isatty", lambda: False)()):
-                    get_console(True).print()
-                print_prompt_box_bottom()
+                if _box_drawn:
+                    prompt_box_close(True)          # 光标就在框内那行：原地重画下框线并换行
+                else:
+                    # 退回路径：光标还停在 `│ > ` 同一行时要先换行（异常/EOF，或 stdin 不是终端）
+                    if _box_mid_line or not bool(getattr(sys.stdin, "isatty", lambda: False)()):
+                        get_console(True).print()
+                    print_prompt_box_bottom()
         if goal is None:
             print_goodbye(use_rich=True)
             break

@@ -11,6 +11,18 @@ if sys.platform == "win32":
         pass  # Python 3.5 及以下不支持 reconfigure
     # 设置 Rich 使用 Windows 原生渲染（支持更多颜色）
     os.environ.setdefault("TERM", "xterm-256color")
+    # 打开 VT 处理：输入框要"预画框线再把光标移回框内"（ANSI 光标移动），而 rich 只要在
+    # **创建 Console 之前**看到 VT 可用，就会从 Win32 渲染切到 ANSI 渲染（legacy=False）。
+    # 必须在 import 期做：Console 一旦按 legacy 定好模式，之后再开 VT 也改不回来。
+    try:
+        import ctypes as _ct
+        _k32 = _ct.windll.kernel32
+        _h_out = _k32.GetStdHandle(-11)              # STD_OUTPUT_HANDLE
+        _mode = _ct.c_uint32()
+        if _k32.GetConsoleMode(_h_out, _ct.byref(_mode)):
+            _k32.SetConsoleMode(_h_out, _mode.value | 0x0004)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
 
 from rich.console import Console
 from rich.theme import Theme
@@ -579,36 +591,138 @@ def _box_width(c: Console) -> int:
     return max(24, int(getattr(c, "width", 80) or 80) - 1)
 
 
-def print_prompt_box_top(use_rich: bool = True):
-    """输入框上边框。
-
-    诚实说明：rich 是行式渲染，做不到同类 CLI 那种"光标真的在框内、整框随输入重绘"。
-    这里画上边框 + 用 `│ ` 作提示符 + 下边框，读起来是一个框。
-    """
-    c = get_console(use_rich)
-    w = _box_width(c)
-    if use_rich:
-        c.print(f"[dim]╭{'─' * (w - 2)}╮[/dim]")
-    else:
-        c.print("+" + "-" * (w - 2) + "+")
+_BOX_HINT = "/shortcuts 快捷键 · /help 命令 · Ctrl+C 中断"
 
 
-def print_prompt_box_bottom(use_rich: bool = True,
-                            hint: str = "/shortcuts 快捷键 · /help 命令 · Ctrl+C 中断"):
-    """输入框下边框（提示语嵌在框线上）。
-
-    填充量 = 总宽 - 左框角 - 提示语 - 右框角；中文按**显示宽度**算（cell_len），
-    否则右边缘会比上框线多出一列。
-    """
+def _box_edges(c: Console, hint: str):
+    """(上框线, 下框线) —— 两行**等显示宽度**，右边缘才会对齐（中文按双宽算）。"""
     from rich.cells import cell_len
-    c = get_console(use_rich)
     w = _box_width(c)
+    top = "╭" + "─" * (w - 2) + "╮"
     head, tail = "╰─ ", " ╯"
     pad = max(0, w - cell_len(head) - cell_len(hint) - cell_len(tail))
+    return top, head + hint + "─" * pad + tail
+
+
+_vt_ready = None
+
+
+def _enable_vt() -> bool:
+    """打开 Windows 控制台的 VT 处理（ANSI 光标移动才会生效）；非 Windows 恒 True。
+
+    为什么要自己开：本机 rich 把控制台判成 `legacy_windows`（用 Win32 API 上色、不认
+    ANSI），而"预画好框线再把光标移回框内"必须靠 ANSI。失败返回 False，调用方退回。
+    """
+    global _vt_ready
+    if os.name != "nt":
+        return True
+    if _vt_ready is not None:
+        return _vt_ready
+    _vt_ready = False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)          # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            ENABLE_VT = 0x0004
+            if mode.value & ENABLE_VT or kernel32.SetConsoleMode(handle, mode.value | ENABLE_VT):
+                _vt_ready = True
+    except Exception:
+        _vt_ready = False
+    return _vt_ready
+
+
+def _can_move_cursor(c: Console) -> bool:
+    """能不能用 ANSI 移动光标（真终端 + Windows 上 VT 可用）。"""
+    try:
+        if not getattr(c, "is_terminal", False):
+            return False
+        # force_terminal 会把 rich 的 is_terminal 判成 True，但 stdout 未必是终端
+        # （管道/重定向）—— 那时写 ANSI 只会把转义序列灌进日志。
+        if not bool(getattr(sys.stdout, "isatty", lambda: False)()):
+            return False
+    except Exception:
+        return False
+    return _enable_vt()
+
+
+def _move_cursor(up: int = 0, right: int = 0, stream=None) -> None:
+    """竖直移动光标（ANSI CSI）。只在 `_can_move_cursor` 为真时调用。
+
+    stream 缺省写 sys.stdout；传入 console 的流是为了让这条路径能被测试断言。
+    """
+    seq = ""
+    if up:
+        seq += f"\x1b[{int(up)}A"
+    if right:
+        seq += f"\x1b[{int(right)}C"
+    if not seq:
+        return
+    try:
+        out = stream if stream is not None else sys.stdout
+        out.write(seq)
+        out.flush()
+    except Exception:
+        pass
+
+
+def prompt_box_open(hint: str = _BOX_HINT, use_rich: bool = True) -> bool:
+    """把整个框**预先**画好（上框线 / 空的输入行 / 下框线），再把光标移回输入行。
+
+    为什么要预画：rich 是行式渲染、输入期间不会重画 —— 不预画下框线，打字时看着就是
+    "没封口的框"（实测反馈）。返回 False = 这个终端吃不了 ANSI 光标移动 → 调用方
+    退回"只画上框线、提交后再补下框线"的老做法。
+    """
+    c = get_console(use_rich)
+    top, bottom = _box_edges(c, hint)
+    if not _can_move_cursor(c):
+        print_prompt_box_top(use_rich)
+        return False
+    c.print(f"[dim]{top}[/dim]")
+    c.print("[dim]│[/dim]")          # 空的输入行：只画左竖线，右边缘留给用户敲的内容
+    c.print(f"[dim]{bottom}[/dim]")
+    _move_cursor(up=2, right=2, stream=getattr(c, "file", None))   # 回到输入行 `│ ` 之后
+    return True
+
+
+def prompt_box_close(drawn: bool, hint: str = _BOX_HINT, use_rich: bool = True) -> None:
+    """收框：清掉当前行、重画下框线、换行（后续输出从框下面开始）。
+
+    预画过（drawn=True）时用户可能把行写花/写折，所以这里**原地重画**一遍；没预画过
+    时则是"补齐"那条下框线。两种情况都先 `\\r\\x1b[K` 回到行首清行，避免和用户输入
+    或提示符挤在同一行。
+    """
+    c = get_console(use_rich)
+    _top, bottom = _box_edges(c, hint)
+    if _can_move_cursor(c):
+        try:
+            out = getattr(c, "file", None) or sys.stdout
+            out.write("\r\x1b[K")
+            out.flush()
+        except Exception:
+            pass
+    c.print(f"[dim]{bottom}[/dim]")
+
+
+def print_prompt_box_top(use_rich: bool = True):
+    """输入框上边框（退回路径用；能移光标时走 `prompt_box_open`）。"""
+    c = get_console(use_rich)
+    top, _bottom = _box_edges(c, _BOX_HINT)
     if use_rich:
-        c.print(f"[dim]{head}[/dim]{hint} [dim]{'─' * pad}{tail.strip()}[/dim]")
+        c.print(f"[dim]{top}[/dim]")
     else:
-        c.print("+- " + hint + " " + "-" * pad + "+")
+        c.print("+" + "-" * (len(top) - 2) + "+")
+
+
+def print_prompt_box_bottom(use_rich: bool = True, hint: str = _BOX_HINT):
+    """输入框下边框（退回路径用；见 `prompt_box_close`）。"""
+    c = get_console(use_rich)
+    _top, bottom = _box_edges(c, hint)
+    if use_rich:
+        c.print(f"[dim]{bottom}[/dim]")
+    else:
+        c.print("+- " + hint + " " + "-" * max(0, _box_width(c) - 5 - len(hint)) + "+")
 
 
 def print_welcome(use_rich: bool = True, info: dict = None):

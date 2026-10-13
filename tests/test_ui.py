@@ -447,3 +447,40 @@ class TestClaudeLikeChrome:
     def test_tips_rotate_over_the_whole_pool(self):
         seen = [ui._pick_tip() for _ in range(len(ui._TIPS))]
         assert set(seen) == set(ui._TIPS), "轮换应覆盖全部提示"
+
+
+class TestPromptBoxPreDraw:
+    """能移光标时，敲字前就把框画全（否则打字期间框没封口）。"""
+
+    def test_open_draws_full_frame_then_returns_cursor(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: True)
+        assert ui.prompt_box_open() is True
+        out = buf.getvalue()
+        lines = [l for l in out.splitlines() if l.strip()]
+        # 三段式：上框线 / 空输入行（只有左竖线）/ 下框线
+        assert lines[0].startswith("╭") and lines[0].endswith("╮")
+        assert lines[1].strip() == "│"
+        assert lines[2].startswith("╰") and lines[2].endswith("╯")
+        # 光标移回输入行（上移 2 行、右移 2 列）——没有这一步，用户就打在框下面了
+        assert "\x1b[2A\x1b[2C" in out, out[-40:]
+
+    def test_open_falls_back_when_cursor_cannot_move(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: False)
+        assert ui.prompt_box_open() is False
+        out = buf.getvalue()
+        assert out.count("\n") == 1                 # 只画了上框线
+        assert "╭" in out and "╰" not in out
+        assert "\x1b[" not in out                   # 不许往不支持 ANSI 的终端里灌转义序列
+
+    def test_close_clears_line_then_repaints_border(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: True)
+        ui.prompt_box_close(drawn=True)
+        out = buf.getvalue()
+        assert "\r\x1b[K" in out, "收框前要回到行首清行，否则会和用户输入挤在同一行"
+        assert "╰" in out and "/shortcuts" in out
+
+    def test_close_plain_path_still_draws_border(self, buf, monkeypatch):
+        monkeypatch.setattr(ui, "_can_move_cursor", lambda c: False)
+        ui.prompt_box_close(drawn=False)
+        out = buf.getvalue()
+        assert "╰" in out and "\x1b[" not in out
