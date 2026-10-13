@@ -235,6 +235,23 @@ def print_tool_call(tool: str, arguments: dict = None, use_rich: bool = True):
         c.print(f"⏺ {tool}({args_str})")
 
 
+def print_folded_calls(key: str, total: int, folded: int, use_rich: bool = True):
+    """连续同名调用的汇总行：`⏺ terminal ×10（7 次同名调用已折叠）`。
+    替代被折叠的那些 `⏺ 工具(args)` 与 `⎿ 结果` 行（完整过程见 rollout 记录）。"""
+    c = get_console(use_rich)
+    tail = f"（{folded} 次同名调用已折叠）"
+    if use_rich:
+        from rich.text import Text
+        line = Text()
+        line.append("⏺ ", style="muted")
+        line.append(str(key), style="tool_name")
+        line.append(f" ×{total}", style="muted")
+        line.append(tail, style="dim")
+        c.print(line)
+    else:
+        c.print(f"⏺ {key} ×{total}{tail}")
+
+
 def print_edit_call(file_path: str, use_rich: bool = True):
     """文件修改调用行：✏ edit <文件>（主流风格，醒目）。"""
     c = get_console(use_rich)

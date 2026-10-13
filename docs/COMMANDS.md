@@ -630,6 +630,19 @@ my-agent --session conv-20260825-a1b2c3     # 启动时恢复
 | `Ctrl+C` | 任务执行中：中断并回到 `>` 提示符；提示符下：退出程序 |
 | 审批提示时 | `y` 批准 / 回车或 `n` 拒绝 |
 
+**工具调用折叠**（长任务防刷屏）：连续同名工具调用（terminal / python / file / browser /
+web_search / ocr）超过 3 次后不再逐次打印，一串结束时补一行汇总：
+
+```text
+⏺ terminal(command: "pytest tests -q")      ← 前 3 次照常
+⎿ 1079 passed
+……
+⏺ terminal ×6（3 次同名调用已折叠）           ← 串结束时的汇总
+```
+
+edit、写文件、团队 worker 的调用不折叠（diff 与归属是要看的内容）；terminal 的实时输出
+照旧逐行打印。阈值可配：`.env` 的 `TUI_REPEAT_CALL_FOLD_AFTER`（默认 3，0 = 关闭）。
+
 ## 六、环境变量（.env 常用项）
 
 | 变量 | 默认 | 说明 |

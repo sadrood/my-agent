@@ -270,3 +270,21 @@ class TestShortcutsAndDiffPanel:
         """diff 内容里的 `[doc](url)` 不能被 rich 当标签吞掉（Text 渲染）。"""
         ui.print_git_diff('+const x = "[doc](http://a)"\n')
         assert "[doc](http://a)" in buf.getvalue()
+
+
+class TestFoldedCallsLine:
+    """连续同名调用的汇总行（折叠后替代逐次输出）。"""
+
+    def test_rich_line_has_counts(self, buf):
+        ui.print_folded_calls("terminal", 10, 7)
+        out = buf.getvalue()
+        assert "terminal" in out and "×10" in out and "7 次同名调用已折叠" in out
+
+    def test_plain_text_mode(self, buf):
+        ui.print_folded_calls("terminal", 10, 7, use_rich=False)
+        assert "⏺ terminal ×10" in buf.getvalue()
+
+    def test_key_with_special_chars_rendered_raw(self, buf):
+        """工具名前缀可能带团队 worker 归属，不能被 markup 当标签吞掉。"""
+        ui.print_folded_calls("团队·w1 ▸ terminal", 6, 3)
+        assert "团队·w1 ▸ terminal" in buf.getvalue()

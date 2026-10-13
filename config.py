@@ -912,6 +912,8 @@ TOOL_CONFIG = {
 TUI_CONFIG = {
     # verbose 模式下每轮模型调用前刷新状态栏（↑输入 ↓输出 token、缓存命中、沙箱等级、审批策略）。false 关闭，只保留运行结束的统计行。
     "status_bar": os.getenv("TUI_STATUS_BAR", "true").lower() == "true",
+    # 连续同名工具调用（terminal/file/python/browser…）超过这个次数后，调用行与结果摘要折叠成一行汇总（实时输出与 edit/写文件不受影响）；0 = 不折叠。
+    "repeat_call_fold_after": int(os.getenv("TUI_REPEAT_CALL_FOLD_AFTER", "3")),
 }
 
 # ============================================================

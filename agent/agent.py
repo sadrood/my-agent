@@ -1901,6 +1901,48 @@ class Agent:
         except Exception:
             pass
 
+    #: 参与"连续同名调用折叠"的工具：只挑高频读取类，避免长任务刷屏。
+    #: edit / 写文件（diff 是要看的内容）、团队 worker 的调用（带归属）都不参与。
+    _FOLDABLE_TOOLS = frozenset({"terminal", "python", "file", "browser", "web_search", "ocr"})
+
+    def _fold_repeat_call(self, tool: str) -> bool:
+        """累计连续同名调用；返回 True = 本次调用行（及其结果摘要）折叠不打印。"""
+        from config import TUI_CONFIG
+        after = int(TUI_CONFIG.get("repeat_call_fold_after", 3) or 0)
+        if tool not in self._FOLDABLE_TOOLS or after <= 0:
+            return False
+        st = getattr(self, "_repeat_call_state", None)
+        if st is None:
+            st = self._repeat_call_state = {"tool": "", "seen": 0, "folded": 0, "pending": 0}
+        if tool != st["tool"]:
+            self._flush_repeat_calls()
+            st["tool"] = tool
+            st["seen"] = 0
+        st["seen"] += 1
+        if st["seen"] <= after:
+            return False
+        st["folded"] += 1
+        st["pending"] += 1
+        return True
+
+    def _flush_repeat_calls(self) -> None:
+        """一串连续同名调用结束（换工具 / 换轮 / 收工）：把折叠掉的补成一行汇总。"""
+        st = getattr(self, "_repeat_call_state", None)
+        if not st:
+            return
+        if st["folded"]:
+            from agent.ui_theme import print_folded_calls
+            print_folded_calls(st["tool"], st["seen"], st["folded"])
+        st["tool"], st["seen"], st["folded"], st["pending"] = "", 0, 0, 0
+
+    def _consume_folded_result(self) -> bool:
+        """折叠掉的那次调用的结果摘要一并折叠（返回 True = 跳过打印）。"""
+        st = getattr(self, "_repeat_call_state", None)
+        if st and st["pending"]:
+            st["pending"] -= 1
+            return True
+        return False
+
     def _loop_tool_event(self, event_type: str, data: dict):
         """单循环模式事件回调：转发 Dashboard + 主流风格终端渲染。"""
         if event_type == "turn_start":
@@ -1944,6 +1986,10 @@ class Agent:
         if not self.config.verbose:
             return
 
+        if event_type in ("run_end", "turn_start"):
+            # 一串连续同名调用到此为止：折叠掉的那些在这里补一行汇总
+            self._flush_repeat_calls()
+
         from agent.ui_theme import (
             print_tool_call, print_tool_result, print_edit_call,
             print_edit_diff, print_unified_diff, print_file_write_call,
@@ -1964,9 +2010,13 @@ class Agent:
             args = data.get("arguments") or data.get("args") or {}
             if not isinstance(args, dict):
                 args = {"input": args}
+            _is_write = (tool == "file"
+                         and str(args.get("operation", "") or "").lower() == "write")
+            if not tag and tool != "edit" and not _is_write and self._fold_repeat_call(tool):
+                return                       # 连续同名调用：本金与结果摘要都不再逐次打印
             if tool == "edit":
                 print_edit_call(args.get("file_path", ""))
-            elif tool == "file" and str(args.get("operation", "") or "").lower() == "write":
+            elif _is_write:
                 print_file_write_call(args.get("path", ""))
             else:
                 print_tool_call(f"{tag}{tool}", args)
@@ -1988,6 +2038,8 @@ class Agent:
             tool = str(data.get("tool") or data.get("name") or "")
             if tool == "think":
                 return
+            if self._consume_folded_result():
+                return                       # 调用行已被折叠，结果摘要一起折叠
             args = data.get("arguments") or data.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
