@@ -479,8 +479,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 and int(getattr(c, "width", 0) or 0) >= 40)
 
         try:
+            _box_mid_line = False
             if _box:
                 print_prompt_box_top()
+                _box_mid_line = True     # 光标停在 `│ > ` 后面；正常读到回车才算换行
             # 粘贴感知的多行读取：粘贴整块合并为一条；行尾 \ 续行
             goal = input_reader.read_goal(
                 prompt_primary=lambda: primary_prompt(
@@ -488,6 +490,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 prompt_continuation=lambda: continuation_prompt(
                     "│ [dim]… [/dim]" if _box else "[dim]… [/dim]"),
             )
+            _box_mid_line = False        # 用户按了回车：光标已在新行，直接收框
         except (EOFError, KeyboardInterrupt):
             print_goodbye(use_rich=True)
             break
@@ -504,8 +507,12 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                           % (type(exc).__name__, exc, _exc_where(exc)))
             continue
         finally:
-            # 框线必须在每条出口上收尾（含 break/continue 与异常），否则框会一直敞着
+            # 框线必须在每条出口上收尾（含 break/continue 与异常）。两种情况下光标还停在
+            # `│ > ` 同一行，得先换行，否则下框线会挤进提示行：
+            #   ① 异常/EOF（用户没按回车）；② stdin 不是终端（管道喂输入，不回显也不换行）
             if _box:
+                if _box_mid_line or not bool(getattr(sys.stdin, "isatty", lambda: False)()):
+                    get_console(True).print()
                 print_prompt_box_bottom()
         if goal is None:
             print_goodbye(use_rich=True)
