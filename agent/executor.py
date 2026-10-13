@@ -1470,12 +1470,27 @@ class Executor:
         # 3. 执行（带硬超时：任何工具卡死都不冻结 Agent）
         self._emit("tool_call", {"tool": tool_name, "args": arguments})
 
-        # 3.1 工具执行前钩子（fail-open：任何异常只警告，绝不阻断执行）
+        # 3.1 工具执行前钩子（fail-open：异常只警告；仅 hook 显式 blocked 才拦截）
+        # 位置说明：**在审批门之后**（有意与 Claude Code 不同）——本仓库的钩子只观察
+        # "真要执行的调用"。将来接上 permissionDecision 时，需要它先于审批表态，再把这段
+        # 前移，并同步调整 test_blocked_call_triggers_no_hooks。
+        hook_messages: tuple = ()
         try:
             if self._hooks is None:
                 from agent.hooks import get_hook_manager
                 self._hooks = get_hook_manager()
-            self._hooks.on_pre_tool_use(tool_name, arguments)
+            decision = self._hooks.on_pre_tool_use(tool_name, arguments, goal=goal or "")
+            if decision is not None:
+                hook_messages = tuple(decision.messages)
+                if decision.blocked:
+                    reason = decision.reason or "钩子拒绝该工具调用"
+                    self._emit("tool_blocked",
+                               {"tool": tool_name, "reason": reason, "by": "hook"})
+                    return ToolResult(success=False, output="",
+                                      error=f"钩子拦截：{reason}"), reason
+                if decision.updated_input:
+                    # 钩子改写参数（hookSpecificOutput.updatedInput）：后续执行用改写后的
+                    arguments = dict(decision.updated_input)
         except Exception as e:
             logger.warning("pre 钩子调用异常（fail-open 跳过）: %s", e)
 
@@ -1572,14 +1587,20 @@ class Executor:
             "streamed": bool((getattr(result, "metadata", None) or {}).get("streamed")),
         })
 
-        # 3.2 工具执行后钩子（fail-open：任何异常只警告，绝不阻断主流程）
+        # 3.2 工具执行后钩子（fail-open；提示型消息拼进结果，让模型看到）
         try:
             if self._hooks is None:
                 from agent.hooks import get_hook_manager
                 self._hooks = get_hook_manager()
-            self._hooks.on_post_tool_use(tool_name, result)
+            decision = self._hooks.on_post_tool_use(tool_name, result, goal=goal or "")
+            if decision is not None:
+                hook_messages = hook_messages + tuple(decision.messages)
         except Exception as e:
             logger.warning("post 钩子调用异常（fail-open 跳过）: %s", e)
+
+        notice = "；".join(m for m in hook_messages if m)[:500]
+        if notice and result.success:
+            result.output = f"⚠️ 钩子提示：{notice}\n{result.output}"
 
         return result, ""
 

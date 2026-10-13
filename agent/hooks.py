@@ -1,5 +1,5 @@
-"""Hooks 机制：工具调用前后回调（fail-open，最小可用实现）。
-文件不存在/加载失败同样静默降级。"""
+"""Hooks 机制：Python 回调 + 事件化外部命令 hook（均为 fail-open）。
+模块文件/hooks.json 缺失或加载失败时静默降级，绝不阻断主流程。"""
 
 import hashlib
 import importlib.util
@@ -8,8 +8,12 @@ import os
 import sys
 import threading
 from types import ModuleType
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from agent.hook_events import (
+    EVENT_POST_TOOL, EVENT_PRE_TOOL, EVENT_SESSION_START, EVENT_STOP,
+    EVENT_USER_PROMPT, EventHookRunner, HookDecision, normalize_event,
+)
 from config import HOOKS_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -19,13 +23,22 @@ class HookManager:
     """按文件路径加载钩子模块，并在工具调用前后派发回调。"""
 
     def __init__(self, enabled: Optional[bool] = None,
-                 hooks_file: Optional[str] = None):
+                 hooks_file: Optional[str] = None,
+                 events_file: Optional[str] = None,
+                 event_timeout: Optional[float] = None,
+                 project_dir: Optional[str] = None):
         self.enabled = HOOKS_CONFIG["enabled"] if enabled is None else bool(enabled)
         self.hooks_file = HOOKS_CONFIG["hooks_file"] if hooks_file is None else hooks_file
+        self.events_file = HOOKS_CONFIG.get("events_file") if events_file is None else events_file
+        timeout = HOOKS_CONFIG.get("event_timeout", 10.0) if event_timeout is None else event_timeout
+        self.project_dir = project_dir or os.getcwd()
         self.pre_callback = None      # Optional[Callable[[str, dict], None]]
         self.post_callback = None     # Optional[Callable[[str, object], None]]
         self._module: Optional[ModuleType] = None
         self._load_error: Optional[str] = None
+        # 事件化外部命令 hook（hooks.json）：同样受 enabled 开关约束
+        self.events = EventHookRunner(events_file=self.events_file, timeout=timeout,
+                                      enabled=self.enabled, cwd=self.project_dir)
         if self.enabled:
             self._load()
 
@@ -61,28 +74,93 @@ class HookManager:
     # ------------------------------------------------------------------
     # 派发
     # ------------------------------------------------------------------
-    def on_pre_tool_use(self, tool_name: str, arguments: dict) -> None:
-        """工具执行前回调；任何异常只警告，绝不阻断主流程。"""
-        if not self.enabled or self.pre_callback is None:
-            return
-        try:
-            self.pre_callback(tool_name, arguments)
-        except Exception as e:
-            logger.warning("on_pre_tool_use 回调异常（fail-open 跳过）: %s", e)
+    def on_pre_tool_use(self, tool_name: str, arguments: dict,
+                        goal: str = "") -> HookDecision:
+        """工具执行前：Python 回调 + PreToolUse 事件；返回决策供调用方判断是否放弃执行。"""
+        decision = HookDecision()
+        if not self.enabled:
+            return decision
+        if self.pre_callback is not None:
+            decision = decision.merge(self._call_callback(
+                self.pre_callback, tool_name, arguments, event="on_pre_tool_use"))
+        decision = decision.merge(self.events.run(EVENT_PRE_TOOL, {
+            "tool_name": tool_name, "tool_input": arguments, "goal": goal,
+        }))
+        return decision
 
-    def on_post_tool_use(self, tool_name: str, result) -> None:
-        """工具执行后回调；任何异常只警告，绝不阻断主流程。"""
-        if not self.enabled or self.post_callback is None:
-            return
+    def on_post_tool_use(self, tool_name: str, result,
+                         goal: str = "") -> HookDecision:
+        """工具执行后：PostToolUse 事件 + Python 回调；messages 为提示型建议。"""
+        decision = HookDecision()
+        if not self.enabled:
+            return decision
+        decision = decision.merge(self.events.run(EVENT_POST_TOOL, {
+            "tool_name": tool_name, "tool_response": result_payload(result), "goal": goal,
+        }))
+        if self.post_callback is not None:
+            decision = decision.merge(self._call_callback(
+                self.post_callback, tool_name, result, event="on_post_tool_use"))
+        return decision
+
+    def on_stop(self, state: Optional[Dict[str, Any]] = None) -> HookDecision:
+        """模型准备收工时派发 Stop 事件；blocked 表示应拦下继续做。"""
+        if not self.enabled:
+            return HookDecision()
+        return self.events.run(EVENT_STOP, dict(state or {}))
+
+    def on_user_prompt(self, prompt: str) -> HookDecision:
+        """用户提交输入时派发 UserPromptSubmit 事件。"""
+        if not self.enabled:
+            return HookDecision()
+        return self.events.run(EVENT_USER_PROMPT, {"user_prompt": str(prompt or "")})
+
+    def on_session_start(self, context: Optional[Dict[str, Any]] = None) -> HookDecision:
+        """会话开始时派发 SessionStart 事件。"""
+        if not self.enabled:
+            return HookDecision()
+        return self.events.run(EVENT_SESSION_START, dict(context or {}))
+
+    def dispatch(self, event: str, payload: Optional[Dict[str, Any]] = None) -> HookDecision:
+        """任意事件派发入口（自定义事件名按原样透传）。"""
+        if not self.enabled:
+            return HookDecision()
+        return self.events.run(normalize_event(event), payload)
+
+    @staticmethod
+    def _call_callback(callback, *args, event: str = "") -> HookDecision:
+        """执行 Python 回调；回调可返回 None、决策 dict 或 HookDecision。"""
         try:
-            self.post_callback(tool_name, result)
+            value = callback(*args)
         except Exception as e:
-            logger.warning("on_post_tool_use 回调异常（fail-open 跳过）: %s", e)
+            logger.warning("%s 回调异常（fail-open 跳过）: %s", event or "hook", e)
+            return HookDecision()
+        if isinstance(value, HookDecision):
+            return value
+        if isinstance(value, dict):
+            return EventHookRunner.decision_from_json(value)
+        return HookDecision()
 
     def __repr__(self) -> str:  # pragma: no cover
         return (f"<HookManager enabled={self.enabled} "
-                f"file={self.hooks_file!r} pre={'yes' if self.pre_callback else 'no'} "
+                f"file={self.hooks_file!r} events={self.events_file!r} "
+                f"pre={'yes' if self.pre_callback else 'no'} "
                 f"post={'yes' if self.post_callback else 'no'}>")
+
+
+def result_payload(result, limit: int = 4000) -> Dict[str, Any]:
+    """把工具结果摘要成可 JSON 序列化的 dict，供外部 hook 读取。"""
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    out = str(getattr(result, "output", "") or "")
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "output": out[:limit],
+        "output_truncated": len(out) > limit,
+        "error": str(getattr(result, "error", "") or "")[:2000],
+        "truncated": bool(getattr(result, "truncated", False)),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -103,9 +181,14 @@ def get_hook_manager() -> HookManager:
 
 
 def reset_hook_manager(enabled: Optional[bool] = None,
-                       hooks_file: Optional[str] = None) -> HookManager:
+                       hooks_file: Optional[str] = None,
+                       events_file: Optional[str] = None,
+                       event_timeout: Optional[float] = None,
+                       project_dir: Optional[str] = None) -> HookManager:
     """重建单例（测试/热重载用）；参数缺省时回到 HOOKS_CONFIG 配置。"""
     global _instance
     with _lock:
-        _instance = HookManager(enabled=enabled, hooks_file=hooks_file)
+        _instance = HookManager(enabled=enabled, hooks_file=hooks_file,
+                                events_file=events_file, event_timeout=event_timeout,
+                                project_dir=project_dir)
     return _instance

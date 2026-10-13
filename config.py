@@ -622,7 +622,14 @@ APPROVAL_CONFIG = {
     # execpolicy DSL（结构化命令策略，白名单模式的升级）：true = 启用策略文件规则（deny 优先）。
     "exec_policy_enabled": os.getenv("APPROVAL_EXEC_POLICY_ENABLED", "false").lower() == "true",
     # 策略文件路径（规则数组 JSON，格式见 agent/execpolicy.py；文件缺失/损坏时 fail-open：规则置空并告警，回到内建策略，不放大权限）
-    "exec_policy_file": os.getenv("APPROVAL_EXEC_POLICY_FILE", "./execpolicy.json"),
+    "exec_policy_file": resolve_under_root(
+        os.getenv("APPROVAL_EXEC_POLICY_FILE", "./execpolicy.json")),
+    # 参数模式权限规则文件（JSON，格式见 agent/permission_rules.py：allow/ask/deny 三档 +
+    # Tool(pattern) 写法）。留空 = 无规则 = 与接入前行为完全一致。
+    # 显式给相对路径时锚定项目根：路径随 cwd 漂移会让规则**静默失效**。
+    "permission_rules_file": (
+        resolve_under_root(os.getenv("MY_AGENT_PERMISSION_RULES", ""))
+        if os.getenv("MY_AGENT_PERMISSION_RULES", "").strip() else ""),
 }
 
 # ============================================================
@@ -946,15 +953,21 @@ TEST_CONFIG = {
 }
 
 # ============================================================
-# Hooks 配置（工具调用前后钩子，fail-open）
+# Hooks 配置（Python 回调 + 事件化外部命令 hook，均 fail-open）
 # ============================================================
 # enabled: 是否启用钩子（默认关闭，保持旧行为不变）
 # hooks_file: 钩子模块文件路径（Python 文件，可定义可选的
 #   on_pre_tool_use(tool_name, arguments) 与 on_post_tool_use(tool_name, result)；
-#   任何回调异常只记录警告，绝不阻断主流程）
+#   回调可返回决策 dict：{"decision": "block", "reason": "..."}）
+# events_file: 事件化 hook 配置（JSON）。事件名 PreToolUse / PostToolUse / Stop /
+#   SessionStart / UserPromptSubmit；子进程 stdin 收 JSON，退出码 2 阻断、1 只提醒、
+#   0 时读 stdout JSON（decision=block 或 hookSpecificOutput.permissionDecision）
+# event_timeout: 单个外部 hook 的超时秒数
 HOOKS_CONFIG = {
     "enabled": os.getenv("HOOKS_ENABLED", "false").lower() == "true",
     "hooks_file": os.getenv("HOOKS_FILE", "./hooks.py"),
+    "events_file": os.getenv("HOOKS_EVENTS_FILE", "./hooks.json"),
+    "event_timeout": float(os.getenv("HOOKS_EVENT_TIMEOUT", "10")),
 }
 
 # ============================================================
