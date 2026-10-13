@@ -1050,7 +1050,13 @@ def main(argv: Optional[list] = None) -> int:
         bridge = QQBotBridge(config)
         client = _build_client(bridge)
         run_log.log(f"QQ 桥启动（{where}环境），等待消息")
-        client.run(appid=config.app_id, secret=config.secret)
+        try:
+            client.run(appid=config.app_id, secret=config.secret)
+        except RuntimeError as exc:      # 腾讯网关拒绝凭据时给一句人话，别甩 traceback
+            print(f"QQ 桥启动失败：腾讯拒绝了这对凭据（{exc}）。"
+                  "去 QQ 开放平台核对机器人的 AppID/AppSecret，"
+                  "或重跑 `python -m agent.qqbot --bind` 重新扫码绑定。")
+            return 3
     finally:
         _clear_pid_file(_pid_file)
     return 0
