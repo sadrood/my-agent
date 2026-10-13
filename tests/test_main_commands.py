@@ -381,6 +381,12 @@ class TestAutoModeRouting:
         assert _parse_command("/permission") == ("permission", "")
         assert _parse_command("/permission auto") == ("permission", "auto")
 
+    def test_diff_and_shortcuts_command(self):
+        """界面命令：/diff 看工作区改动、/shortcuts 看快捷键面板。"""
+        assert _parse_command("/diff") == ("diff", "")
+        assert _parse_command("/shortcuts") == ("shortcuts", "")
+        assert _parse_command("/diffx") == (None, None), "英文连写不算命令"
+
     def test_every_handled_command_is_parseable(self):
         """有处理分支的命令必须在解析白名单里，否则它会变成一条普通消息发给模型。"""
         import re
@@ -392,3 +398,55 @@ class TestAutoModeRouting:
         assert not missing, f"这些命令有分支但解析不到: {missing}"
         for cmd in sorted(handled):
             assert _parse_command(f"/{cmd}") == (cmd, ""), f"/{cmd} 解析失败"
+
+
+class TestWorktreeDiffCommand:
+    """`/diff` 的取数与渲染（打桩 subprocess，不依赖真实仓库状态）。"""
+
+    @staticmethod
+    def _patch_git(monkeypatch, status_out: str, diff_out: str):
+        import subprocess as sp
+
+        calls = []
+
+        class _R:
+            def __init__(self, out):
+                self.stdout, self.returncode = out, 0
+
+        def fake_run(cmd, **kw):
+            calls.append((list(cmd), kw))
+            return _R(diff_out if "diff" in cmd else status_out)
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        return calls
+
+    def test_renders_utf8_diff_and_untracked(self, monkeypatch, capsys):
+        from rich.console import Console
+
+        import main as m
+        self._patch_git(monkeypatch, " M a.py\n?? 新文件.txt\n", "+中文内容\n")
+        m._show_worktree_diff(Console(highlight=False))
+        out = capsys.readouterr().out
+        assert "中文内容" in out                     # 解码一旦回退 GBK，这里就只剩"无改动"
+        assert "新文件.txt" in out
+        assert "1 个已跟踪文件" in out
+
+    def test_git_calls_force_utf8_decoding(self, monkeypatch, capsys):
+        """Windows 的 text=True 默认 GBK，中文 diff 会炸成空输出——所以必须显式 utf-8。"""
+        from rich.console import Console
+
+        import main as m
+        calls = self._patch_git(monkeypatch, " M a.py\n", "+b\n")
+        m._show_worktree_diff(Console(highlight=False))
+        assert calls, "没有调用 git"
+        for cmd, kw in calls:
+            assert kw.get("encoding") == "utf-8", f"git 调用没指定 utf-8: {cmd}"
+            assert kw.get("errors") == "replace"
+
+    def test_clean_worktree_message(self, monkeypatch, capsys):
+        from rich.console import Console
+
+        import main as m
+        self._patch_git(monkeypatch, "", "")
+        m._show_worktree_diff(Console(highlight=False))
+        assert "没有未提交改动" in capsys.readouterr().out

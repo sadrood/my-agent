@@ -10,10 +10,12 @@ import agent.ui_theme as ui
 
 
 @pytest.fixture
-def buf():
+def buf(monkeypatch):
     b = io.StringIO()
     console = Console(file=b, force_terminal=False, highlight=False)
-    ui.get_console = lambda use_rich=True: console  # monkeypatch 全局 console
+    # 必须走 monkeypatch：直接赋值不会还原，会把 ui.get_console 永久指向这个 StringIO
+    # console，后面按字母序跑的 test_status_bar 就抓不到 capsys 输出了。
+    monkeypatch.setattr(ui, "get_console", lambda use_rich=True: console)
     return b
 
 
@@ -230,3 +232,41 @@ class TestStreamingMarkdown:
         r.flush()
         out = buf.getvalue()
         assert "普通文本，没有标记" in out
+
+
+class TestShortcutsAndDiffPanel:
+    """`/shortcuts` 面板与 `/diff` 渲染（对应同类 CLI 的 ? 面板与 /diff mod）。"""
+
+    def test_shortcuts_panel_lists_input_and_commands(self, buf):
+        ui.print_shortcuts(use_rich=False)
+        out = buf.getvalue()
+        assert "Ctrl+C" in out
+        assert "/diff" in out and "/help" in out
+        assert "多行" in out or "换行" in out
+
+    def test_shortcuts_panel_rich_renders_table(self, buf):
+        ui.print_shortcuts(use_rich=True)
+        out = buf.getvalue()
+        assert "输入" in out and "查看" in out
+        assert "/sessions" in out
+
+    def test_git_diff_marks_lines(self, buf):
+        ui.print_git_diff("diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")
+        out = buf.getvalue()
+        assert "@@" in out and "-a" in out and "+b" in out
+        assert "diff --git" in out
+
+    def test_git_diff_empty_worktree(self, buf):
+        ui.print_git_diff("")
+        assert "无未提交改动" in buf.getvalue()
+
+    def test_git_diff_truncates_long_output(self, buf):
+        ui.print_git_diff("\n".join(f"+line{i}" for i in range(30)), max_lines=5)
+        out = buf.getvalue()
+        assert "line4" in out and "line5" not in out
+        assert "共 30 行" in out
+
+    def test_git_diff_brackets_not_eaten_by_markup(self, buf):
+        """diff 内容里的 `[doc](url)` 不能被 rich 当标签吞掉（Text 渲染）。"""
+        ui.print_git_diff('+const x = "[doc](http://a)"\n')
+        assert "[doc](http://a)" in buf.getvalue()

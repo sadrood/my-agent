@@ -211,7 +211,7 @@ def _parse_command(goal: str):
     """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
     for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model",
                 "config", "image", "memory", "compact", "goal", "consent", "permission",
-                "upgrade", "history", "rename", "title", "help"):
+                "upgrade", "history", "rename", "title", "help", "diff", "shortcuts"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -225,6 +225,51 @@ def _parse_command(goal: str):
             if not nxt.isascii():
                 return cmd, rest.strip()
     return None, None
+
+
+def _show_worktree_diff(c) -> None:
+    """`/diff`：把工作区未提交改动渲染出来（对应同类 CLI 的 /diff 面板）。"""
+    import subprocess
+
+    from agent.ui_theme import print_git_diff, print_info, print_warning
+    try:
+        st = subprocess.run(["git", "-c", "core.quotepath=false", "status",
+                             "--porcelain", "--untracked-files=all"],
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:       # git 没装 / 超时
+        print_warning(f"取工作区状态失败：{type(exc).__name__}: {exc}", use_rich=True)
+        return
+    if st.returncode != 0:
+        print_warning("当前目录不是 git 仓库（或 git 不可用），没有 diff 可看。", use_rich=True)
+        return
+
+    lines = [l for l in (st.stdout or "").splitlines() if l.strip()]
+    untracked = [l[3:] for l in lines if l.startswith("??")]
+    tracked = [l for l in lines if not l.startswith("??")]
+
+    if not lines:
+        print_info("工作区干净：没有未提交改动。", style="success")
+        return
+
+    print_info(f"工作区改动：{len(tracked)} 个已跟踪文件 · {len(untracked)} 个未跟踪文件",
+               style="primary")
+    try:
+        # Windows 下 text=True 默认按 GBK 解码，遇到 UTF-8 的 diff 内容会直接抛
+        # UnicodeDecodeError（stdout 变空 → 误报"无改动"），所以显式 utf-8 + 容错。
+        d = subprocess.run(["git", "-c", "core.quotepath=false", "diff",
+                            "--no-color", "--no-ext-diff"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        diff_text = d.stdout or ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        print_warning(f"取 diff 失败：{type(exc).__name__}: {exc}", use_rich=True)
+        return
+    print_git_diff(diff_text, use_rich=True)
+    for path in untracked[:20]:
+        c.print(f"[dim]  ?? {path}（新文件，git diff 不含内容）[/dim]")
+    if len(untracked) > 20:
+        c.print(f"[dim]  …（未跟踪文件共 {len(untracked)} 个）[/dim]")
 
 
 def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
@@ -259,7 +304,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
     """
     from agent.ui_theme import (
         print_welcome, print_goodbye, print_final_result, print_info,
-        print_warning, get_console,
+        print_warning, get_console, print_shortcuts,
     )
     from agent.session import SessionStore, generate_conversation_id
     from agent import input_reader
@@ -398,6 +443,12 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
 
         # 斜杠命令解析（容忍 /team任务 连写）
         cmd, cmd_args = _parse_command(goal)
+        if cmd == "shortcuts":
+            print_shortcuts(use_rich=True)
+            continue
+        if cmd == "diff":
+            _show_worktree_diff(c)
+            continue
         if cmd == "tools":
             from agent.ui_theme import print_step_header
             c.print()
@@ -732,6 +783,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/image <描述>        文生图（SenseNova U1.5 Lite）",
                 "/memory [prune N]    记忆总览 / 清理长期记忆",
                 "/tools              查看全部工具（含 JSON Schema）",
+                "/diff               工作区未提交改动（含本次 edit 的 diff）",
+                "/shortcuts          快捷键与常用命令面板",
                 "/sessions           历史对话列表",
                 "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
                 "/history [条数]      查看当前对话的历史记录（默认 20 条）",

@@ -554,6 +554,87 @@ def print_status_bar(text: str, use_rich: bool = True):
         c.print(f"⎿ {text}")
 
 
+def print_git_diff(diff_text: str, use_rich: bool = True, max_lines: int = 200):
+    """工作区改动渲染：@@ 青 / + 绿 / - 红 / 文件头灰；超长截断。"""
+    c = get_console(use_rich)
+    lines = (diff_text or "").splitlines()
+    if not lines:
+        if use_rich:
+            from rich.text import Text
+            c.print(Text("  （工作区无未提交改动）", style="muted"))
+        else:
+            c.print("  （工作区无未提交改动）")
+        return
+
+    from rich.text import Text
+    for line in lines[:max_lines]:
+        shown = line[:200]
+        if not use_rich:
+            c.print(shown)
+            continue
+        if shown.startswith("@@"):
+            style = "cyan"
+        elif shown.startswith("+"):
+            style = "green"
+        elif shown.startswith("-"):
+            style = "red"
+        elif shown.startswith(("diff --git", "index ", "new file", "deleted file",
+                              "similarity", "rename", "old mode", "new mode")):
+            style = "dim"
+        else:
+            style = "grey62"
+        # Text 而非 markup 字符串：diff 里的 `[...]` 会被 rich 当标签吞掉
+        c.print(Text(shown, style=style))
+    if len(lines) > max_lines:
+        c.print(Text(f"  …（共 {len(lines)} 行，仅显示前 {max_lines} 行）", style="dim"))
+
+
+def print_shortcuts(use_rich: bool = True):
+    """快捷键/命令面板（等价同类 CLI 的 `?` 面板）。
+    只列终端真能收到的键：cmd 下 Shift+Tab、Ctrl+O 这类修饰键拿不到可靠序列，
+    对应功能一律给斜杠命令入口。"""
+    groups = [
+        ("输入", [
+            ("Enter", "提交；行尾 \\ + 回车 = 手工换行"),
+            ("Ctrl+C", "中断当前输入或任务（会话每轮自动落盘）"),
+            ("exit / quit / q", "退出（Ctrl+Z 回车、EOF 亦可）"),
+        ]),
+        ("对话", [
+            ("/new", "新开一个对话"),
+            ("/sessions", "历史对话列表"),
+            ("/open <ID>", "打开并恢复历史对话"),
+            ("/history [N]", "回看当前对话的记录"),
+            ("/rename <名> /title", "改名 / 让模型重新起名"),
+        ]),
+        ("查看", [
+            ("/diff", "工作区未提交改动（含本次 edit）"),
+            ("/tools", "全部工具（含 JSON Schema）"),
+            ("/config /model /permission", "配置 / 切模型 / 权限档"),
+            ("/help", "全部斜杠命令"),
+        ]),
+    ]
+    c = get_console(use_rich)
+    if not use_rich:
+        for title, rows in groups:
+            c.print(f"【{title}】")
+            for key, desc in rows:
+                c.print(f"  {key:<26} {desc}")
+        return
+
+    from rich.table import Table
+    from rich.text import Text
+    # 第二列 fold：默认的 ellipsis 会把描述截成"…"，面板就白做了
+    table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
+    table.add_column(style="bold cyan", no_wrap=True)
+    table.add_column(style="white", overflow="fold")
+    for title, rows in groups:
+        table.add_row(Text(title, style="bold white"), "")
+        for key, desc in rows:
+            table.add_row(Text(key, style="cyan"), Text(desc, style="grey62"))
+    c.print()
+    c.print(table)
+
+
 def print_warning(msg: str, use_rich: bool = True):
     """打印警告。"""
     c = get_console(use_rich)
