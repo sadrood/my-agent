@@ -16,3 +16,5 @@ Pillow>=10.0.0
 
 # 可选：QQ 机器人扫码绑定（python -m agent.qqbot --bind）的二维码生成。
 # qrcode>=8.0
+# TUI 模式（python -m agent.tui）与 tests/test_tui.py 需要；纯 Python 无编译依赖
+textual>=0.80
