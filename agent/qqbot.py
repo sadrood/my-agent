@@ -417,12 +417,23 @@ class QQBotBridge:
         return str(text or "").strip()[: self.config.max_chars]
 
     def plan(self, key: str, text: str) -> str:
-        """纯判定（无副作用）：reject / approval / rate / slash / task —— 给回执用。"""
+        """纯判定（无副作用）：approval / rate / slash / chat / task —— 给回执用。
+
+        必须和默认路由（`handle_text` 里那条 `looks_like_chitchat(...) or mode == "chat"`）
+        得出同一个结论，否则会出现"实际按聊天回答了，却先发一条'已收到，开始执行…'"——
+        回执只在真的要开任务时才有意义。
+        """
         if key in self._pending:
             return "approval"
         if not self.rate_ok(key):
             return "rate"
-        return "slash" if str(text or "").strip().startswith("/") else "task"
+        body = str(text or "").strip()
+        if body.startswith("/"):
+            return "slash"
+        session = self.sessions.get(self.norm_key(key))
+        if looks_like_chitchat(body) or (session is not None and session.mode == "chat"):
+            return "chat"
+        return "task"
 
     def reject_hint(self, user_openid: str, group_openid: str = "") -> str:
         """被门控拦下时回什么：先说清是**哪一道**名单没过，并把要加的那串回显出来。"""
