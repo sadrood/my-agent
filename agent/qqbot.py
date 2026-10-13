@@ -1013,6 +1013,25 @@ def _build_client(bridge: QQBotBridge):
             # QQ 群的 @机器人 事件（注意：on_at_message_create 是**频道**的事件，不是群）
             await bridge.handle_group_message(message)
 
+        async def on_group_add_robot(self, event):
+            """机器人被拉进群：把群 openid 打进日志。
+
+            群白名单要的是 `group_openid`（腾讯发的不透明 ID），**不是**人看的那个群号 ——
+            群号填进去永远匹配不上；而这个 ID 只有消息/事件送进来才拿得到。私聊那条
+            "第一次握手"（发句话就回你 openid）以前在群里没有对应物，就是这个事件。
+            """
+            from agent import run_log
+            group_openid = str(getattr(event, "group_openid", "") or "")
+            operator = str(getattr(event, "op_member_openid", "") or "")
+            run_log.log(f"QQ 机器人被拉进群：group_openid={group_openid}"
+                        f"（操作人 {operator[-6:]}）。要放行请把它加进 .env 的 "
+                        f"QQBOT_ALLOW_GROUPS 后重启桥。", "warn")
+
+        async def on_group_del_robot(self, event):
+            from agent import run_log
+            run_log.log(f"QQ 机器人被移出群：group_openid="
+                        f"{str(getattr(event, 'group_openid', '') or '')}", "warn")
+
         async def on_at_message_create(self, message):
             from agent import run_log
             run_log.log("收到频道(guild)消息：本桥不支持频道，已忽略", "warn")
