@@ -921,6 +921,10 @@ TUI_CONFIG = {
     "status_bar": os.getenv("TUI_STATUS_BAR", "true").lower() == "true",
     # 连续同名工具调用（terminal/file/python/browser…）超过这个次数后，调用行与结果摘要折叠成一行汇总（实时输出与 edit/写文件不受影响）；0 = 不折叠。
     "repeat_call_fold_after": int(os.getenv("TUI_REPEAT_CALL_FOLD_AFTER", "3")),
+    # 输入框：把提示符包进一个画出来的框（╭─╮ / │ > / ╰─╯）。窄终端或不喜欢可关掉。
+    "input_box": os.getenv("TUI_INPUT_BOX", "true").lower() == "true",
+    # 等待模型时显示"✻ 思考中… Ns"占位行，首字到达即擦掉换成正文（非流式时等整轮结束）。
+    "thinking_indicator": os.getenv("TUI_THINKING_INDICATOR", "true").lower() == "true",
 }
 
 # ============================================================

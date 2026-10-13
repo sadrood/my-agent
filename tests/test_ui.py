@@ -344,16 +344,16 @@ class TestThemePanel:
     """`/theme` 切换配色（会话内生效，不动 .env）。"""
 
     def test_theme_list_and_switch(self, buf):
-        assert ui.current_theme() == "default"
+        assert ui.current_theme() == "claude", "出厂默认是 claude（暗灰克制冷）"
         ui.set_theme("mono")
         try:
             assert ui.current_theme() == "mono"
             assert ui.COLORS["primary"] == ui.THEMES["mono"]["primary"]
             ui.print_theme()
             out = buf.getvalue()
-            assert "● mono" in out and "default" in out
+            assert "● mono" in out and "default" in out and "claude" in out
         finally:
-            ui.set_theme("default")
+            ui.set_theme("claude")
 
     def test_colors_dict_identity_is_kept(self):
         """原地更新 COLORS：别的模块 `from agent.ui_theme import COLORS` 的引用跟着变。"""
@@ -362,7 +362,7 @@ class TestThemePanel:
         try:
             assert ref["primary"] == ui.THEMES["ocean"]["primary"]
         finally:
-            ui.set_theme("default")
+            ui.set_theme("claude")
 
     def test_console_rebuilt_on_switch(self):
         before = ui.get_console()
@@ -370,7 +370,7 @@ class TestThemePanel:
         try:
             assert ui.get_console() is not before
         finally:
-            ui.set_theme("default")
+            ui.set_theme("claude")
 
     def test_unknown_theme_raises(self):
         with pytest.raises(ValueError):
@@ -405,3 +405,45 @@ class TestPermissionLabels:
         from agent.approval import PERMISSION_PRESETS
         for name, preset in PERMISSION_PRESETS.items():
             assert ui.label_policy(preset["mode"]) != preset["mode"], name
+
+
+class TestClaudeLikeChrome:
+    """对齐同类 CLI 的三件：输入框、待办清单、截断提示。"""
+
+    def test_prompt_box_borders_are_aligned(self, buf):
+        from rich.cells import cell_len
+        ui.print_prompt_box_top()
+        ui.print_prompt_box_bottom()
+        lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+        assert len(lines) == 2, lines
+        top, bottom = lines
+        assert top.startswith("╭") and top.endswith("╮")
+        assert bottom.startswith("╰") and bottom.endswith("╯")
+        assert "/shortcuts" in bottom, "提示语应嵌在下框线上"
+        # 中文提示语的**显示宽度**要按双宽算，否则右边缘对不齐
+        assert cell_len(top) == cell_len(bottom), (cell_len(top), cell_len(bottom))
+
+    def test_prompt_box_plain_mode_is_ascii(self, buf):
+        ui.print_prompt_box_top(use_rich=False)
+        out = buf.getvalue()
+        assert out.startswith("+") and "╭" not in out
+
+    def test_todos_use_the_same_glyphs_as_the_tool(self, buf):
+        ui.print_todos([{"id": "t1", "title": "甲", "status": "done"},
+                        {"id": "t2", "title": "乙", "status": "in_progress"},
+                        {"id": "t3", "title": "丙", "status": "todo"}])
+        out = buf.getvalue()
+        assert "待办 1/3" in out
+        assert "✓" in out and "▶" in out and "○" in out
+
+    def test_todos_empty_says_cleared(self, buf):
+        ui.print_todos([])
+        assert "已清空" in buf.getvalue()
+
+    def test_tool_result_truncation_points_to_transcript(self, buf):
+        ui.print_tool_result(True, "\n".join(f"行{i}" for i in range(9)))
+        assert "/transcript" in buf.getvalue(), "截断了要告诉用户去哪看完整输出"
+
+    def test_tips_rotate_over_the_whole_pool(self):
+        seen = [ui._pick_tip() for _ in range(len(ui._TIPS))]
+        assert set(seen) == set(ui._TIPS), "轮换应覆盖全部提示"

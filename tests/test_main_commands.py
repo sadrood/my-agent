@@ -517,16 +517,19 @@ class TestThemeCommand:
         import agent.ui_theme as ui
         from main import _switch_theme
 
+        # 别硬编码"默认主题"：出厂默认换过（default → claude）。取当前值再还原，
+        # 顺带避免"改了全局主题不还"污染后面按字母序跑的用例。
+        before = ui.current_theme()
         _switch_theme("ocean")
         try:
             assert ui.current_theme() == "ocean"
             assert "已切换主题" in capsys.readouterr().out
         finally:
-            ui.set_theme("default")
+            ui.set_theme(before)
 
         _switch_theme("nope")
         assert "未知主题" in capsys.readouterr().out
-        assert ui.current_theme() == "default"
+        assert ui.current_theme() == before      # 未知主题不该改动当前主题
 
     def test_no_arg_lists_themes(self, capsys):
         from main import _switch_theme

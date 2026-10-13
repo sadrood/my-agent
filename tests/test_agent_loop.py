@@ -237,7 +237,11 @@ class TestTurnSpinnerTimer:
         agent._stop_turn_spinner()
 
         assert len(spinner.texts) >= 2, "秒表应持续刷新"
-        assert spinner.texts[0].endswith("s"), f"应带秒数，实际 {spinner.texts[0]!r}"
+        text = spinner.texts[0]
+        assert "思考中" in text and "s" in text, f"应带秒数，实际 {text!r}"
+        # token 计数与中断方式是后来补的：光有秒数看不出"在等什么"
+        assert "↑" in text and "↓" in text, f"应带 token 计数，实际 {text!r}"
+        assert "Ctrl+C" in text, f"应告诉用户怎么中断，实际 {text!r}"
         assert spinner.stopped is True
 
     def test_timer_thread_is_reclaimed(self):

@@ -372,6 +372,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
     from agent.ui_theme import (
         print_welcome, print_goodbye, print_final_result, print_info,
         print_warning, get_console, print_shortcuts,
+        print_prompt_box_top, print_prompt_box_bottom,
     )
     from agent.session import SessionStore, generate_conversation_id
     from agent import input_reader
@@ -472,12 +473,20 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             c.print()
 
         primary_prompt, continuation_prompt = _prompt_callbacks(c, _AgentPrompt)
+        # 输入框：画出来的框（╭─╮ / │ > / ╰─╯）。窄终端不画，避免框线折行。
+        from config import TUI_CONFIG
+        _box = (bool(TUI_CONFIG.get("input_box", True))
+                and int(getattr(c, "width", 0) or 0) >= 40)
 
         try:
+            if _box:
+                print_prompt_box_top()
             # 粘贴感知的多行读取：粘贴整块合并为一条；行尾 \ 续行
             goal = input_reader.read_goal(
-                prompt_primary=lambda: primary_prompt("[bold white]>[/bold white] "),
-                prompt_continuation=lambda: continuation_prompt("[dim]… [/dim]"),
+                prompt_primary=lambda: primary_prompt(
+                    "│ [bold white]>[/bold white] " if _box else "[bold white]>[/bold white] "),
+                prompt_continuation=lambda: continuation_prompt(
+                    "│ [dim]… [/dim]" if _box else "[dim]… [/dim]"),
             )
         except (EOFError, KeyboardInterrupt):
             print_goodbye(use_rich=True)
@@ -494,6 +503,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             print_warning("读取输入失败（%s）：%s%s"
                           % (type(exc).__name__, exc, _exc_where(exc)))
             continue
+        finally:
+            # 框线必须在每条出口上收尾（含 break/continue 与异常），否则框会一直敞着
+            if _box:
+                print_prompt_box_bottom()
         if goal is None:
             print_goodbye(use_rich=True)
             break

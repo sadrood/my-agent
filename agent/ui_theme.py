@@ -58,9 +58,18 @@ THEMES = {
         "highlight":   "#9CA3AF", "accent":      "#D1D5DB",
         "bg_dark":     "#111827",
     },
+    "claude": {                      # 克制风：近白灰打底，只在成功/警告/错误处上色
+        "primary":     "#C8C8C8", "success":     "#7FA867",
+        "warning":     "#C79A4B", "error":       "#C96A6A",
+        "info":        "#9AA9BD", "muted":       "#6E6E6E",
+        "highlight":   "#B79AD1", "accent":      "#8FAFB8",
+        "bg_dark":     "#1A1A1A",
+    },
 }
 
-_current_theme = "default"
+# 默认主题：claude（暗灰打底 + 少量语义色，观感更静）。`/theme default` 切回高饱和配色。
+COLORS.update(THEMES["claude"])
+_current_theme = "claude"
 
 
 def theme_names() -> list:
@@ -416,7 +425,7 @@ def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
     if len(text) > max_chars:
         text = text[:max_chars] + "…"
     if len(lines) > max_lines:
-        text += f"\n…（共 {len(lines)} 行）"
+        text += f"\n…（共 {len(lines)} 行；完整输出见 /transcript）"
 
     # 归属头只加在首行；单调用批次不加序号，避免噪音
     head = ""
@@ -519,6 +528,89 @@ class StreamingMarkdown:
             self._buffer = ""
 
 
+#: 欢迎面板底部的轮换小提示（同类 CLI 的习惯：一次只给一条，别堆成说明书）
+_TIPS = (
+    "用 /diff 看本次会话改了哪些文件",
+    "长任务会把连续同名调用折叠成一行，/transcript 可展开完整过程",
+    "/theme 换配色：claude（默认）/ default / ocean / paper / mono",
+    "整块粘贴会合并成一条消息；行尾 \\ 回车可手工换行",
+    "/shortcuts 看快捷键面板",
+)
+_tip_index = 0
+
+
+def _pick_tip() -> str:
+    """按顺序轮换（不用 random：同一进程里可预期，便于截图与测试）。"""
+    global _tip_index
+    tip = _TIPS[_tip_index % len(_TIPS)]
+    _tip_index += 1
+    return tip
+
+
+def print_todos(todos, use_rich: bool = True):
+    """待办清单（todo 工具每次变更时刷新一遍）。
+
+    字形与 tools/todo.py 的 `_render` 保持一致（✓ / ▶ / ○），否则模型看到的和
+    用户看到的会是两套符号。
+    """
+    items = [t for t in (todos or []) if isinstance(t, dict)]
+    if not items:
+        c = get_console(use_rich)
+        c.print("[dim]── 待办已清空 ──[/dim]")
+        return
+    c = get_console(use_rich)
+    done = sum(1 for t in items if str(t.get("status") or "todo").lower() == "done")
+    c.print(f"[dim]── 待办 {done}/{len(items)} ──[/dim]")
+    for t in items:
+        status = str(t.get("status") or "todo").strip().lower()
+        title = str(t.get("title") or "").strip()
+        if not title:
+            continue
+        if status == "done":
+            c.print(f"  [success]✓[/success] [dim]{title}[/dim]")
+        elif status == "in_progress":
+            c.print(f"  [primary]▶[/primary] {title}")
+        else:
+            c.print(f"  [dim]○ {title}[/dim]")
+
+
+def _box_width(c: Console) -> int:
+    """输入框总宽度：跟终端宽度走，留一列给行尾（避免正好撞上自动换行）。"""
+    return max(24, int(getattr(c, "width", 80) or 80) - 1)
+
+
+def print_prompt_box_top(use_rich: bool = True):
+    """输入框上边框。
+
+    诚实说明：rich 是行式渲染，做不到同类 CLI 那种"光标真的在框内、整框随输入重绘"。
+    这里画上边框 + 用 `│ ` 作提示符 + 下边框，读起来是一个框。
+    """
+    c = get_console(use_rich)
+    w = _box_width(c)
+    if use_rich:
+        c.print(f"[dim]╭{'─' * (w - 2)}╮[/dim]")
+    else:
+        c.print("+" + "-" * (w - 2) + "+")
+
+
+def print_prompt_box_bottom(use_rich: bool = True,
+                            hint: str = "/shortcuts 快捷键 · /help 命令 · Ctrl+C 中断"):
+    """输入框下边框（提示语嵌在框线上）。
+
+    填充量 = 总宽 - 左框角 - 提示语 - 右框角；中文按**显示宽度**算（cell_len），
+    否则右边缘会比上框线多出一列。
+    """
+    from rich.cells import cell_len
+    c = get_console(use_rich)
+    w = _box_width(c)
+    head, tail = "╰─ ", " ╯"
+    pad = max(0, w - cell_len(head) - cell_len(hint) - cell_len(tail))
+    if use_rich:
+        c.print(f"[dim]{head}[/dim]{hint} [dim]{'─' * pad}{tail.strip()}[/dim]")
+    else:
+        c.print("+- " + hint + " " + "-" * pad + "+")
+
+
 def print_welcome(use_rich: bool = True, info: dict = None):
     """打印欢迎界面。
     info 为 None 时保持极简欢迎（旧调用 / 窄终端回退）；"""
@@ -552,6 +644,8 @@ def print_welcome(use_rich: bool = True, info: dict = None):
     session_id = str(info.get("session_id") or "")
     api_key = str(info.get("api_key") or "（未设置）")
     restored = info.get("restored", False)
+    workspace = str(info.get("workspace") or "")
+    tip = _pick_tip()
 
     rule = "[dim]" + "─" * 26 + "[/dim]"
     status_line = (
@@ -562,17 +656,17 @@ def print_welcome(use_rich: bool = True, info: dict = None):
         f"[primary]{PERSONALITY['emoji']}[/primary] [bold white]{PERSONALITY['name']} · my_agent[/bold white]",
         status_line,
         f"[dim]Session: {escape(session_id)}[/dim]",
+        f"[dim]cwd:     {escape(workspace)}[/dim]",
         "",
         f"[bold white]── 快速开始[/bold white]{rule}",
         "[dim]1.[/dim] 输入目标（支持多行粘贴）",
         "[dim]   行尾 [white]\\\\[/white] + 回车 = 手工换行[/dim]",
-        "[dim]2.[/dim] 对话管理",
-        "[dim]   /new 新建  /sessions 历史  /open <ID>[/dim]",
-        "[dim]3.[/dim] 更多命令",
-        "[dim]   /model  /config  /help  exit[/dim]",
+        "[dim]2.[/dim] /new 新建  /sessions 历史  /open <ID>  /help 全部命令",
         "",
         f"[dim]⚙ 当前模型:[/dim] [white]{escape(model)}[/white]",
         f"[dim]🔑 API Key:[/dim] [white]{escape(api_key)}[/white] [dim](输入 /config 查看)[/dim]",
+        "",
+        f"[dim]💡 {escape(tip)}[/dim]",
     ])
 
     c.print()

@@ -1803,6 +1803,9 @@ class Agent:
         if not self.config.verbose:
             return
         try:
+            from config import TUI_CONFIG
+            if not TUI_CONFIG.get("thinking_indicator", True):
+                return
             self._stop_turn_spinner()
             if sys.stdout.isatty():
                 console = get_console(True)
@@ -1820,7 +1823,13 @@ class Agent:
         def _tick():
             while not stop.wait(SPINNER_TICK_SECONDS):
                 try:
-                    spinner.update(f"✻ 思考中… {_time.monotonic() - started:.1f}s")
+                    # 带上 token 计数与中断方式（对齐同类 CLI 的状态行）：
+                    # 光有秒数看不出"在等什么"，而"↑N ↓M"能让人判断是不是长上下文在慢慢爬。
+                    m = getattr(self, "metrics", None)
+                    up = int(getattr(m, "input_tokens", 0) or 0)
+                    down = int(getattr(m, "output_tokens", 0) or 0)
+                    spinner.update(f"✻ 思考中… {_time.monotonic() - started:.1f}s"
+                                   f" · ↑{up} ↓{down} · Ctrl+C 中断")
                 except Exception:
                     return                      # 转圈已被外部停掉，秒表自行退出
 
@@ -1996,7 +2005,13 @@ class Agent:
         from agent.ui_theme import (
             print_tool_call, print_tool_result, print_edit_call,
             print_edit_diff, print_unified_diff, print_file_write_call,
+            print_todos,
         )
+
+        # 待办清单：todo 工具每次变更都会发这个事件，UI 刷新一遍（✓/▶/○ 与工具输出同字形）
+        if event_type == "todo":
+            print_todos(data.get("todos") or [])
+            return
 
         # 团队成员/子 agent 的归属：面板靠 worker 字段，命令行靠这行前缀
         worker = str(data.get("worker") or "").strip()
