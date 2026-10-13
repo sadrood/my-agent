@@ -726,7 +726,7 @@ SUPERVISOR_CONFIG = {
     "timeout": float(os.getenv("SUPERVISOR_TIMEOUT", "30")),
     # 监管者异常/超时时是否放行（判完成）。默认 true：坏掉的裁判不该把任务卡死。
     "fail_open": os.getenv("SUPERVISOR_FAIL_OPEN", "true").lower() == "true",
-    # 低于该轮数就收尾时**不惊动监管者**（简单任务没必要多花一次调用）
+    # 收尾早于第几轮就不惊动监管者（1 基：1 = 从第 1 轮起就复核；2 = 前 1 轮不审）
     "min_turns": int(os.getenv("SUPERVISOR_MIN_TURNS", "1")),
     # 目标短于这么多字视为闲聊问答，不审（真任务一律复核）
     "min_goal_chars": int(os.getenv("SUPERVISOR_MIN_GOAL_CHARS", "12")),

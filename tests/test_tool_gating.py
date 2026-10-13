@@ -201,3 +201,33 @@ class TestSchemaIsSerializable:
         tm = ToolManager()
         bad = [n for n, t in tm._tools.items() if not isinstance(getattr(t, "schema", None), dict)]
         assert not bad, f"schema 不是 dict（应为 @property）：{bad}"
+
+
+class TestGatedAutoUnload:
+    """门控工具不能只增不减：连续空闲超过阈值就自动卸下，长会话才真的省 token。"""
+
+    def _names(self, manager):
+        return [t["function"]["name"] for t in manager.list_openai_schemas()]
+
+    def test_idle_gated_tool_is_evicted(self, manager):
+        from tools.tool_manager import GATED_IDLE_TURNS
+        manager.mark_loaded(["gated_a"])
+        for _ in range(GATED_IDLE_TURNS - 1):          # 空闲到阈值前一轮：仍保留
+            assert manager.begin_round() == []
+        assert "gated_a" in self._names(manager)
+        assert manager.begin_round() == ["gated_a"]    # 到阈值：卸下
+        assert "gated_a" not in self._names(manager)
+
+    def test_used_gated_tool_keeps_alive(self, manager):
+        from tools.tool_manager import GATED_IDLE_TURNS
+        manager.mark_loaded(["gated_a"])
+        for _ in range(GATED_IDLE_TURNS + 3):
+            manager.begin_round()
+            manager.note_tool_used("gated_a")          # 每轮都用到 → 不该被卸
+        assert "gated_a" in self._names(manager)
+
+    def test_reload_restarts_the_clock(self, manager):
+        manager.mark_loaded(["gated_a"])
+        manager.mark_unloaded(["gated_a"])
+        manager.mark_loaded(["gated_a"])               # 重新装载
+        assert manager.begin_round() == []             # 不该因残留的旧计时立刻被卸

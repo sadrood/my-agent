@@ -27,12 +27,19 @@ from models.prompts import (
 )
 from tools.base import ToolResult
 from tools.tool_manager import ToolManager
-from config import VISION_CONFIG, TOOL_CONFIG, APPROVAL_CONFIG, COMPACT_CONFIG
+from config import VISION_CONFIG, TOOL_CONFIG, APPROVAL_CONFIG, COMPACT_CONFIG, TEST_CONFIG
 
 logger = logging.getLogger(__name__)
 
 #: 支持增量输出回调的工具：terminal 逐行吐、delegate 吐子 agent 的流式片段
 STREAM_TOOLS = ("terminal", "delegate")
+
+#: 视为"代码/配置"的扩展名：收尾验证闸门据此判断"改了该验证的东西"
+CODE_FILE_EXTS = (
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb",
+    ".php", ".c", ".h", ".cpp", ".hpp", ".cs", ".sh", ".ps1", ".bat", ".cmd",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sql",
+)
 
 
 def stream_label(tool_name: str, arguments: dict = None) -> str:
@@ -491,12 +498,22 @@ class Executor:
         completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
         completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
         completion_nudges = 0
+        # 收尾验证闸门（宿主侧规则，不依赖模型自愿列清单）：本轮改过代码/配置却没跑测试，推一次先验证再收尾。
+        verify_gate = bool(TOOL_CONFIG.get("loop_verify_gate", True))
+        verify_nudged = False
+        changed_code_paths: set = set()
         # : 只统计**本次循环开始之后**创建/更新的任务：任务清单是全局跨会话的: （memory/tasks.json），历史遗留的 todo 会造成无关的"还没做完"误判。
         loop_started_at = time.strftime("%Y-%m-%d %H:%M")
         # : 会话待办清单（todo_write）的**起始快照**：清单项没有时间戳，没法像任务板: 那样按时间过滤，所以记下循环开始时就已经挂着的 id——只有本次循环期间新增、: 且结束时仍未完成的待办才触发闸门。
         pending_todos_at_start = self._pending_todo_ids()
         # 用 itertools.count() 而不是 while：循环体内有多处 continue（空回复重试等），for 循环会自动推进 turn，while 则会漏自增导致死循环。
         for turn in itertools.count():
+            # 进入新一轮：卸下连续空闲的门控工具——否则长会话里被装载的门控工具永不回收，
+            # "省 token" 只对没触发关键词的短会话成立。
+            try:
+                self.tool_manager.begin_round()
+            except Exception:                    # noqa: BLE001
+                pass
             # 每轮重取工具集：模型中途 tools load 装载的工具，从下一轮起就能调用
             tools = self._fc_tools()
             # 结算上一轮：放在迭代开头，这样体内任何 continue 都不会漏结算
@@ -506,12 +523,7 @@ class Executor:
             # 预警必须先于「停」判断：预算恰好同时耗尽的那一轮（used 与
             # stagnation_turns 同时到位）旧顺序会先 break，把更准确的「已连续 N 轮
             # 没有产出」吞掉、只剩「轮数耗尽」。
-            # ⚠️ 必须 getattr 兜底：loop_budget 的 stagnation_alarm / stagnation_turns
-            # **只存在于某个会话尚未提交的工作区里**，仓库里没有任何一次提交包含它
-            # （git log -S "def stagnation_alarm" -- agent/loop_budget.py 为空）。
-            # 也就是说：checkout 干净的 main 会在这里 AttributeError，第一个目标就崩。
-            # 兜底之后 main 能跑，只是少了「连续无进展」预警；等那份 loop_budget.py
-            # 提交上来，预警会自动恢复。
+            # 预算对象允许不带该方法（软依赖契约见 tests/test_loop_budget_contract.py）
             _alarm = getattr(budget, "stagnation_alarm", None)
             if _alarm is not None and _alarm():
                 alarm_data = {
@@ -736,6 +748,32 @@ class Executor:
                         pass
                     final = ""
                 consecutive_empty = 0
+                # 收尾验证闸门：改过代码/配置但全程没跑测试 → 推一次"先验证"。只推一次，不阻塞（模型可说明为何不需要测试）。
+                if (final and verify_gate and not verify_nudged and changed_code_paths
+                        and not self._tests_ran(tool_calls_log)):
+                    verify_nudged = True
+                    verify_data = {
+                        "turn": turn + 1,
+                        "files": sorted(changed_code_paths)[:3],
+                        "test_command": str(TEST_CONFIG.get("command", "") or ""),
+                    }
+                    self._emit("verify_nudge", verify_data)
+                    if self._event_sink is not None:
+                        try:
+                            self._event_sink("verify_nudge", verify_data)
+                        except Exception:
+                            pass
+                    messages.append({"role": "assistant", "content": final})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "（先别收尾：本轮改动了代码/配置，但还没见你运行测试验证。"
+                            "请先执行 `%s` 确认没改坏再给最终答案；若确实不需要测试，"
+                            "说明原因即可结束。）"
+                            % str(TEST_CONFIG.get("command", "") or "pytest tests -q")
+                        ),
+                    })
+                    continue
                 # 完成度闸门：模型给出最终答案时，若它**自己的任务清单**里还有本次工作产生的未完成项，就把它推回去继续——"让 agent 做完任务再结束"。
                 if final and completion_gate and completion_nudges < completion_nudge_max:
                     pending_titles = self._unfinished_items(loop_started_at,
@@ -897,6 +935,8 @@ class Executor:
 
             for batch_i, (tc, (result, blocked_reason, seconds)) in enumerate(
                     zip(batch, executed), 1):
+                # 门控工具本轮被用到 → 续命（用到一次不会立刻被空闲回收）
+                self.tool_manager.note_tool_used(tc.name)
                 if id(tc) in bad:
                     # 参数解析失败、未执行：header 在这里补，紧贴它自己的失败结果
                     self._emit_tool_call_display(event_sink, tc.name, tc.arguments,
@@ -905,6 +945,8 @@ class Executor:
                 changed = self._changed_file(tc.name, tc.arguments) if result.success else None
                 if changed:
                     pending.files_changed += 1
+                    if self._is_code_path(changed):
+                        changed_code_paths.add(changed)
                 if result.success:
                     pending.succeeded += 1
                 elif not blocked_reason:
@@ -989,7 +1031,8 @@ class Executor:
             cfg = self.supervisor.config
             if not self.supervisor.enabled:
                 return None
-            if int(cfg.get("min_turns", 1)) > turn:
+            # turn 从 0 起，min_turns 是"至少跑了几轮"的 1 基语义：直接比会漏审首轮。
+            if int(cfg.get("min_turns", 1)) > turn + 1:
                 return None
             # 一句话问答（"3+4 等于几"）不值得多花一次调用；真任务一律复核。（注意判据是**目标长度 + 轮次**，不是"用没用工具"——纯文字交付的长任务同样可能只做了一半，那正是最该复核的情况。）
             if len(str(goal or "").strip()) < int(cfg.get("min_goal_chars", 12)):
@@ -1201,6 +1244,24 @@ class Executor:
         return ""
 
     @staticmethod
+    def _is_code_path(path: str) -> bool:
+        """是否为代码/配置文件（收尾验证闸门据此判断"改了该验证的东西"）。"""
+        return str(path or "").lower().endswith(CODE_FILE_EXTS)
+
+    @staticmethod
+    def _tests_ran(tool_calls_log: list) -> bool:
+        """本循环是否真的跑过测试（transcript 里出现 TEST_CONFIG.command 的首个词）。"""
+        probe = str(TEST_CONFIG.get("command", "") or "").strip().split()
+        needle = probe[0].lower() if probe else "pytest"
+        for rec in tool_calls_log or ():
+            if rec.get("name") != "terminal":
+                continue
+            cmd = str((rec.get("arguments") or {}).get("command", "") or "").lower()
+            if needle and needle in cmd:
+                return True
+        return False
+
+    @staticmethod
     def _is_rate_limit(e: Exception) -> bool:
         """判断是否为限流/配额类错误（429 / tpm/rpm exhausted / quota）。"""
         s = str(e).lower()
@@ -1241,25 +1302,9 @@ class Executor:
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """估算消息列表 token 数（复用 rollout 的 CJK 感知算法）。"""
-        from agent.rollout import estimate_tokens as _est
-        total = 0
-        for m in messages:
-            content = m.get("content", "")
-            if isinstance(content, list):          # 多模态内容
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        total += _est(part.get("text", ""))
-            else:
-                total += _est(str(content or ""))
-            tc = m.get("tool_calls")
-            if tc:
-                import json as _json
-                try:
-                    total += _est(_json.dumps(tc, ensure_ascii=False))
-                except Exception:
-                    total += _est(str(tc))
-        return total
+        """估算消息列表 token 数（与 rollout 共用同一实现，避免两套口径对同一阈值漂移）。"""
+        from agent.rollout import Rollout
+        return Rollout.messages_token_estimate(messages)
 
     def _compact_threshold(self) -> int:
         """压缩触发阈值：模块级 COMPACT_CONFIG.token_threshold 显式 >0 优先

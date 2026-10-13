@@ -71,3 +71,28 @@ def test_experiences_roundtrip(mem):
                         summary="完成", tool_usage={"terminal": 1}, errors=[])
     again = Memory(db_path=str(store(mem).parent))
     assert any("做个测试" in e.goal for e in again.experiences)
+
+
+def test_concurrent_saves_use_unique_tmp(mem):
+    """并发写同一 chat 目录：临时名必须每个写入者唯一，否则会共用同一个 .tmp 互相截断。"""
+    import threading
+
+    errs = []
+
+    def writer(n):
+        try:
+            for i in range(20):
+                mem._save_json("shared.json", {"who": n, "i": i})
+        except BaseException as e:   # noqa: BLE001
+            errs.append(repr(e))
+
+    ts = [threading.Thread(target=writer, args=(n,)) for n in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+    assert not errs, f"并发写报错（临时名撞车）: {errs[:3]}"
+    data = json.loads((store(mem) / "shared.json").read_text(encoding="utf-8"))
+    assert "who" in data, "最终文件应是完整 JSON，不是半截图"
+    assert not list(store(mem).glob("*.tmp")), "并发写不应残留临时文件"

@@ -123,13 +123,13 @@ class TestTokenEstimate:
         )
 
     def test_cjk_counted_near_one_token_per_char(self):
-        """中文一字≈1 token，不能被"字符数/3"低估。"""
-        assert Executor._estimate_tokens([{"role": "user", "content": "你好世界"}]) == 4
+        """中文一字≈1 token（另加每条消息 4 token 协议开销）。"""
+        assert Executor._estimate_tokens([{"role": "user", "content": "你好世界"}]) == 8
         assert Executor._estimate_tokens([{"role": "user", "content": "中" * 100}]) >= 90
 
     def test_ascii_uses_quarter_ratio(self):
-        """英文按 ≈4 字符/token 估算。"""
-        assert Executor._estimate_tokens([{"role": "user", "content": "x" * 400}]) == 100
+        """英文按 ≈4 字符/token 估算（另加每条消息 4 token 协议开销）。"""
+        assert Executor._estimate_tokens([{"role": "user", "content": "x" * 400}]) == 104
 
     def test_multimodal_text_parts_counted(self):
         """多模态 content 数组里的 text 部分也要计入。"""

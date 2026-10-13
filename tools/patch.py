@@ -4,32 +4,7 @@ import re
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
-
-
-def _kill_process_tree(proc) -> None:
-    """连**子孙进程**一起杀。
-    （`timeout=1` 的命令拖了 5.08s 才返回）。"""
-    import subprocess
-    try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           capture_output=True, timeout=15)
-        else:
-            import signal
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def _new_process_group_kwargs() -> dict:
-    """让子进程自成一个进程组/会话，超时时才能整组杀掉。"""
-    import subprocess
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
+from tools.proc_util import kill_process_tree, new_process_group_kwargs
 
 # metadata.old_text 截断上限：unified diff 渲染用的旧内容快照，超大文件截断（old_text_truncated=True），避免撑爆事件负载
 _OLD_TEXT_META_MAX = 100 * 1024
@@ -342,14 +317,14 @@ class EditTool(BaseTool):
                     stdout=out_file, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,   # 防止命令意外读取 stdin 而永久阻塞
                     cwd=self._find_repo_root(file_path),
-                    **_new_process_group_kwargs(),
+                    **new_process_group_kwargs(),
                 )
                 try:
                     proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     # 光返回不够：挂死的测试进程要真被杀掉，否则它会一直占着文件句柄/端口，下一次 preflight 照样受影响。
-                    _kill_process_tree(proc)
+                    kill_process_tree(proc)
                     try:
                         proc.wait(timeout=10)
                     except Exception:

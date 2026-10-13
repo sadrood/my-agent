@@ -87,6 +87,8 @@ def start(on_run) -> None:
     with _lock:
         if _thread and _thread.is_alive():
             return
+        # stop() 会把 _stop 置位；重启前不清掉，新线程会立刻退出，start 变成空操作。
+        _stop.clear()
 
     def _loop():
         while not _stop.is_set():

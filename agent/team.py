@@ -45,6 +45,9 @@ class SubTask:
     depends_on: List[str] = field(default_factory=list)  # 依赖的子任务 id 列表（DAG 细粒度调度）
     # : 已被上层放弃（并发波次超时）：worker 线程是 daemon、超时不会取消它，晚到的: 结果会把 failed 覆写成 completed，同一个子任务上 status 与 error 自相矛盾。: 见到这个标记就不要再改状态了。
     abandoned: bool = False
+    # 协作式取消：并发波次超时时置位，worker 在轮次边界与每次工具调用前自检后收手，
+    # 不再继续占着工具互斥锁、也不再写文件（daemon 线程本身杀不掉）。
+    cancel_event: Optional[threading.Event] = None
 
     def to_dict(self) -> dict:
         return {
@@ -82,8 +85,8 @@ class WorkerAgent:
         self.approval = approval
 
     def execute(self, task: str, context: str = "", max_rounds: int = 10,
-                emit: Optional[callable] = None) -> str:
-        """执行一个子任务。"""
+                emit: Optional[callable] = None, cancel=None) -> str:
+        """执行一个子任务。cancel 为置位即收手的协作式取消信号（可选）。"""
         messages = [
             {"role": "system", "content": self.role.system_prompt},
             {"role": "user", "content": (
@@ -95,14 +98,18 @@ class WorkerAgent:
         ]
 
         result_parts = []
-        tool_descriptions = self.tool_manager.get_all_descriptions()
 
         for _ in range(max_rounds):
+            if cancel is not None and cancel.is_set():
+                break
             response = self.llm.chat(messages, temperature=self.role.temperature, max_tokens=2000)
 
             # 尝试解析工具调用
             tool_call = self._parse_tool_call(response)
             if tool_call:
+                # 取消已生效：不再发起这次工具调用（避免继续占工具锁 / 写文件）
+                if cancel is not None and cancel.is_set():
+                    break
                 tool_name, tool_input = tool_call
                 # 检查工具权限
                 if tool_name not in self.role.tools and tool_name not in ("browser",) and "*" not in self.role.tools:
@@ -405,6 +412,7 @@ class Team:
                 task=st.description,
                 context=context,
                 emit=lambda t, d, _s=st: self._emit(t, {**d, "mode": "team", "subtask": _s.id}),
+                cancel=st.cancel_event,
             )
             # 已经判过失败的（并发波次超时）不再改写：worker 线程是 daemon，超时不会取消它，晚到的结果会把 failed 覆写成 completed。
             if st.abandoned:
@@ -449,6 +457,7 @@ class Team:
         deadline = time.time() + timeout
         threads = []
         for st in subtasks:
+            st.cancel_event = threading.Event()   # 起线程前先建好，超时分支置位时不会因 None 落空
             t = threading.Thread(target=_run, args=(st,), daemon=True,
                                  name=f"team-worker-{st.id}")
             t.start()
@@ -459,7 +468,10 @@ class Team:
         for st, t in zip(subtasks, threads):
             # "pending" 也要算：worker 线程是先 start 再在函数体里置 "running" 的，只判 "running" 会漏掉"线程已起但还没跑到置状态"那一小段窗口。
             if t.is_alive() and st.status in ("pending", "running"):
-                # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃，并让 _execute_subtask 见到 abandoned 后不再改写状态
+                # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃并置协作式取消，
+                # 让 worker 在下一个轮次边界/工具调用前收手，不再占工具锁、不再写文件。
+                if st.cancel_event is not None:
+                    st.cancel_event.set()
                 st.abandoned = True
                 st.status = "failed"
                 st.result = ""

@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from config import PROJECT_ROOT, SESSION_CONFIG
+from agent.atomic_io import atomic_write_json
 
 
 def _resolve_session_dir(config: dict) -> str:
@@ -62,31 +63,9 @@ def _dump_lock_for(path: str) -> threading.Lock:
 
 
 def _atomic_dump(path: str, payload: dict) -> None:
-    """原子写 JSON：紧凑序列化（长会话体积/耗时大幅下降）+ 临时文件替换，
-    避免写入中断产生半损坏文件。"""
-    # 兜底：写入前确保目标目录存在（防目录被误删 / cwd 漂移等极端情况）
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    # 临时名必须**每个写入者唯一**：主 Agent 每轮整份重写会话，dashboard 的侧任务同时做"读→追加→写回"，两者会撞在同一个会话文件上。
-    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with _dump_lock_for(path):
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
-        # 进程内已串行，但**跨进程**（CLI 与桌面端后端）仍可能撞上同一个目标文件；Windows 的 os.replace 遇到被占用的目标会抛 PermissionError，重试即可。
-        last_error: Optional[OSError] = None
-        for attempt in range(8):
-            try:
-                os.replace(tmp_path, path)
-                return
-            except PermissionError as e:
-                last_error = e
-                time.sleep(0.05 * (attempt + 1))
-        try:
-            os.remove(tmp_path)          # 彻底失败也别留垃圾
-        except OSError:
-            pass
-        raise last_error if last_error else OSError(f"写入失败: {path}")
+    """原子写 JSON：紧凑序列化（长会话体积/耗时大幅下降）+ 临时文件替换。"""
+    # 传入的是 RLock（可重入）：append_messages 会持锁调用本函数，两者取同一把锁不会死锁。
+    atomic_write_json(path, payload, compact=True, lock=_dump_lock_for(path))
 
 
 class SessionStore:

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional
 
+from agent.atomic_io import atomic_write_json
 from config import LEARN_CONFIG
 
 from config import PROJECT_ROOT
@@ -1117,25 +1118,9 @@ class Memory:
     # ================================================================
 
     def _save_json(self, filename: str, data, chat_dir: str = None):
-        """原子保存数据到 JSON 文件（临时文件 + os.replace）。"""
+        """原子保存数据到 JSON 文件（统一走 agent.atomic_io）。"""
         base = chat_dir or self.chat_db_path
-        os.makedirs(base, exist_ok=True)
-        filepath = os.path.join(base, filename)
-        tmp = f"{filepath}.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, filepath)     # 原子替换，失败时原文件完好
-        except BaseException:
-            # 必须捕 BaseException：真实的中断是 Ctrl+C（KeyboardInterrupt），它不是 Exception 的子类，只捕 Exception 会漏掉"最需要清理"的那种情况，临时文件残留在数据目录里。
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(os.path.join(base, filename), data, compact=False)
 
     def _load_json(self, filename: str, chat_dir: str = None) -> list:
         """从 JSON 文件加载数据；损坏时**改名保留**并告警，绝不静默清空。"""

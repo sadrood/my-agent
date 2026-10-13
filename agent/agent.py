@@ -587,9 +587,12 @@ class Agent:
             llm = build_supervisor_llm(self.llm)
             sup = Supervisor(llm=llm)
             if llm is self.llm and SUPERVISOR_CONFIG.get("model"):
-                # 没配独立端点 → 与执行同一个模型，效果打折，但明确告诉用户
-                sup.config = dict(sup.config)
-                sup.config["same_vendor_warning"] = True
+                # 没配独立端点 → 与执行同一个模型，"独立复核"退化为自我确认；必须让用户看见，不能静默降级。
+                print_warning(
+                    "监管者未配置独立端点（SUPERVISOR_BASE_URL / SUPERVISOR_API_KEY 为空），"
+                    "将用主模型自评完成度，复核强度打折。",
+                    use_rich=self.config.verbose,
+                )
             return sup
         except Exception:                       # noqa: BLE001
             return None
@@ -1660,13 +1663,14 @@ class Agent:
             )
         if self.instructions_text:
             system_prompt += f"\n\n## 项目指令（必须遵守）\n{self.instructions_text}"
-        # Skills 技能包（技能包式能力扩展）：放在 AGENTS.md 指令之后；未启用 / 无技能 / 异常时静默，不影响主流程。
+        # Skills 技能包按 goal 渲染（命中哪条技能随目标变）→ 放进**首条用户消息**而非系统提示：
+        # 系统提示才可能逐字稳定、命中提示缓存，把每目标都变的内容混进去会整段失效。未启用/无技能/异常时静默。
         try:
             skills_prompt = self._render_skills_prompt(planning_goal)
         except Exception:
             skills_prompt = ""
         if skills_prompt:
-            system_prompt += "\n\n" + skills_prompt
+            context_text = (skills_prompt + "\n\n" + context_text).strip() if context_text else skills_prompt
 
         # 5. 单循环执行（流式渲染：思考转圈 → 逐字输出答案，加粗实时生效）
         self._stop_turn_spinner()            # 连带收掉上一轮可能残留的秒表线程

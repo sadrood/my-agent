@@ -593,3 +593,25 @@ class TestBackwardCompat:
         assert ALL_ROLES["researcher"].system_prompt in prompts
         assert set(prompts) <= {role.system_prompt for role in ALL_ROLES.values()}, \
             "worker 的系统提示必须来自角色定义，不能是别的"
+
+
+def test_worker_cancel_stops_before_next_llm_call():
+    """cancel 置位后 worker 立即收手：连一次 LLM 调用都不发（不再继续占工具锁/写文件）。"""
+    from agent.roles import AgentRole
+    from agent.team import WorkerAgent
+
+    calls = []
+
+    class CountingLLM:
+        def chat(self, *a, **k):
+            calls.append(1)
+            return "不该被调用"
+
+    role = AgentRole(name="tester", description="测试角色",
+                     system_prompt="你是测试角色", tools=["*"])
+    ev = threading.Event()
+    ev.set()
+    worker = WorkerAgent(name="w", role=role, llm=CountingLLM(), tool_manager=None)
+    out = worker.execute("做点事", cancel=ev)
+    assert calls == [], "取消已置位，不该再调用 LLM"
+    assert out == ""

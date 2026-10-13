@@ -525,10 +525,11 @@ class TestAgentIntegration:
             skills_user_dir=str(tmp_path / "no_user_skills"),
         )
         agent.run("帮我生成 Excel 报表")
-        system_msg = agent.llm.tools_calls[0][0]["content"]
-        assert "## 可用技能（Skills）" in system_msg
-        assert "使用 openpyxl 生成 xlsx 文件。" in system_msg       # 命中技能正文
-        assert "生成 Excel 报表" in system_msg                     # 技能索引
+        # 技能提示按 goal 渲染、放进首条用户消息（不混进系统提示，以免每目标都破坏提示缓存前缀）
+        user_msg = agent.llm.tools_calls[0][1]["content"]
+        assert "## 可用技能（Skills）" in user_msg
+        assert "使用 openpyxl 生成 xlsx 文件。" in user_msg       # 命中技能正文
+        assert "生成 Excel 报表" in user_msg                     # 技能索引
 
     def test_no_hit_skill_body_absent(self, tmp_path):
         """goal 不命中技能时，system prompt 不含技能正文。"""
@@ -547,9 +548,9 @@ class TestAgentIntegration:
             skills_user_dir=str(tmp_path / "no_user_skills"),
         )
         agent.run("写一首诗")
-        system_msg = agent.llm.tools_calls[0][0]["content"]
-        assert "秘密正文：openpyxl 专属步骤。" not in system_msg
-        assert "命中技能正文" not in system_msg
+        joined = agent.llm.tools_calls[0][0]["content"] + agent.llm.tools_calls[0][1]["content"]
+        assert "秘密正文：openpyxl 专属步骤。" not in joined
+        assert "命中技能正文" not in joined
 
     def test_disabled_no_injection(self, tmp_path):
         """skills_enabled=False：不注入任何技能内容。"""
@@ -566,9 +567,9 @@ class TestAgentIntegration:
         )
         assert agent._render_skills_prompt("生成 excel 报表") == ""  # 渲染路径直接返回空
         agent.run("生成 excel 报表")
-        system_msg = agent.llm.tools_calls[0][0]["content"]
-        assert "## 可用技能（Skills）" not in system_msg
-        assert "正文-excel" not in system_msg
+        joined = agent.llm.tools_calls[0][0]["content"] + agent.llm.tools_calls[0][1]["content"]
+        assert "## 可用技能（Skills）" not in joined
+        assert "正文-excel" not in joined
 
     def test_no_skills_no_injection(self, tmp_path):
         """技能为空（目录不存在）：不注入任何内容。"""
@@ -581,8 +582,8 @@ class TestAgentIntegration:
         )
         assert agent._render_skills_prompt("任意目标") == ""
         agent.run("任意目标")
-        system_msg = agent.llm.tools_calls[0][0]["content"]
-        assert "## 可用技能（Skills）" not in system_msg
+        joined = agent.llm.tools_calls[0][0]["content"] + agent.llm.tools_calls[0][1]["content"]
+        assert "## 可用技能（Skills）" not in joined
 
     def test_skills_exception_silent(self, tmp_path, monkeypatch):
         """skills 相关异常静默吞掉，不影响主流程。"""
