@@ -149,10 +149,13 @@ class TestCliOutput:
         assert "SECRET-XYZ" in out, "明确要了就一定给"
         assert "日志" in out or "保存" in out, "同时提醒别泄露"
 
-    def test_flag_is_registered(self):
-        import inspect
-        src = inspect.getsource(qb.main)
-        assert "--print-secret" in src
+    def test_flag_is_registered(self, capsys):
+        # 走 --help 而不是读源码：读源码要经 linecache 读盘，别的进程同时在改仓库时
+        # 会读到半截文件（曾偶发失败）。跑一遍 argparse 才是真正验"参数注册了"。
+        with pytest.raises(SystemExit) as exc:
+            qb.main(["--help"])
+        assert exc.value.code == 0
+        assert "--print-secret" in capsys.readouterr().out
 
     def test_bind_writes_openid_into_allow_from(self, monkeypatch, capsys):
         code, out, written = self._run(monkeypatch, capsys, [])
