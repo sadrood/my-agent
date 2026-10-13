@@ -1641,6 +1641,10 @@ class Agent:
         if self.tool_manager.get_tool("computer") is not None:
             from models.prompts import COMPUTER_USE_PROMPT_GUIDE
             system_prompt += "\n\n" + COMPUTER_USE_PROMPT_GUIDE
+        # 能中途向用户提问时，明确"什么时候该问、什么时候别问"
+        if self.tool_manager.get_tool("ask_user") is not None:
+            from models.prompts import ASK_USER_PROMPT_GUIDE
+            system_prompt += "\n\n" + ASK_USER_PROMPT_GUIDE
         # 多引擎协作：内置 Agent 主动委托外部 CLI 引擎（delegate 工具存在时）
         if self.tool_manager.get_tool("delegate") is not None:
             from models.prompts import DELEGATE_GUIDE_PROMPT

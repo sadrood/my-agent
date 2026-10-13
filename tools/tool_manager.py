@@ -150,6 +150,13 @@ class ToolManager:
         except Exception:
             pass
 
+        # 向用户提问（任务中途需要人拍板）：借主循环那套"提示符 + 输出闸门"通道
+        try:
+            from tools.ask import AskTool
+            self.register(AskTool())
+        except Exception:
+            pass
+
         # 桌面操控工具（仅 Windows 有实现，且受 COMPUTER_USE_ENABLED 控制）：高危走审批门。
         try:
             from config import COMPUTER_USE_CONFIG
