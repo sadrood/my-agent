@@ -43,6 +43,27 @@ GUARDIAN_USER_TEMPLATE = """当前任务目标: {goal}
 
 请判断是否允许执行。只输出 JSON。"""
 
+#: 提示词已明令禁止的拦截理由（"任务相关性"不是安全风险）。判审模型偶尔会违反，
+#: 用代码兜住：命中这些措辞且**没有**真实安全信号时，把 block 降级为 allow。
+_RELEVANCE_REASONS = ("偏离当前任务", "偏离任务", "与任务无关", "和任务无关", "与当前任务无关",
+                      "任务无关", "与本次任务无关", "没有必要", "浪费时间", "浪费资源",
+                      "无法推进任务", "与目标无关", "偏离目标", "无效操作")
+#: 真实安全信号：出现这些就**不降级**（宁可误拦，也不放过破坏性/外发动作）
+_SAFETY_SIGNALS = ("删除", "删除文件", "格式化", "覆盖", "清空", "rm ", "rm-", "del ", "rmdir",
+                   "mkfs", "dd if", "discard", "reset --hard", "push --force", "force-push",
+                   "外发", "外传", "上传", "发送到外部", "发到外部", "泄露", "窃取", "上传到",
+                   "密钥", "token", "凭据", "密码", "支付", "转账", "邮件", "curl -X POST",
+                   "post 请求", "写入系统", "注册表", "关机", "重启", "kill -9", "taskkill")
+
+
+def _is_relevance_only_block(reason: str, request) -> bool:
+    """block 理由是否纯属"任务相关性"，且这次调用没有真实安全信号。"""
+    text = str(reason or "")
+    if not any(k in text for k in _RELEVANCE_REASONS):
+        return False
+    blob = f"{request.tool_name} {request.command} {request.arguments}"
+    return not any(k.lower() in blob.lower() for k in _SAFETY_SIGNALS)
+
 
 @dataclass
 class GuardianVerdict:
@@ -62,6 +83,7 @@ class Guardian:
         self.llm = llm
         self.review_count = 0
         self.block_count = 0
+        self.relevance_downgrade_count = 0      # 被代码兜住的"相关性拦截"次数（提示词违例计量）
 
     @property
     def enabled(self) -> bool:
@@ -95,6 +117,18 @@ class Guardian:
             raw = self._call_with_timeout(messages, model, timeout)
 
             verdict, reason = self._parse(raw)
+            if verdict == "block" and _is_relevance_only_block(reason, request):
+                # 判审模型违反了提示词里"不许拿任务相关性拦人"的禁令：降级放行并留痕，
+                # 否则 Agent 连读本项目源码都会被拦死（实测发生过）。
+                self.relevance_downgrade_count += 1
+                try:
+                    from agent import run_log
+                    run_log.log(f"Guardian 相关性拦截已降级为放行：{request.tool_name} "
+                                f"| 原理由：{reason[:120]}", "warn")
+                except Exception:               # noqa: BLE001
+                    pass
+                verdict = "allow"
+                reason = f"（已忽略相关性拦截）{reason}"
             if verdict == "block":
                 self.block_count += 1
             return GuardianVerdict(verdict=verdict, reason=reason, used=True)
