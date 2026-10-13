@@ -166,6 +166,22 @@ def save_env(app_id: str, app_secret: str, env_path: str = ".env",
     return os.path.abspath(env_path)
 
 
+def check_credentials(app_id: str, secret: str,
+                      timeout: float = REQUEST_TIMEOUT) -> Tuple[bool, str]:
+    """拿这对凭据换一次 access_token：能换来才算真绑上（失败给人话，不抛异常）。"""
+    import requests
+    try:
+        resp = requests.post("https://bots.qq.com/app/getAppAccessToken",
+                             json={"appId": str(app_id), "clientSecret": str(secret)},
+                             timeout=timeout)
+        data = resp.json()
+    except Exception as exc:                    # noqa: BLE001 —— 网络问题不该伪装成凭据问题
+        return False, f"自检没能连上腾讯（{exc}）"
+    if data.get("access_token"):
+        return True, "凭据自检通过：能换到 access_token"
+    return False, f"腾讯拒绝了这对凭据（{data.get('code')} {data.get('message')}）"
+
+
 def bind(source: str = DEFAULT_SOURCE, env: str = "production",
          total_timeout: float = 600.0, interval: float = POLL_INTERVAL,
          on_qr: Optional[Callable[[str], None]] = None,
@@ -257,6 +273,12 @@ def main(argv: Optional[list] = None) -> int:
               f"，AppSecret 已写入 {args.env_file}（不回显）")
         if extra:
             print(f"白名单已写入 QQBOT_ALLOW_FROM={openid}（绑定人本人）")
+        ok, detail = check_credentials(result["app_id"], result["app_secret"])
+        print(("✔ " if ok else "⚠ ") + detail)
+        if not ok:
+            print("  这对凭据起不了桥：去 QQ 开放平台核对机器人的 AppID/AppSecret，"
+                  "或换一个属于你自己的机器人。")
+            return 4
     print("下一步：python -m agent.qqbot 启动桥（先 pip install qq-botpy）")
     return 0
 

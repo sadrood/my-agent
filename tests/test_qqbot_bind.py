@@ -126,6 +126,7 @@ class TestCliOutput:
         monkeypatch.setattr(qb, "save_env",
                             lambda a, s, p, extra=None: written.append((a, s, p, extra)) or p)
         monkeypatch.setattr(qb, "read_env_value", lambda p, k: allow_from)
+        monkeypatch.setattr(qb, "check_credentials", lambda a, s, **kw: (True, "自检通过"))
         code = qb.main(argv)
         return code, capsys.readouterr().out, written
 
@@ -238,6 +239,7 @@ class TestQrAndCli:
     def test_main_success_writes_env(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(qb, "bind", lambda **kw: {"app_id": "190", "app_secret": "SEC",
                                                       "user_openid": ""})
+        monkeypatch.setattr(qb, "check_credentials", lambda a, s, **kw: (True, "自检通过"))
         env_file = tmp_path / ".env"
         assert qb.main(["--env-file", str(env_file), "--png", str(tmp_path / "q.png")]) == 0
         assert "QQBOT_APP_ID=190" in env_file.read_text(encoding="utf-8")
@@ -256,3 +258,35 @@ class TestQrAndCli:
         monkeypatch.setattr(qb, "bind", boom)
         assert qb.main(["--env-file", str(env_file)]) == 1
         assert "绑定失败" in capsys.readouterr().out
+
+    def test_main_returns_4_when_credentials_are_rejected(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(qb, "bind", lambda **kw: {"app_id": "190", "app_secret": "SEC",
+                                                      "user_openid": ""})
+        monkeypatch.setattr(qb, "check_credentials",
+                            lambda a, s, **kw: (False, "腾讯拒绝了这对凭据（100016 x）"))
+        env_file = tmp_path / ".env"
+        code = qb.main(["--env-file", str(env_file), "--png", str(tmp_path / "q.png")])
+        assert code == 4, "凭据用不了就别让调用方接着起桥"
+        out = capsys.readouterr().out
+        assert "100016" in out and "开放平台" in out
+
+
+class TestCredentialCheck:
+    """绑定后自检：腾讯不认这对凭据时必须当场说清楚。"""
+
+    def _fake_requests(self, monkeypatch, payload):
+        import sys
+        import types
+        monkeypatch.setitem(sys.modules, "requests",
+                            types.SimpleNamespace(post=lambda *a, **k: types.SimpleNamespace(
+                                json=lambda: payload)))
+
+    def test_ok(self, monkeypatch):
+        self._fake_requests(monkeypatch, {"access_token": "t", "expires_in": "7200"})
+        ok, detail = qb.check_credentials("190", "SEC")
+        assert ok and "access_token" in detail
+
+    def test_rejection_is_reported(self, monkeypatch):
+        self._fake_requests(monkeypatch, {"code": 100016, "message": "invalid appid or secret"})
+        ok, detail = qb.check_credentials("190", "SEC")
+        assert not ok and "100016" in detail
