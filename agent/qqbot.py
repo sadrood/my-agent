@@ -266,8 +266,12 @@ class UserSession:
                     timer.cancel()
             return self.last_output
 
-    def screenshot(self) -> tuple:
-        """抓当前页面一帧，返回 (base64, 格式)；拿不到就返回 ("", "png")。"""
+    def screenshot(self, only_live: bool = False) -> tuple:
+        """抓当前页面一帧，返回 (base64, 格式)；拿不到就返回 ("", "png")。
+
+        only_live=True 只照"已经开着的"页面：抓图会顺手启动浏览器，而"任务收尾顺带发张
+        状态图"这种事不该为了拍一张空白页把 Chromium 拉起来（用户会收到一张白图）。
+        """
         agent = self.agent
         if agent is None:
             return "", "png"
@@ -276,6 +280,8 @@ class UserSession:
         except Exception:                            # noqa: BLE001
             tool = None
         if tool is None or not hasattr(tool, "execute"):
+            return "", "png"
+        if only_live and not getattr(tool, "has_live_page", lambda: False)():
             return "", "png"
         try:
             result = tool.execute("screenshot_base64")
@@ -553,7 +559,7 @@ class QQBotBridge:
         link_sent = False
         while not stop.is_set():
             session = self.sessions.get(key)
-            data, fmt = session.screenshot() if session else ("", "png")
+            data, fmt = session.screenshot(only_live=True) if session else ("", "png")
             if data:
                 if not link_sent:
                     link_sent = True
@@ -566,19 +572,23 @@ class QQBotBridge:
                     pass                             # 推不过去不影响任务本身
             stop.wait(self.config.push_seconds)
 
-    def schedule_frame(self, key: str) -> None:
+    def schedule_frame(self, key: str, only_live: bool = False) -> None:
         """把"发一张当前截图到 QQ"排进事件循环（同步调用点用）。"""
         ctx = self._ctx_for(key)
         loop = ctx.get("loop") or self._loop
         if loop is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(self.send_frame(key), loop)
+            asyncio.run_coroutine_threadsafe(self.send_frame(key, only_live=only_live), loop)
         except Exception:                            # noqa: BLE001
             pass
 
-    async def send_frame(self, key: str) -> None:
-        """把当前页面截图发进 QQ 会话；哪条上传通道可用会自动选，失败会说明原因。"""
+    async def send_frame(self, key: str, only_live: bool = False) -> None:
+        """把当前页面截图发进 QQ 会话；哪条上传通道可用会自动选，失败会说明原因。
+
+        only_live=True 是"任务收尾顺带发一张"：没开着浏览器就静默跳过（不启动浏览器、
+        也不发消息），别为了一条无关任务给用户塞一张空白页截图。
+        """
         from agent import run_log
         key = self.norm_key(key)
         ctx = self._ctx_for(key)
@@ -586,8 +596,10 @@ class QQBotBridge:
         if api is None:
             return
         session = self.sessions.get(key)
-        data, fmt = session.screenshot() if session else ("", "png")
+        data, fmt = session.screenshot(only_live=only_live) if session else ("", "png")
         if not data:
+            if only_live:
+                return
             await self._send_plain(key, "现在没有可用画面（浏览器没打开或任务已经结束）。")
             return
         group_openid, user_openid = self.split_key(key)
@@ -935,7 +947,7 @@ class QQBotBridge:
                 pusher.wait(timeout=300.0)
                 pusher.set()
         if kind == "task" and self.config.send_frame and self._run_task is None:
-            self.schedule_frame(key)                 # B：任务收尾把画面发到 QQ
+            self.schedule_frame(key, only_live=True)   # B：任务收尾把画面发到 QQ（没开浏览器就跳过）
         return output or "（没有输出）"
 
     def _slash(self, key: str, goal: str) -> str:

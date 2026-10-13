@@ -736,6 +736,19 @@ class BrowserTool(BaseTool, ComputerUseMixin):
             return False                                   # 没杀掉就是没杀掉，别报成功
         return True
 
+    def has_live_page(self) -> bool:
+        """现在是否已经开着一个活页面（**不**启动浏览器）。
+
+        `_ensure_page()` 会顺手把 Chromium 拉起来，用来判断"要不要发一张状态截图"代价太大：
+        为了拍一张空白页把整个浏览器启动一遍。
+        """
+        if not self._pages or self._page is None:
+            return False
+        try:
+            return self._is_browser_alive() and self._page_alive()
+        except Exception:                            # noqa: BLE001
+            return False
+
     def _ensure_page(self) -> ToolResult:
         if not self._pages or self._page is None or not self._is_browser_alive() or not self._page_alive():
             result = self._launch()
