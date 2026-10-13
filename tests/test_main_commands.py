@@ -450,3 +450,88 @@ class TestWorktreeDiffCommand:
         self._patch_git(monkeypatch, "", "")
         m._show_worktree_diff(Console(highlight=False))
         assert "没有未提交改动" in capsys.readouterr().out
+
+
+class TestTranscriptCommand:
+    """`/transcript` 的事件取数：内存 rollout 优先，回退磁盘上最新的 jsonl。"""
+
+    def test_parse_styles(self):
+        assert _parse_command("/transcript") == ("transcript", "")
+        assert _parse_command("/transcript 20") == ("transcript", "20")
+        assert _parse_command("/transcript all") == ("transcript", "all")
+        assert _parse_command("/transcriptx") == (None, None), "英文连写不算命令"
+
+    def test_in_memory_rollout_wins(self, capsys):
+        """本轮刚跑完时内存里就有事件，不必回读磁盘。"""
+        from main import _show_transcript
+
+        class _Agent:
+            class rollout:
+                events = [{"ts": 1700000000.0, "event": "tool_call",
+                           "data": {"tool": "terminal", "args": {"command": "ls"}}}]
+
+        _show_transcript(_Agent(), "")
+        assert "terminal" in capsys.readouterr().out
+
+    def test_falls_back_to_newest_jsonl(self, capsys, monkeypatch, tmp_path):
+        import os
+
+        import config
+        from main import _show_transcript
+
+        old = tmp_path / "run-a.jsonl"
+        old.write_text('{"ts": 1.0, "event": "tool_call", "data": {"tool": "older"}}\n',
+                       encoding="utf-8")
+        new = tmp_path / "run-b.jsonl"
+        new.write_text('{"ts": 2.0, "event": "tool_call", "data": {"tool": "newest"}}\n',
+                       encoding="utf-8")
+        os.utime(old, (1000, 1000))          # mtime 显式拉开，别赌文件系统精度
+        monkeypatch.setitem(config.ROLLOUT_CONFIG, "dir", str(tmp_path))
+
+        class _Agent:
+            rollout = None
+
+        _show_transcript(_Agent(), "")
+        out = capsys.readouterr().out
+        assert "newest" in out and "older" not in out
+
+    def test_bad_arg_gives_usage(self, capsys):
+        from main import _show_transcript
+
+        class _Agent:
+            rollout = None
+
+        _show_transcript(_Agent(), "abc")
+        assert "用法" in capsys.readouterr().out
+
+
+class TestThemeCommand:
+    """`/theme` 的解析与切换（会话内生效）。"""
+
+    def test_parse_styles(self):
+        assert _parse_command("/theme") == ("theme", "")
+        assert _parse_command("/theme ocean") == ("theme", "ocean")
+        assert _parse_command("/themex") == (None, None), "英文连写不算命令"
+
+    def test_switch_and_unknown(self, capsys):
+        import agent.ui_theme as ui
+        from main import _switch_theme
+
+        _switch_theme("ocean")
+        try:
+            assert ui.current_theme() == "ocean"
+            assert "已切换主题" in capsys.readouterr().out
+        finally:
+            ui.set_theme("default")
+
+        _switch_theme("nope")
+        assert "未知主题" in capsys.readouterr().out
+        assert ui.current_theme() == "default"
+
+    def test_no_arg_lists_themes(self, capsys):
+        from main import _switch_theme
+
+        _switch_theme("")
+        out = capsys.readouterr().out
+        for name in ("default", "ocean", "paper", "mono"):
+            assert name in out

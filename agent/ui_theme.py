@@ -34,28 +34,71 @@ COLORS = {
     "bg_dark":     "#1E293B",   # 深色背景
 }
 
+# 同一组语义色，换一套取值就是一套主题（`/theme` 切换，只在会话内生效）
+THEMES = {
+    "default": dict(COLORS),
+    "ocean": {                       # 冷色：偏青蓝，终端冷光屏更舒服
+        "primary":     "#38BDF8", "success":     "#34D399",
+        "warning":     "#FBBF24", "error":       "#F87171",
+        "info":        "#818CF8", "muted":       "#64748B",
+        "highlight":   "#F0ABFC", "accent":      "#22D3EE",
+        "bg_dark":     "#0F172A",
+    },
+    "paper": {                       # 浅色终端（白底）用：深字低饱和
+        "primary":     "#1D4ED8", "success":     "#047857",
+        "warning":     "#B45309", "error":       "#B91C1C",
+        "info":        "#4F46E5", "muted":       "#57606A",
+        "highlight":   "#BE185D", "accent":      "#0E7490",
+        "bg_dark":     "#E2E8F0",
+    },
+    "mono": {                        # 灰阶：录屏/截图时避免颜色干扰
+        "primary":     "#E5E7EB", "success":     "#9CA3AF",
+        "warning":     "#D1D5DB", "error":       "#F3F4F6",
+        "info":        "#CBD5E1", "muted":       "#6B7280",
+        "highlight":   "#9CA3AF", "accent":      "#D1D5DB",
+        "bg_dark":     "#111827",
+    },
+}
+
+_current_theme = "default"
+
+
+def theme_names() -> list:
+    """可用主题名（`/theme` 列表用）。"""
+    return sorted(THEMES)
+
+
+def current_theme() -> str:
+    return _current_theme
+
+
 # ============================================================
 # Rich Theme 定义
 # ============================================================
-AGENT_THEME = Theme({
-    "primary":     f"bold {COLORS['primary']}",
-    "success":     f"bold {COLORS['success']}",
-    "warning":     f"bold {COLORS['warning']}",
-    "error":       f"bold {COLORS['error']}",
-    "info":        f"bold {COLORS['info']}",
-    "muted":       f"{COLORS['muted']}",
-    "dim":         f"dim {COLORS['muted']}",
-    "highlight":   f"bold {COLORS['highlight']}",
-    "accent":      f"bold {COLORS['accent']}",
-    "title":       f"bold white",
-    "subtitle":    f"bold {COLORS['accent']}",
-    "step_num":    f"bold {COLORS['primary']}",
-    "step_name":   f"bold white",
-    "tool_name":   f"bold white",
-    "result_ok":   COLORS['success'],
-    "result_fail": COLORS['error'],
-    "progress":    f"bold {COLORS['accent']}",
-})
+def build_theme(colors: dict) -> Theme:
+    """语义标签 → rich 样式。颜色变了重建一次即可。"""
+    return Theme({
+        "primary":     f"bold {colors['primary']}",
+        "success":     f"bold {colors['success']}",
+        "warning":     f"bold {colors['warning']}",
+        "error":       f"bold {colors['error']}",
+        "info":        f"bold {colors['info']}",
+        "muted":       f"{colors['muted']}",
+        "dim":         f"dim {colors['muted']}",
+        "highlight":   f"bold {colors['highlight']}",
+        "accent":      f"bold {colors['accent']}",
+        "title":       f"bold white",
+        "subtitle":    f"bold {colors['accent']}",
+        "step_num":    f"bold {colors['primary']}",
+        "step_name":   f"bold white",
+        "tool_name":   f"bold white",
+        "result_ok":   colors['success'],
+        "result_fail": colors['error'],
+        "progress":    f"bold {colors['accent']}",
+    })
+
+
+AGENT_THEME = build_theme(COLORS)
 
 # ============================================================
 # 人格配置
@@ -110,6 +153,20 @@ def get_console(use_rich: bool = True) -> Console:
             _legacy_console = Console(no_color=True, highlight=False)
         return (output_gate.DeferringConsole(_legacy_console)
                 if output_gate.is_prompt_active() else _legacy_console)
+
+
+def set_theme(name: str) -> str:
+    """切换配色主题（会话内生效）。原地更新 COLORS，已有的 `from ... import COLORS` 引用跟着变。"""
+    global AGENT_THEME, _console, _current_theme
+    key = (name or "").strip().lower()
+    if key not in THEMES:
+        raise ValueError(f"未知主题 {name!r}（可用: {' / '.join(theme_names())}）")
+    COLORS.clear()
+    COLORS.update(THEMES[key])
+    AGENT_THEME = build_theme(COLORS)
+    _console = None          # 下次 get_console 用新主题重建
+    _current_theme = key
+    return key
 
 
 def _rule(c: Console, char: str = "─", width: int = 60):
@@ -606,6 +663,108 @@ def print_git_diff(diff_text: str, use_rich: bool = True, max_lines: int = 200):
         c.print(Text(f"  …（共 {len(lines)} 行，仅显示前 {max_lines} 行）", style="dim"))
 
 
+def _transcript_fields(event):
+    """兼容两种事件来源：RolloutEvent 对象 / rollout jsonl 里的 dict。"""
+    if isinstance(event, dict):
+        return event.get("ts"), event.get("event", ""), event.get("data") or {}
+    return getattr(event, "ts", None), getattr(event, "event_type", ""), \
+        (getattr(event, "data", None) or {})
+
+
+def print_transcript(events, use_rich: bool = True, max_events: int = 40):
+    """事件回放：折叠摘要的"展开入口"——逐条打印工具完整参数与结果。"""
+    import json as _json
+    from datetime import datetime
+
+    items = list(events or [])
+    c = get_console(use_rich)
+    if not items:
+        print_info("本轮没有 rollout 事件（可能是本轮还没跑，或 ROLLOUT_ENABLED=false）。",
+                   style="info", use_rich=use_rich)
+        return
+    shown = items if (not max_events or max_events <= 0) else items[-max_events:]
+    head = f"◈ 事件回放 {len(shown)}/{len(items)} 条"
+    c.print()
+    c.print(Text(head, style="bold white") if use_rich else head)
+    if len(items) > len(shown):
+        tip = f"  …（更早 {len(items) - len(shown)} 条省略；/transcript all 看全部）"
+        c.print(Text(tip, style="dim") if use_rich else tip)
+
+    for e in shown:
+        ts, etype, data = _transcript_fields(e)
+        stamp = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "--:--:--"
+        if etype == "tool_call":
+            args = data.get("args")
+            if args is None:
+                args = data.get("input") or data.get("action") or ""
+            if not isinstance(args, str):
+                args = _json.dumps(args, ensure_ascii=False)
+            args = args.replace("\n", "\n    ")      # 多行参数（edit 正文）缩进对齐
+            line = f"⏺ {stamp} {data.get('tool', '?')}({args})"
+            style = "cyan"
+        elif etype == "tool_result":
+            ok = data.get("success")
+            mark = "✓" if ok else "✗"
+            body = str(data.get("output") or data.get("error") or "").rstrip()
+            line = f"⎿ {stamp} {mark} {data.get('tool', '?')}"
+            style = "green" if ok else "red"
+            if body:
+                line += "\n" + "\n".join("     " + ln for ln in body.splitlines())
+        elif etype in ("run_start", "run_loop_start"):
+            line = f"▶ {stamp} 开始 {_json.dumps(data, ensure_ascii=False)[:160]}"
+            style = "bold white"
+        elif etype in ("run_end", "run_loop_end"):
+            line = f"■ {stamp} 结束 {_json.dumps(data, ensure_ascii=False)[:160]}"
+            style = "bold white"
+        elif etype in ("guardian", "guardian_overridden", "tool_blocked", "ops_warning"):
+            line = f"! {stamp} {etype} {_json.dumps(data, ensure_ascii=False)[:160]}"
+            style = "yellow"
+        else:
+            line = f"· {stamp} {etype} {_json.dumps(data, ensure_ascii=False)[:160]}"
+            style = "grey62"
+        # Text 而非 markup 字符串：参数里的 `[xxx]` 会被 rich 当标签吞掉
+        c.print(Text(line, style=style) if use_rich else line)
+
+
+def print_theme(use_rich: bool = True):
+    """主题面板：列出可用配色与当前生效项（`/theme` 无参时）。"""
+    c = get_console(use_rich)
+    rows = []
+    for name in theme_names():
+        colors = THEMES[name]
+        mark = "●" if name == _current_theme else " "
+        rows.append(f"{mark} {name:<9} primary {colors['primary']} · accent {colors['accent']} "
+                    f"· success {colors['success']}")
+    c.print()
+    for line in rows:
+        c.print(Text(line, style="white") if use_rich else line)
+    print_info(f"切换: /theme <{'|'.join(theme_names())}>（本会话生效，不写 .env）",
+               style="info", use_rich=use_rich)
+
+
+# 权限档中文名：取值来自 agent/approval.py 的 PERMISSION_PRESETS（未知值原样显示）
+POLICY_LABELS = {
+    "on-request": "逐次确认", "never": "不拦", "untrusted": "全禁",
+    "on-failure": "失败时确认", "always": "每次都问",
+}
+SANDBOX_LABELS = {
+    "read-only": "只读", "workspace-write": "可写", "danger-full-access": "完全访问",
+}
+
+
+def label_policy(mode: str) -> str:
+    """审批策略的中文名（如 never → 不拦）。"""
+    return POLICY_LABELS.get(mode, mode or "")
+
+
+def label_sandbox(mode: str) -> str:
+    """沙箱等级的中文名，保留 `+AppContainer` 这类后缀。"""
+    if not mode:
+        return ""
+    base, sep, suffix = mode.partition("+")
+    return SANDBOX_LABELS.get(base, base) + (sep + suffix if sep else "")
+
+
 def print_shortcuts(use_rich: bool = True):
     """快捷键/命令面板（等价同类 CLI 的 `?` 面板）。
     只列终端真能收到的键：cmd 下 Shift+Tab、Ctrl+O 这类修饰键拿不到可靠序列，
@@ -625,8 +784,10 @@ def print_shortcuts(use_rich: bool = True):
         ]),
         ("查看", [
             ("/diff", "工作区未提交改动（含本次 edit）"),
+            ("/transcript [N|all]", "回放本轮工具调用与输出（折叠摘要的展开入口）"),
             ("/tools", "全部工具（含 JSON Schema）"),
             ("/config /model /permission", "配置 / 切模型 / 权限档"),
+            ("/theme [名字]", "终端配色：default / ocean / paper / mono"),
             ("/help", "全部斜杠命令"),
         ]),
     ]

@@ -87,8 +87,8 @@ class TestAgentTurnStartWiring:
         agent._loop_tool_event("turn_start", {"turn": 2, "max_ops": 80})
         out = capsys.readouterr().out
         assert "轮 2" in out
-        assert "沙箱 workspace-write" in out
-        assert "策略 never" in out
+        assert "沙箱 可写" in out       # 档位在状态栏显示中文名
+        assert "策略 不拦" in out
 
     def test_status_bar_disabled_is_silent(self, tmp_path, capsys, monkeypatch):
         from config import TUI_CONFIG
@@ -122,6 +122,19 @@ class TestAgentTurnStartWiring:
         agent._loop_tool_event("turn_start", {"turn": 1})
         out = capsys.readouterr().out
         assert "轮 1" in out
+
+    def test_status_bar_follows_approval_preset(self, tmp_path, monkeypatch):
+        """换权限档后状态栏跟着换中文名；OS 级沙箱后缀保留。"""
+        agent = self._make_agent(tmp_path)
+        agent.metrics = RunMetrics()
+        agent.metrics.turns = 1
+        agent.approval.apply_preset("block")          # untrusted + read-only
+        text = agent._status_text()
+        assert "策略 全禁" in text and "沙箱 只读" in text
+
+        monkeypatch.setattr("agent.sandbox.sandbox_enabled", lambda: True)
+        agent.approval.apply_preset("ask")            # on-request + workspace-write
+        assert "沙箱 可写+AppContainer" in agent._status_text()
 
     def test_switch_model_rewires_llm_metrics(self, tmp_path):
         """回归：switch_model 重建 LLM 后必须重接 metrics——

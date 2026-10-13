@@ -1870,11 +1870,14 @@ class Agent:
         """构造常驻状态栏聚合文本（token 计数/沙箱等级/审批策略）。"""
         try:
             from agent.sandbox import sandbox_enabled
+            from agent.ui_theme import label_policy, label_sandbox
             metrics = getattr(self, "metrics", None)
             if metrics is None:
                 return ""
-            policy = self.approval.mode if self.approval is not None else ""
-            sandbox_label = self.approval.sandbox_mode if self.approval is not None else ""
+            # 状态栏显示中文档名（取值仍是 approval 的原值，未知值原样透传）
+            policy = label_policy(self.approval.mode if self.approval is not None else "")
+            sandbox_label = label_sandbox(
+                self.approval.sandbox_mode if self.approval is not None else "")
             if sandbox_enabled():
                 # OS 级沙箱（AppContainer）开启时叠加显示
                 sandbox_label = (

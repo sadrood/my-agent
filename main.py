@@ -211,7 +211,8 @@ def _parse_command(goal: str):
     """解析斜杠命令（容忍 /team任务 这种连写）；返回 (命令名, 参数) 或 (None, None)。"""
     for cmd in ("team", "research", "article", "tools", "sessions", "open", "new", "model",
                 "config", "image", "memory", "compact", "goal", "consent", "permission",
-                "upgrade", "history", "rename", "title", "help", "diff", "shortcuts"):
+                "upgrade", "history", "rename", "title", "help", "diff", "shortcuts",
+                "transcript", "theme"):
         prefix = "/" + cmd
         if goal == prefix:
             return cmd, ""
@@ -270,6 +271,72 @@ def _show_worktree_diff(c) -> None:
         c.print(f"[dim]  ?? {path}（新文件，git diff 不含内容）[/dim]")
     if len(untracked) > 20:
         c.print(f"[dim]  …（未跟踪文件共 {len(untracked)} 个）[/dim]")
+
+
+def _load_rollout_events(agent) -> list:
+    """取本轮回放用的事件：优先内存里的 rollout，回退到磁盘上最新的 jsonl。"""
+    import json
+    import os
+
+    from config import ROLLOUT_CONFIG, resolve_under_root
+
+    events = list(getattr(getattr(agent, "rollout", None), "events", None) or [])
+    if events:
+        return events
+    d = resolve_under_root(ROLLOUT_CONFIG.get("dir", "./rollouts"))
+    try:
+        files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")]
+    except OSError:
+        return []
+    if not files:
+        return []
+    out = []
+    try:
+        with open(max(files, key=os.path.getmtime), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:          # 半行写入（进程被杀）跳过即可
+                    continue
+    except OSError:
+        return []
+    return out
+
+
+def _show_transcript(agent, arg: str) -> None:
+    """`/transcript [条数|all]`：回放本轮每个工具的完整参数与输出（折叠摘要的展开入口）。"""
+    import agent.ui_theme as ui
+    limit = 40
+    arg = (arg or "").strip().lower()
+    if arg:
+        if arg == "all":
+            limit = 0
+        else:
+            try:
+                limit = max(0, int(arg))
+            except ValueError:
+                ui.print_warning("用法: /transcript [条数|all]（默认 40 条，all = 全部）",
+                                 use_rich=True)
+                return
+    ui.print_transcript(_load_rollout_events(agent), use_rich=True, max_events=limit)
+
+
+def _switch_theme(arg: str) -> None:
+    """`/theme [名]`：查看或切换终端配色（会话内生效）。"""
+    import agent.ui_theme as ui
+    name = (arg or "").strip().lower()
+    if not name:
+        ui.print_theme(use_rich=True)
+        return
+    try:
+        ui.set_theme(name)
+    except ValueError as exc:
+        ui.print_warning(str(exc), use_rich=True)
+        return
+    ui.print_info(f"已切换主题: {name}（本会话生效，不写 .env）", style="accent")
 
 
 def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
@@ -448,6 +515,12 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             continue
         if cmd == "diff":
             _show_worktree_diff(c)
+            continue
+        if cmd == "transcript":
+            _show_transcript(agent, cmd_args)
+            continue
+        if cmd == "theme":
+            _switch_theme(cmd_args)
             continue
         if cmd == "tools":
             from agent.ui_theme import print_step_header
@@ -785,6 +858,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/tools              查看全部工具（含 JSON Schema）",
                 "/diff               工作区未提交改动（含本次 edit 的 diff）",
                 "/shortcuts          快捷键与常用命令面板",
+                "/transcript [N|all] 回放本轮工具调用与输出（折叠摘要的展开入口）",
+                "/theme [名字]       终端配色（default / ocean / paper / mono）",
                 "/sessions           历史对话列表",
                 "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
                 "/history [条数]      查看当前对话的历史记录（默认 20 条）",
@@ -803,7 +878,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
             import difflib
             word = goal.split()[0]
-            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/rename", "/title", "/help"], n=1, cutoff=0.6)
+            matches = difflib.get_close_matches(word, ["/team", "/research", "/article", "/tools", "/sessions", "/open", "/history", "/new", "/model", "/config", "/permission", "/upgrade", "/image", "/memory", "/rename", "/title", "/help", "/diff", "/shortcuts", "/theme", "/transcript"], n=1, cutoff=0.6)
             hint = f"你是不是想输入 {matches[0]}？" if matches else ""
             print_warning(
                 f"未知命令: {goal[:40]}。{hint}可用命令: /team <任务> · /research <主题> · /article <主题> · /image <描述> · /memory · /history · /help · /tools · /sessions · /open <ID> · /new · exit"

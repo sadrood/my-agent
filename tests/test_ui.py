@@ -288,3 +288,120 @@ class TestFoldedCallsLine:
         """工具名前缀可能带团队 worker 归属，不能被 markup 当标签吞掉。"""
         ui.print_folded_calls("团队·w1 ▸ terminal", 6, 3)
         assert "团队·w1 ▸ terminal" in buf.getvalue()
+
+
+class TestTranscriptPanel:
+    """`/transcript` 事件回放（折叠摘要的展开入口）。"""
+
+    def _events(self):
+        from agent.rollout import RolloutEvent
+        return [
+            RolloutEvent(ts=1700000000.0, event_type="run_start", data={"goal": "跑测试"}),
+            RolloutEvent(ts=1700000001.0, event_type="tool_call",
+                         data={"tool": "terminal", "args": {"command": "pytest -q"}}),
+            RolloutEvent(ts=1700000002.0, event_type="tool_result",
+                         data={"tool": "terminal", "success": True, "output": "3 passed"}),
+            RolloutEvent(ts=1700000003.0, event_type="tool_result",
+                         data={"tool": "terminal", "success": False, "error": "boom"}),
+        ]
+
+    def test_renders_calls_and_results(self, buf):
+        ui.print_transcript(self._events())
+        out = buf.getvalue()
+        assert "terminal" in out and "pytest -q" in out      # 完整参数
+        assert "3 passed" in out                             # 输出正文
+        assert "✗" in out and "boom" in out                  # 失败标记
+        assert "事件回放 4/4 条" in out
+
+    def test_limit_keeps_latest_and_says_omitted(self, buf):
+        ui.print_transcript(self._events(), max_events=2)
+        out = buf.getvalue()
+        assert "事件回放 2/4 条" in out and "更早 2 条省略" in out
+        assert "pytest -q" not in out
+
+    def test_accepts_jsonl_dict_events(self, buf):
+        """磁盘上的 rollout jsonl 是 dict 形态，同样要能回放。"""
+        ui.print_transcript([{"ts": 1700000001.0, "event": "tool_call",
+                              "data": {"tool": "file", "input": '{"operation": "read"}'}}])
+        assert "file" in buf.getvalue()
+
+    def test_empty_events_hint(self, buf):
+        ui.print_transcript([])
+        assert "没有 rollout 事件" in buf.getvalue()
+
+    def test_brackets_in_args_not_eaten(self, buf):
+        ui.print_transcript([{"ts": 1.0, "event": "tool_call",
+                              "data": {"tool": "browser", "args": {"sel": "[data-x](y)"}}}])
+        assert "[data-x](y)" in buf.getvalue()
+
+    def test_plain_text_mode(self, buf):
+        ui.print_transcript(self._events(), use_rich=False, max_events=3)
+        out = buf.getvalue()
+        assert "事件回放 3/4 条" in out and "3 passed" in out
+
+
+class TestThemePanel:
+    """`/theme` 切换配色（会话内生效，不动 .env）。"""
+
+    def test_theme_list_and_switch(self, buf):
+        assert ui.current_theme() == "default"
+        ui.set_theme("mono")
+        try:
+            assert ui.current_theme() == "mono"
+            assert ui.COLORS["primary"] == ui.THEMES["mono"]["primary"]
+            ui.print_theme()
+            out = buf.getvalue()
+            assert "● mono" in out and "default" in out
+        finally:
+            ui.set_theme("default")
+
+    def test_colors_dict_identity_is_kept(self):
+        """原地更新 COLORS：别的模块 `from agent.ui_theme import COLORS` 的引用跟着变。"""
+        ref = ui.COLORS
+        ui.set_theme("ocean")
+        try:
+            assert ref["primary"] == ui.THEMES["ocean"]["primary"]
+        finally:
+            ui.set_theme("default")
+
+    def test_console_rebuilt_on_switch(self):
+        before = ui.get_console()
+        ui.set_theme("paper")
+        try:
+            assert ui.get_console() is not before
+        finally:
+            ui.set_theme("default")
+
+    def test_unknown_theme_raises(self):
+        with pytest.raises(ValueError):
+            ui.set_theme("nope")
+
+    def test_all_themes_have_full_palette(self):
+        keys = set(ui.THEMES["default"])
+        for name, colors in ui.THEMES.items():
+            assert set(colors) == keys, name
+
+
+class TestPermissionLabels:
+    """状态栏的中文档名（取值来自 approval 的预设）。"""
+
+    @pytest.mark.parametrize("raw,zh", [("never", "不拦"), ("on-request", "逐次确认"),
+                                        ("untrusted", "全禁"), ("on-failure", "失败时确认")])
+    def test_policy_labels(self, raw, zh):
+        assert ui.label_policy(raw) == zh
+
+    def test_unknown_policy_passthrough(self):
+        assert ui.label_policy("whatever") == "whatever"
+        assert ui.label_policy("") == ""
+
+    def test_sandbox_labels_and_suffix(self):
+        assert ui.label_sandbox("read-only") == "只读"
+        assert ui.label_sandbox("workspace-write") == "可写"
+        assert ui.label_sandbox("danger-full-access") == "完全访问"
+        assert ui.label_sandbox("workspace-write+AppContainer") == "可写+AppContainer"
+
+    def test_approval_presets_are_all_labeled(self):
+        """新增权限档却没配中文名时这条会红。"""
+        from agent.approval import PERMISSION_PRESETS
+        for name, preset in PERMISSION_PRESETS.items():
+            assert ui.label_policy(preset["mode"]) != preset["mode"], name
