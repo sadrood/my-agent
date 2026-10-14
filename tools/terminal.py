@@ -274,23 +274,22 @@ class TerminalTool(TerminalJobsMixin, BaseTool):
 
     def build_approval_request(self, arguments: Dict[str, Any]):
         from agent.approval import (ApprovalRequest, CommandSafety,
-                                    security_critical_name_hits)
+                                    escalate_critical, security_critical_name_hits)
 
         command = str(arguments.get("command", "")).strip()
         risk = CommandSafety.classify(command)
         # 命令改写安全关键文件（审批/沙箱/配置本身）→ 强制人工确认；只读命令豁免
         hits = security_critical_name_hits(command)
-        critical = bool(hits) and not CommandSafety.is_readonly(command)
-        if critical:
-            risk = "high"
+        critical_names = [] if CommandSafety.is_readonly(command) else hits
+        # 说明是"哪个名字"触发的：不然只有一句"要求批准"，人与模型都不知道该改什么
+        risk, approval, reason = escalate_critical(risk, critical_names, "命令涉及安全关键文件")
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
             command=command,
             risk_level=risk,
-            # 说明是"哪个名字"触发的：不然只有一句"要求批准"，人与模型都不知道该改什么
-            reason=f"命令涉及安全关键文件：{', '.join(hits)}" if critical else "",
-            approval="on-request" if critical else "auto",
+            reason=reason,
+            approval=approval,
             min_sandbox_mode=self.min_sandbox_mode,
         )
 

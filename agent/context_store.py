@@ -9,6 +9,7 @@ import time
 from typing import Optional
 
 from agent.atomic_io import atomic_write_text
+from agent.retention import list_by_mtime
 
 POINTER_RE = re.compile(r"\[已折叠\s+#([A-Za-z0-9_\-]+)\s+([\d.]+)KB\]")
 
@@ -45,20 +46,13 @@ def prune(max_namespaces: int = 20, max_age_days: float = 7.0) -> int:
         return 0
     import shutil
 
-    folders = []
-    for name in os.listdir(root):
-        folder = os.path.join(root, name)
-        if not os.path.isdir(folder):
-            continue
-        try:
-            folders.append((os.path.getmtime(folder), folder))
-        except OSError:
-            continue
-    folders.sort(reverse=True)
+    folders = list_by_mtime(root, dirs_only=True)
     removed = 0
     deadline = time.time() - max_age_days * 86400
-    for index, (mtime, folder) in enumerate(folders):
-        if index < max_namespaces and mtime >= deadline:
+    newest = {p for _, p in folders[-max_namespaces:]} if max_namespaces > 0 else set()
+    for mtime, folder in folders:
+        # 保留 = 属于最新 N 个 **且** 未过期；其余删掉
+        if folder in newest and mtime >= deadline:
             continue
         try:
             shutil.rmtree(folder, ignore_errors=True)

@@ -1,7 +1,7 @@
 """工具管理器模块：JSON Schema + 结构化执行 + 输出截断。"""
 from typing import Optional
 
-from config import TOOL_CONFIG
+from config import TOOL_CONFIG, TOOL_GATING_CONFIG
 from tools.base import BaseTool, ToolResult, hoist_inline_payload, truncate_output
 from tools.terminal import TerminalTool
 from tools.delegate import DelegateTool
@@ -13,32 +13,17 @@ from tools.patch import EditTool
 from tools.todo import TodoTool
 import os
 
-#: 门控工具：低频且 schema 大，默认不随每轮请求发送（省提示词 token），
-#: 由 `tools` 工具按需装载。判据：schema ≥1KB 且多数会话用不到。
-GATED_TOOLS = frozenset({
-    "zhihu", "zhihu_draft", "toonflow", "video_edit", "video_gen", "tts",
-    "article", "installer", "computer", "hello_local",
-})
+#: 门控名单 / 自动装载关键词 / 空闲阈值统一放 config.TOOL_GATING_CONFIG，这里只做再导出。
+#: 名字保留在模块级：既有调用方与测试按 tools.tool_manager.GATED_TOOLS 引用。
+GATED_TOOLS = TOOL_GATING_CONFIG.get("tools") or frozenset()
+GATED_KEYWORDS = TOOL_GATING_CONFIG.get("keywords") or {}
+GATED_IDLE_TURNS = int(TOOL_GATING_CONFIG.get("idle_turns", 5))
 
 #: 门控工具的装载入口（自身必须常驻，否则无从装载）
 META_TOOL_NAME = "tools"
 
-#: 门控工具连续空闲这么多轮就自动卸下（没调用过的不算空闲，从装载那轮起算）
-GATED_IDLE_TURNS = 5
-
-#: 目标文本里出现这些词就自动装载对应门控工具（防"模型忘了 load"）
-GATED_KEYWORDS = {
-    "zhihu": ("知乎", "zhihu"),
-    "zhihu_draft": ("知乎草稿", "存草稿"),
-    "toonflow": ("短剧", "toonflow"),
-    "video_edit": ("视频剪辑", "剪视频", "ffmpeg"),
-    "video_gen": ("生成视频", "文生视频", "短视频"),
-    "tts": ("配音", "语音合成", "tts"),
-    "article": ("文章工坊", "写文章", "公众号"),
-    "computer": ("桌面操控", "操作电脑", "鼠标键盘"),
-    "installer": ("安装插件", "技能包", "mcp 插件"),
-    "hello_local": ("hello_local",),
-}
+#: execute_json 签名判定缓存：按工具类缓存（判定只与类有关，与实例无关）
+_SIGNATURE_OK_CACHE: dict = {}
 
 
 def _create_browser_tool() -> BaseTool:
@@ -554,14 +539,17 @@ class ToolManager:
                 error=f"未知工具: '{tool_name}'。可用工具: {', '.join(self._tools.keys())}",
             )
         # 回退判定必须基于**签名**，不能靠捕获 TypeError：旧实现 `except TypeError:` 会把工具执行体内部抛出的 TypeError 也当成"该工具没实现 execute_json"。
+        # 签名只取决于工具**类**，按类缓存——每次调用都跑 inspect.signature 是热路径上的浪费。
         import inspect
 
-        impl = type(tool).execute_json
-        try:
-            inspect.signature(impl).bind(tool, arguments or {})
-            signature_ok = True
-        except (TypeError, ValueError):
-            signature_ok = False          # 老式签名的工具 → 走基类字符串转换
+        signature_ok = _SIGNATURE_OK_CACHE.get(type(tool))
+        if signature_ok is None:
+            try:
+                inspect.signature(type(tool).execute_json).bind(tool, arguments or {})
+                signature_ok = True
+            except (TypeError, ValueError):
+                signature_ok = False      # 老式签名的工具 → 走基类字符串转换
+            _SIGNATURE_OK_CACHE[type(tool)] = signature_ok
 
         try:
             if signature_ok:

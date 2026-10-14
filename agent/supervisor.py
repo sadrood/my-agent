@@ -49,6 +49,23 @@ SUPERVISOR_USER_TEMPLATE = """原始目标：
 
 请判断任务是否真的完成。只输出 JSON。"""
 
+SUPERVISOR_VERIFY_PROMPT = """你是**复核者**：上一步监管者判了任务"未完成"，请独立核对这个判断是否成立。
+
+监管者指出的缺口：{reason}
+监管者给的下一步指令：{instruction}
+
+执行者的交付（最终回答）：
+{final}
+
+已发生的事实（工具使用与产物）：
+{evidence}
+
+只依据证据判断：
+- 交付里**确实缺**该缺口（你能指出缺了什么）→ "continue"；
+- 交付里其实已包含，或只是"还能更好" → "done"。
+
+只输出 JSON：{{"verdict": "done" 或 "continue", "reason": "一句话依据"}}"""
+
 
 @dataclass
 class SupervisorVerdict:
@@ -68,6 +85,7 @@ class Supervisor:
         self.llm = llm
         self.review_count = 0
         self.continue_count = 0
+        self.verify_count = 0        # 独立复核"未完成"判断的次数（仅在对 continue 复核时累加）
 
     @property
     def enabled(self) -> bool:
@@ -103,10 +121,44 @@ class Supervisor:
                                      error=f"监管者不可用（已放行）: {str(e)[:150]}",
                                      reason="监管者异常，按完成处理")
         verdict, reason, nxt = self._parse(raw)
+        # 独立验证轮：判"未完成"前先让复核者只依据证据核对一次——误报的代价是执行者为
+        # 不存在的问题白跑一轮。复核不成立就不推回。
+        if verdict == "continue" and self.config.get("verify_continue", True):
+            if not self._verify_gap(goal, final, evidence, reason, nxt):
+                return SupervisorVerdict(
+                    verdict="done", used=True,
+                    reason=f"{reason}（复核未确认该缺口，已放行）")
         if verdict == "continue":
             self.continue_count += 1
         return SupervisorVerdict(verdict=verdict, reason=reason,
                                  next_instruction=nxt, used=True)
+
+    def _verify_gap(self, goal: str, final: str, evidence: str,
+                    reason: str, instruction: str) -> bool:
+        """独立复核"未完成"的判断是否成立：True = 缺口成立（维持 continue）。
+        复核本身出错/输出无法解析时**维持原判**（不因复核故障把可能真的缺口放掉）。"""
+        try:
+            raw = self._call_with_timeout([
+                {"role": "system", "content": "你是严格的复核者，只依据给定证据判断。"},
+                {"role": "user", "content": SUPERVISOR_VERIFY_PROMPT.format(
+                    reason=(reason or "")[:500],
+                    instruction=(instruction or "")[:800],
+                    final=(final or "")[:3000],
+                    evidence=(evidence or "（无）")[:2000],
+                )},
+            ])
+        except Exception:                       # noqa: BLE001
+            return True
+        self.verify_count += 1
+        m = re.search(r"\{[\s\S]*\}", raw or "")
+        if not m:
+            return True                         # 输出无法解析 → 维持原判
+        try:
+            data = json.loads(m.group())
+        except Exception:                       # noqa: BLE001
+            return True
+        # 只有**明确**改判 done 才放行；其它一律维持 continue
+        return str(data.get("verdict", "")).strip().lower() != "done"
 
     def _call_with_timeout(self, messages) -> str:
         """带超时的调用（与 Guardian 同款：绝不让监管者把主循环挂住）。"""

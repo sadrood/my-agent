@@ -196,6 +196,13 @@ QQBOT_CONFIG = {
     "permission": os.getenv("QQBOT_PERMISSION", "ask"),
     "max_chars": int(os.getenv("QQBOT_MAX_CHARS", "2000")),
     "rate_per_minute": int(os.getenv("QQBOT_RATE_PER_MINUTE", "6")),
+    # 同时执行的 agent 循环上限（小机器上用）：超出的请求排队等待，等不到就回"任务较多"。
+    "max_concurrent_tasks": int(os.getenv("QQBOT_MAX_CONCURRENT_TASKS", "2")),
+    # 等待空闲执行位的最长秒数（等不到就回"任务较多"）
+    "task_queue_timeout": int(os.getenv("QQBOT_TASK_QUEUE_TIMEOUT", "30")),
+    # 空闲会话回收（秒）：超过这么久没消息就丢弃该用户的常驻 agent（对话已落盘）。
+    # 0 = 不回收。此前会话只增不减，常驻服务内存会一直涨。
+    "session_ttl": int(os.getenv("QQBOT_SESSION_TTL", "7200")),
     # 单条任务上限（秒）：到点给 agent 置停止信号优雅收尾，<=0 不限时
     "task_timeout": int(os.getenv("QQBOT_TASK_TIMEOUT", "1800")),
     # 连沙箱还是正式环境。新机器人默认只存在于沙箱，连错环境会"连上了却收不到消息"
@@ -730,6 +737,8 @@ SUPERVISOR_CONFIG = {
     "min_turns": int(os.getenv("SUPERVISOR_MIN_TURNS", "1")),
     # 目标短于这么多字视为闲聊问答，不审（真任务一律复核）
     "min_goal_chars": int(os.getenv("SUPERVISOR_MIN_GOAL_CHARS", "12")),
+    # 判"未完成"前先做一轮独立复核（只依据证据核对缺口是否真存在），减少误报导致的白跑
+    "verify_continue": os.getenv("SUPERVISOR_VERIFY_CONTINUE", "true").lower() == "true",
 }
 
 # ============================================================
@@ -767,6 +776,9 @@ ROLLOUT_CONFIG = {
     # 落盘文本上限。追踪文件是事后诊断的唯一依据，截得太狠等于没有记录：agent 的最终报告被截到 300 字、断在半句，复盘时只能去翻会话文件。0 = 不截断（不建议：单次 run 的 JSONL 会长得很快）。
     "text_limit": int(os.getenv("ROLLOUT_TEXT_LIMIT", "4000")),      # 模型输出/最终回答
     "result_limit": int(os.getenv("ROLLOUT_RESULT_LIMIT", "2000")),  # 工具返回
+    # 内存里保留的事件条数上限：完整记录已落 JSONL，内存只留尾部够用即可
+    # （此前无上限，长会话/常驻服务里只增不减）。
+    "max_memory_events": int(os.getenv("ROLLOUT_MAX_MEMORY_EVENTS", "2000")),
 }
 
 # ============================================================
@@ -911,6 +923,31 @@ TOOL_CONFIG = {
     "computer_a11y_max_depth": int(os.getenv("COMPUTER_A11Y_MAX_DEPTH", "8")),
     "computer_screenshot_dir": (resolve_under_root(os.getenv("COMPUTER_SCREENSHOT_DIR", ""))
                                 if os.getenv("COMPUTER_SCREENSHOT_DIR", "").strip() else ""),   # 空=generated_images/computer
+}
+
+# ============================================================
+# 工具 schema 门控（省 token：低频大工具的 schema 默认不随每轮请求发送）
+# ============================================================
+# 判据：schema 大（≥1KB）且多数会话用不到 → 由 `tools` 工具按需装载。
+# tools: 默认不常驻的工具名；keywords: 目标文本命中即自动装载；idle_turns: 连续空闲多少轮自动卸下。
+TOOL_GATING_CONFIG = {
+    "tools": frozenset({
+        "zhihu", "zhihu_draft", "toonflow", "video_edit", "video_gen", "tts",
+        "article", "installer", "computer", "hello_local",
+    }),
+    "keywords": {
+        "zhihu": ("知乎", "zhihu"),
+        "zhihu_draft": ("知乎草稿", "存草稿"),
+        "toonflow": ("短剧", "toonflow"),
+        "video_edit": ("视频剪辑", "剪视频", "ffmpeg"),
+        "video_gen": ("生成视频", "文生视频", "短视频"),
+        "tts": ("配音", "语音合成", "tts"),
+        "article": ("文章工坊", "写文章", "公众号"),
+        "computer": ("桌面操控", "操作电脑", "鼠标键盘"),
+        "installer": ("安装插件", "技能包", "mcp 插件"),
+        "hello_local": ("hello_local",),
+    },
+    "idle_turns": int(os.getenv("TOOL_GATING_IDLE_TURNS", "5")),
 }
 
 # ============================================================

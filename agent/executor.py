@@ -14,6 +14,7 @@ from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
 from agent.rollout import clip_result, clip_text
 # 动态轮数预算（有进展就续期、连续无进展提前停）——见模块 docstring
 from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
+from agent.context_compaction import leading_system_messages, repair_tool_boundary
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
     EXECUTOR_BROWSER_SYSTEM_PROMPT,
@@ -1326,31 +1327,13 @@ class Executor:
         threshold = self._compact_threshold()
         keep = int(COMPACT_CONFIG.get("keep_last", 20))
         # 开头的 system 消息（含项目指令注入）必须原样保留，不能被压进摘要
-        head_msgs = []
-        for m in messages:
-            if m.get("role") == "system":
-                head_msgs.append(m)
-            else:
-                break
+        head_msgs = leading_system_messages(messages)
         body_start = len(head_msgs)
         if len(messages) - body_start <= keep + 2 or self._estimate_tokens(messages) < threshold:
             return messages
-        old = messages[body_start:-keep]
-        recent = messages[-keep:]
-        # 截断点必须落在完整工具闭环之后：单循环里每轮会追加 assistant(tool_calls) + N 条 tool 消息，盲切 messages[-keep:]有 N/(N+2) 的概率正好切在 tool 中间。
-        while recent and recent[0].get("role") == "tool":
-            start = len(messages) - len(recent) - 1
-            if start < 0:
-                break
-            prev = messages[start]
-            if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                # 连同它的 assistant(tool_calls) 一起留在保留区，保持对仗
-                recent = [prev] + recent
-                old = messages[body_start:start]
-                break
-            # 前面不是配对消息：这条孤立 tool 只能裁掉
-            recent = recent[1:]
-            old = messages[body_start:len(messages) - len(recent)] if recent else []
+        # 保留区取尾 keep 条并修掉孤立的 tool 消息（切在工具闭环中间会让下一轮请求 400）
+        recent = repair_tool_boundary(messages, keep)
+        old = messages[body_start:len(messages) - len(recent)] if recent else []
         if not recent:
             # 全被判成孤立 tool（极端情况）：宁可这轮不压缩，也不能只剩摘要
             self._emit("compaction", {"ok": False,
