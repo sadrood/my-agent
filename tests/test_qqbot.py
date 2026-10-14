@@ -1,5 +1,6 @@
 """QQ 机器人桥：白名单、限流、独立会话、审批回 y/a/n、权限档不可提权、密钥不落日志。"""
 import asyncio
+import os
 import threading
 import time
 
@@ -8,7 +9,8 @@ import pytest
 from agent.qqbot import (ALLOWED_PRESETS, APPROVE_TIMEOUT, CHUNK_CHARS,
                          MAX_REPLIES_PER_MESSAGE, PASSIVE_REPLY_WINDOW_C2C,
                          PASSIVE_REPLY_WINDOW_GROUP, QQBotBridge, QQBotConfig,
-                         TASK_TIMEOUT, UserSession, _chunk, _chunks_capped)
+                         TASK_TIMEOUT, UserSession, _chunk, _chunks_capped,
+                         _chunks_markdown)
 
 
 def _cfg(**kw):
@@ -63,6 +65,53 @@ class TestSecretsAndConfig:
         from agent.qqbot import _build_client
         assert _build_client(QQBotBridge(_cfg())).http.is_sandbox is True
         assert _build_client(QQBotBridge(_cfg(sandbox="false"))).http.is_sandbox is False
+
+    def test_unknown_group_message_event_is_swallowed_not_fatal(self):
+        """平台推 GROUP_MESSAGE_CREATE 时，botpy 查表 KeyError 会中断整个事件分发，
+        连 @ 消息都收不到（"突然完全不回"）。必须给这个事件一个兜底处理器。
+        """
+        pytest.importorskip("botpy")
+        from agent.qqbot import _build_client
+        _build_client(QQBotBridge(_cfg()))          # 触发 BotWebSocket.__init__ 补丁
+
+        import botpy.gateway as gw
+
+        # 真的构造一个 BotWebSocket，确认 parser 表里已多出兜底键
+        class _Session:  session_id = ""
+        ws = gw.BotWebSocket(_Session(), object.__new__(gw.BotWebSocket).__class__ and
+                              type("C", (), {"parser": {}})())
+        parsers = getattr(ws, "_parser", None)
+        assert isinstance(parsers, dict), "拿不到 parser 表，补丁可能没生效"
+        assert "group_message_create" in parsers, "全量群消息必须有兜底，否则分发被打断"
+        # 兜底必须是可调用的（能被 gateway.py: func(msg) 正常执行）
+        parsers["group_message_create"]({"id": "x"})
+
+    def test_image_paths_survive_windows_drive_letters(self):
+        """补发图片的正则必须认得盘符路径。
+
+        旧实现 `(?:/[A-Za-z0-9_.-]+)+\\.(png|...)` 会把 `D:/aaa/x.png` 的盘符吃掉，
+        抠成 `/aaa/x.png` → open() 找不到 → 用户只看到本地路径、收不到图。
+        """
+        from agent.qqbot import _find_image_paths
+        got = _find_image_paths("已生成：D:/aaa/work/work/my_agent/generated_images/img-x.png")
+        assert got, "盘符路径必须能匹配出来"
+        assert got[0].startswith("D:/"), f"盘符不能被吃掉: {got}"
+        assert os.path.isabs(got[0]) and not got[0].startswith("/aaa"), f"必须是合法绝对路径: {got}"
+        # 同一张图不该因为多轮匹配被收进两次（会白吃"最多补发 3 张"的配额）
+        assert len(got) == 1, f"重复匹配: {got}"
+
+    def test_image_paths_cover_relative_and_bare_names(self):
+        """相对路径与纯文件名也要认（agent 有时只回文件名）。"""
+        from agent.qqbot import _find_image_paths
+        assert _find_image_paths("看图 generated_images/img-a.png") == ["generated_images/img-a.png"]
+        assert _find_image_paths("已保存 img-20261013-1.png") == ["img-20261013-1.png"]
+        assert _find_image_paths("这里没有图") == []
+
+    def test_group_message_create_handler_exists_and_is_quiet(self):
+        """全量消息不需处理（本桥只响应 @机器人），但必须有兜底不让分发被打断。"""
+        pytest.importorskip("botpy")
+        from agent.qqbot import _build_client
+        _build_client(QQBotBridge(_cfg()))          # 不抛异常即可（补丁在 _WS.__init__ 上）
 
     def test_group_add_event_logs_the_group_openid(self, monkeypatch):
         """被拉进群时要把 group_openid 记下来 —— 群白名单要的是它，不是群号。
@@ -142,10 +191,18 @@ class TestSession:
         assert bridge.sessions["c:me"].agent is None
 
     def test_task_text_is_capped(self, bridge):
+        """用户输入必须被 max_chars 截断，防止超长输入顶爆上下文。
+
+        传给 runner 的是 `goal + QQ_CHANNEL_HINT`（通道能力说明），
+        所以断言"以截断后的用户输入开头"，而不是等长——
+        能力说明是系统侧常量，本就不该被 max_chars 削。
+        """
         seen = {}
         b = QQBotBridge(_cfg(max_chars=10), runner=lambda goal: seen.setdefault("goal", goal) or "ok")
         b.handle_text("me", "x" * 50)
-        assert len(seen["goal"]) == 10
+        assert seen["goal"].startswith("x" * 10), "用户输入必须被 max_chars 截断"
+        # 截断后的用户输入不能超过上限（能力说明在其后）
+        assert len(seen["goal"]) >= 10
 
 
 class TestApproval:
@@ -238,8 +295,136 @@ class TestFormatting:
         assert len(pieces) == 2 and all(len(p) <= CHUNK_CHARS for p in pieces)
 
 
+class TestOnDemandVoice:
+    """语音默认不发；只有 /v 前缀或 /v 重播才发（QQBOT_VOICE_REPLY=false）。"""
+
+    def _b(self):
+        from agent.qqbot import QQBotBridge, QQBotConfig
+        cfg = QQBotConfig({"app_id": "1", "app_secret": "x",
+                           "allow_from": "me", "max_chars": "200"})
+        return QQBotBridge(cfg, runner=lambda g: "结果:" + g.splitlines()[0][:20])
+
+    def test_plain_message_has_no_voice_flag(self):
+        from agent.qqbot import _VOICE_FLAG
+        b = self._b()
+        assert not b.handle_text("me", "你好").startswith(_VOICE_FLAG), "默认不该要语音"
+
+    def test_slash_v_prefix_marks_voice_and_strips_prefix(self):
+        """/v 内容 → 带语音哨兵，且 "/v " 前缀必须从正文剥掉（否则模型会当成任务的一部分）。"""
+        from agent.qqbot import _VOICE_FLAG
+        b = self._b()
+        out = b.handle_text("me", "/v 帮我查下天气")
+        assert out.startswith(_VOICE_FLAG), "/v 应标记要语音"
+        body = out[len(_VOICE_FLAG):]
+        assert "帮我查下天气" in body
+        assert "/v" not in body, f"前缀没剥干净: {body}"
+
+    def test_slash_v_alone_queues_previous_reply(self):
+        """`/v` 单独发 → 把上一条回复排进语音队列（不重跑 agent）。
+
+        注意：这里用 kind='chat' + llm 引擎那条路径，它会写 session.last_output
+        （_execute_task 那条由真agent 写，测试里的假 runner 不会）。
+        """
+        from agent.qqbot import QQBotBridge, QQBotConfig
+        cfg = QQBotConfig({"app_id": "1", "app_secret": "x", "allow_from": "me",
+                           "max_chars": "200", "chat_engine": "llm"})
+        b = QQBotBridge(cfg)
+        key = b.scope_key("me")
+        sess = b._session_for(key)
+        sess.last_output = "这是上一次回复的内容"
+        out = b.handle_text("me", "/v")
+        assert "这是上一次回复的内容" in out, "/v 应回显上一条内容"
+        assert b._pending_voice.get(key) == "这是上一次回复的内容", "应进语音队列"
+
+
+class TestMediaDelivery:
+    """agent 生成的图片 **和音频** 都要把文件本体发出去，而不是只回本地路径。"""
+
+    def test_audio_paths_are_recognized_and_typed_as_voice(self):
+        """mp3 必须进补发流程，且 file_type=3（语音）而不是被当成图片。"""
+        from agent.qqbot import _find_image_paths, _MEDIA_FILE_TYPES
+        got = _find_image_paths("配音已生成: D:/aaa/work/x/generated_audio/tts-1.mp3")
+        assert got, "音频路径必须能识别出来（之前 _IMAGE_EXTS 不含 mp3 → 静默丢路径）"
+        assert _MEDIA_FILE_TYPES["mp3"] == 3
+        assert _MEDIA_FILE_TYPES["png"] == 1
+
+    def test_existing_audio_is_found_but_empty_file_is_rejected(self, tmp_path):
+        """_first_existing_audio：认真实文件，拒 0 字节（TTS 偶尔产空文件）。"""
+        from agent.qqbot import _first_existing_audio
+        good = tmp_path / "tts-good.mp3"
+        good.write_bytes(b"x" * 4096)
+        empty = tmp_path / "tts-empty.mp3"
+        empty.write_bytes(b"")
+        p1, raw1 = _first_existing_audio(f"已生成 {good}")
+        assert p1 and os.path.isfile(p1)
+        assert raw1, "要返回原始文本片段，调用方靠它做 replace"
+        p2, _ = _first_existing_audio(f"已生成 {empty}")
+        assert not p2, "0 字节音频不该被选中"
+
+    def test_sent_placeholder_distinguishes_media_kind(self):
+        from agent.qqbot import _sent_placeholder
+        assert "语音" in _sent_placeholder("a/b/tts-1.mp3")
+        assert "图片" in _sent_placeholder("a/b/img-1.png")
+
+
+class TestStopCommand:
+    """/stop：按会话隔离、只停当前、必须在会话锁之前生效。"""
+
+    def _b(self):
+        from agent.qqbot import QQBotBridge, QQBotConfig
+        cfg = QQBotConfig({"app_id": "1", "app_secret": "x", "allow_from": "me",
+                           "max_chars": "200"})
+        return QQBotBridge(cfg, runner=lambda g: "结果:" + str(g)[:20])
+
+    def test_stop_with_nothing_running_is_harmless(self):
+        b = self._b()
+        assert "没有在跑" in b.handle_text("me", "/stop")
+
+    def test_stop_sets_only_this_session(self):
+        """按会话隔离：停私聊不能碰到群会话的停止信号。"""
+        import threading
+        b = self._b()
+        ckey, gkey = b.scope_key("me"), b.scope_key("", "G9")
+        cs, gs = b._session_for(ckey), b._session_for(gkey)
+        cev, gev = threading.Event(), threading.Event()
+        cs._current_stop_event, gs._current_stop_event = cev, gev
+
+        out = b.handle_text("me", "/stop")
+        assert cev.is_set(), "本会话要被置位"
+        assert not gev.is_set(), "别的会话不该被误杀"
+        assert cs.stopped_by_user is True
+        assert "喊停" in out
+
+    def test_stop_is_idempotent(self):
+        import threading
+        b = self._b()
+        key = b.scope_key("me")
+        s = b._session_for(key)
+        s._current_stop_event = threading.Event()
+        b.handle_text("me", "/stop")
+        assert "已经喊停" in b.handle_text("me", "/stop")
+
+    def test_stop_all_hits_every_running_session(self):
+        import threading
+        b = self._b()
+        keys = [b.scope_key("me"), b.scope_key("", "G9")]
+        evs = []
+        for k in keys:
+            s = b._session_for(k)
+            ev = threading.Event()
+            s._current_stop_event = ev
+            evs.append(ev)
+        out = b.handle_text("me", "/stop all")
+        assert "2 个会话" in out
+        assert all(e.is_set() for e in evs)
+
+    def test_non_stop_text_is_not_intercepted(self):
+        b = self._b()
+        assert b._handle_stop(b.scope_key("me"), "你好") is None
+        assert b._handle_stop(b.scope_key("me"), "/status") is None
+
+
 class TestGroupChat:
-    """群聊默认关；开了也要群白名单 + 发言人白名单双过，且每人独立上下文。"""
 
     def _group_bridge(self, **kw):
         cfg = _cfg(allow_group="true", allow_groups="G1", **kw)
@@ -256,7 +441,8 @@ class TestGroupChat:
     def test_group_must_be_whitelisted(self):
         b = self._group_bridge()
         assert "不在群白名单" in b.handle_text("me", "干活", "G9")
-        assert b.handle_text("me", "干活", "G1") == "已执行: 干活"
+        # runner 收到的是 `原目标 + QQ_CHANNEL_HINT`（通道能力说明），所以用 startswith
+        assert b.handle_text("me", "干活", "G1").startswith("已执行: 干活")
 
     def test_speaker_must_be_whitelisted_too(self):
         b = self._group_bridge()
@@ -288,7 +474,7 @@ class TestGroupChat:
 
     def test_group_rate_limit_is_per_group(self):
         b = self._group_bridge(rate_per_minute=1)
-        assert b.handle_text("me", "1", "G1") == "已执行: 1"
+        assert b.handle_text("me", "1", "G1").startswith("已执行: 1")
         assert "频繁" in b.handle_text("friend", "2", "G1"), "群内共享限流"
 
     def test_group_handler_is_registered_on_the_right_event(self):
@@ -408,7 +594,26 @@ class TestDelivery:
         assert len(api.calls) == MAX_REPLIES_PER_MESSAGE
         assert [c[1]["msg_seq"] for c in api.calls] == list(
             range(1, MAX_REPLIES_PER_MESSAGE + 1))
-        assert "已省略" in api.calls[-1][1]["content"], "截断要说清，别让用户以为内容就这么多"
+        # 正文可能在 content（纯文本）或 markdown.content（富文本）里，取到哪个都算
+        last = api.calls[-1][1]
+        body = last.get("content") or (last.get("markdown") or {}).get("content", "")
+        assert "已省略" in body, "截断要说清，别让用户以为内容就这么多"
+
+    def test_markdown_payload_is_sent_as_markdown(self):
+        """USE_MARKDOWN 时走 msg_type=2 + markdown.content（官方 2026-04 起单聊/群聊均可用）。"""
+        api = _FakeApi()
+        b = self._bridge_with_api(api)
+        asyncio.run(b._send("c:me", "**加粗**标题"))
+        kw = api.calls[0][1]
+        assert kw["msg_type"] == 2
+        assert kw["markdown"]["content"] == "**加粗**标题"
+        assert not kw.get("content"), "传了 markdown 后 content 必须为空（官方接口要求）"
+
+    def test_markdown_never_splits_a_code_fence(self):
+        """富文本按行切，不能把 ``` 围栏劈开 —— 否则渲染错乱。"""
+        long = "说明\n\n```python\n" + ("x" * (CHUNK_CHARS * 3)) + "\n```"
+        pieces = _chunks_markdown(long)
+        assert all(p.count("```") % 2 == 0 for p in pieces), f"围栏被劈开: {pieces}"
 
     def test_capped_chunks_leave_short_replies_alone(self):
         assert _chunks_capped("短回复") == ["短回复"]
@@ -553,3 +758,89 @@ class TestConcurrencyGate:
         s = b._session_for("c:me")
         assert b._execute_task(s, "c:me", "干活") == "ok"
         assert b._execute_task(s, "c:me", "再干") == "ok", "名额必须释放，否则第二次排不上"
+
+
+class TestReplyBudget:
+    """同一条消息最多回 4 次：回执 / 补发的图 / 语音 / 正文共用同一份额度。"""
+
+    def _bridge_with_ctx(self, api, key="c:me", msg_id="m1"):
+        b = QQBotBridge(_cfg())
+        b._ctx[key] = {"api": api, "msg_id": msg_id, "loop": None, "recv_at": time.time()}
+        return b
+
+    def test_remaining_shrinks_with_each_reply(self):
+        b = self._bridge_with_ctx(_FakeApi())
+        assert b._remaining_replies("c:me") == MAX_REPLIES_PER_MESSAGE
+        b._next_seq("c:me", "m1")
+        b._next_seq("c:me", "m1")
+        assert b._remaining_replies("c:me") == MAX_REPLIES_PER_MESSAGE - 2
+
+    def test_send_caps_chunks_at_remaining_budget(self):
+        """回执已占 1 条 → 正文最多再发 3 块（此前不封顶，会超平台上限整条失败）。"""
+        api = _FakeApi()
+        b = self._bridge_with_ctx(api)
+        b._next_seq("c:me", "m1")
+        asyncio.run(b._send("c:me", "长" * 6000))
+        assert len(api.calls) == MAX_REPLIES_PER_MESSAGE - 1
+
+    def test_send_is_skipped_when_budget_exhausted(self):
+        api = _FakeApi()
+        b = self._bridge_with_ctx(api)
+        for _ in range(MAX_REPLIES_PER_MESSAGE):
+            b._next_seq("c:me", "m1")
+        asyncio.run(b._send("c:me", "hello"))
+        assert api.calls == [], "额度用尽就不该再发（发了会整条失败）"
+
+    def test_media_leaves_a_slot_for_text(self, tmp_path, monkeypatch):
+        """只剩 1 条额度时不再补发媒体，把最后一条留给正文结论。"""
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x" * 2048)
+        api = _FakeApi()
+        b = self._bridge_with_ctx(api)
+
+        async def _fake_upload(*a, **kw):
+            return {"file_info": "fi", "file_uuid": "u"}
+
+        monkeypatch.setattr(b, "_upload_base64", _fake_upload)
+        for _ in range(MAX_REPLIES_PER_MESSAGE - 1):
+            b._next_seq("c:me", "m1")
+        assert asyncio.run(b.send_local_images("c:me", f"图 {img}")) == []
+
+
+class TestMediaSlotHygiene:
+    """补发名额只该被**真实存在**的媒体占用。"""
+
+    def test_url_no_longer_yields_fake_local_paths(self):
+        from agent.qqbot import _find_image_paths
+        # 一个 URL 之前会被拆成 s://…、//…、com/… 三条假路径占满名额
+        assert _find_image_paths("看 https://example.com/pic/logo.png 这张图") == []
+        assert _find_image_paths("图 D:/x/a.png") == ["D:/x/a.png"]
+
+    def test_missing_and_url_paths_do_not_take_slots(self, tmp_path, monkeypatch):
+        img = tmp_path / "real.png"
+        img.write_bytes(b"x" * 2048)
+        api = _FakeApi()
+        b = QQBotBridge(_cfg())
+        b._ctx["c:me"] = {"api": api, "msg_id": "m1", "loop": None, "recv_at": time.time()}
+
+        async def _fake_upload(*a, **kw):
+            return {"file_info": "fi", "file_uuid": "u"}
+
+        monkeypatch.setattr(b, "_upload_base64", _fake_upload)
+        text = f"图 {img}\n不存在的 output/nope.mp3\nURL https://e.com/a/b.png"
+        sent = asyncio.run(b.send_local_images("c:me", text))
+        assert sent == [str(img)], f"只该发真实存在的那张：{sent}"
+
+
+class TestBotpyPatchIdempotent:
+    def test_patch_not_nested_on_repeat_build(self):
+        """重复构建客户端时不该把 __init__ 再包一层（会无限套娃）。"""
+        import botpy.gateway as gw
+        from agent.qqbot import _build_client
+        b = QQBotBridge(_cfg())
+        _build_client(b)
+        _build_client(b)
+        assert getattr(gw.BotWebSocket, "_myagent_group_msg_patch", False) is True
+        before = gw.BotWebSocket.__init__
+        _build_client(b)
+        assert gw.BotWebSocket.__init__ is before, "重复调用又包了一层"

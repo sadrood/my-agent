@@ -20,6 +20,7 @@
 import asyncio
 import hashlib
 import os
+import re
 import threading
 import time
 from typing import Dict, List, Optional
@@ -63,6 +64,125 @@ def looks_like_chitchat(text: str) -> bool:
     return any(hint in body for hint in CHITCHAT_QUESTION_HINTS)
 
 
+#: 补发图片时识别的扩展名
+_IMAGE_EXTS = ("png", "jpg", "jpeg", "gif", "webp", "bmp")
+
+#: 补发**音频**时识别的扩展名。agent 用tts / voice_clone 工具生成的语音文件
+#: 落在这个目录，之前 _IMAGE_EXTS 不含这些扩展名 → mp3 压根没进补发流程，
+#: 用户收到的只是一串本地路径。现在按后缀分流：图片 file_type=1、音频 file_type=3。
+_AUDIO_EXTS = ("mp3", "wav", "silk", "ogg", "m4a", "aac", "amr")
+
+#: 后缀 → 官方 file_type（1=图片 2=视频 3=语音 4=文件）。见官方《富媒体消息概述》。
+_MEDIA_FILE_TYPES = {
+    "png": 1, "jpg": 1, "jpeg": 1, "gif": 1, "webp": 1, "bmp": 1,
+    "mp4": 2,
+    "mp3": 3, "wav": 3, "silk": 3, "ogg": 3, "m4a": 3, "aac": 3, "amr": 3,
+}
+
+#: 语音合成的文本上限（字）。语音是给人听的结论，交接单/长报告念出来是噪音——
+#: 超过这个长度就不念（agent 已生成的音频不受此限，那是它自己决定要发的内容）。
+MAX_VOICE_CHARS = 200
+
+
+def _first_existing_audio(text: str) -> tuple:
+    """在回复文本里找出第一个**真实存在**的音频文件。
+
+    返回 (绝对路径, 文本里的原始片段)；找不到返回 (None, "")。
+    agent 的 tts / voice_clone 工具产出 mp3 后会把路径写进回复，
+    这里用来直接发那个文件——保住它选的音色，不拿文字重新合成。
+    """
+    root = _project_root()
+    for raw in _find_image_paths(text):
+        cand = raw if os.path.isabs(raw) else os.path.join(root, raw)
+        cand = os.path.normpath(cand)
+        ext = cand.rsplit(".", 1)[-1].lower() if "." in cand else ""
+        if ext not in _AUDIO_EXTS:
+            continue
+        try:
+            if os.path.isfile(cand) and os.path.getsize(cand) >= 1024:
+                return cand, raw
+        except OSError:                            # noqa: BLE001
+            continue
+    return None, ""
+
+#: 「这条回复要带语音」的内传哨兵。/v 前缀 → handle_text 在文本前打这个标记，
+#: 调用方（handle_c2c / handle_group_message）见到就调 send_voice，再把标记剥掉。
+#: 走文本而不是返回值元组，是为了让 handle_text 的既有签名和测试保持不变。
+_VOICE_FLAG = "VOICE"
+
+
+def _project_root() -> str:
+    """项目根目录（惰性导入：config 依赖较重，别在模块加载时就拖进来）。"""
+    try:
+        from config import PROJECT_ROOT
+        return PROJECT_ROOT
+    except Exception:                                   # noqa: BLE001
+        return os.getcwd()
+
+
+def _find_image_paths(text: str) -> List[str]:
+    """从回复文本里挑出本地**媒体**路径（图片+音频；按出现顺序、去重、保持原样）。
+
+    旧实现用 `(?:/[A-Za-z0-9_.\\-]+)+\\.(png|...)`，在 Windows 上有三个洞：
+      · `D:/aaa/...png` 里的盘符被吃掉，只剩 `/aaa/...` → open() 找不到文件
+      · `D:\\aaa\\...png` 反斜杠路径匹配出半截
+      · 只给文件名（`img-xxx.png`）完全匹配不到
+    所以这里显式处理盘符、正反斜杠与纯文件名三种写法。
+
+    另外**音频也必须收**：agent 的tts / voice_clone 工具产出mp3 路径，
+    用户要的是"把音频发过来"，只回一串本地路径等于没发。
+
+    三轮匹配后按「规范化后的绝对路径」去重，避免 `D:/a/b.png` 又被第②轮
+    从中间抠出 `/a/b.png` 重复一遍。
+    """
+    # 先摘掉 URL：`https://x/a.png` 会被下面的路径正则当成好几条"本地路径"，
+    # 白占补发名额且都打不开（实测一个 URL 能产出 3 条假路径）。
+    text = re.sub(r"https?://\S+", " ", str(text or ""))
+    exts = _IMAGE_EXTS + _AUDIO_EXTS
+    out: List[str] = []
+    seen = set()
+    root = _project_root()
+
+    def _add(p: str) -> None:
+        p = p.strip().strip('"\'')
+        if not p:
+            return
+        norm = os.path.normpath(p if os.path.isabs(p) else os.path.join(root, p))
+        key = norm.lower()
+        if key in seen:            # 同一条路径已收录（挡掉盘符路径的二次匹配）
+            return
+        seen.add(key)
+        out.append(p)
+
+    for m in re.finditer(r"[A-Za-z]:[\\/][^\s'\"<>|]+?\.(?:%s)" % "|".join(exts),
+                         text, flags=re.I):
+        _add(m.group(0))
+    for m in re.finditer(r"(?<![\w.])/[^\s'\"<>|]+?\.(?:%s)" % "|".join(exts),
+                         text, flags=re.I):
+        _add(m.group(0))
+    # 纯文件名 / 相对路径：必须真的带分隔目录才算"路径"，
+    # 否则 D:/aaa/img-20261013.png 里的文件名会被当成相对路径再收一遍，
+    # 白白吃掉"最多补发 3 张"的配额。
+    for m in re.finditer(r"(?<![\w\\/])[\w.\-]+(?:[\\/][\w.\-]+)+\.(?:%s)" % "|".join(exts),
+                         text, flags=re.I):
+        _add(m.group(0))
+    # 只有不含斜杠的孤零零文件名时也收（相对项目根能找到的常见产物名）
+    for m in re.finditer(r"(?<![\w./\\-])[\w\-]+\.(?:%s)" % "|".join(exts),
+                         text, flags=re.I):
+        _add(m.group(0))
+    return out
+
+
+def _sent_placeholder(raw: str) -> str:
+    """已发出去的媒体在文字里留一句人话占位（区分图片 / 语音）。"""
+    ext = raw.rsplit(".", 1)[-1].lower() if "." in raw else ""
+    if ext in _AUDIO_EXTS:
+        return "（语音已发上）"
+    if ext == "mp4":
+        return "（视频已发上）"
+    return "（图片已发上图）"
+
+
 def _chunk(text: str, limit: int = CHUNK_CHARS) -> List[str]:
     """把长回复切成多条（QQ 单条有长度限制），保留换行边界。"""
     body = str(text or "").strip()
@@ -80,6 +200,125 @@ def _chunk(text: str, limit: int = CHUNK_CHARS) -> List[str]:
     if buf.strip():
         out.append(buf.rstrip())
     return out or ["（没有输出）"]
+
+
+#: Markdown 发送开关。官方 2026-04-23 起「单聊/群聊自定义 Markdown 已对所有机器人开放，
+#: 无需申请模板、频道除外」——所以默认走真正的富文本（msg_type=2），星号渲染成粗体。
+#: 置 False 则退回"剥掉标记发纯文本"。
+USE_MARKDOWN = True
+
+
+def _md_to_text(text: str) -> str:
+    """把 LLM 常见的 Markdown 标记转成 QQ 纯文本友好的形式（USE_MARKDOWN=False 时才走）。
+
+    QQ 官方富文本(msg_type=2)只支持固定模板，不接受任意 Markdown，
+    所以这里主动去掉符号噪音：
+      - ``**粗体**`` / `__粗体__`  → 粗体内容本身
+      - ``*斜体*`` / `_斜体_`      → 斜体内容本身
+      - ``~~删除线~~``             → 删除线内容本身
+      - ` ```代码块``` `           → 保留缩进，去掉围栏
+      - 行内 `code`               → 去掉反引号
+      - ``[文字](url)``            → 文字（url）
+    只做**去标记**，不改文字内容。
+    """
+    s = str(text or "")
+    if not s:
+        return s
+    # 代码块：去围栏，保留内容
+    s = re.sub(r"^```[a-zA-Z0-9_+-]*\s*$", "", s, flags=re.M)
+    # 链接：[文字](url) → 文字（url）
+    s = re.sub(r"\[([^\]]*)\]\(([^)]+)\)", r"\1（\2）", s)
+    # 强调：**粗**、__粗__ → 粗
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"__([^_]+)__", r"\1", s)
+    # 删除线：~~删~~ → 删
+    s = re.sub(r"~~([^~]+)~~", r"\1", s)
+    # 斜体：*斜*、_斜_ → 斜（放在加粗之后，避免吃掉已处理的内容）
+    s = re.sub(r"\*([^*\n]+)\*", r"\1", s)
+    s = re.sub(r"(?<![\w])_([^_\n]+)_(?![\w])", r"\1", s)
+    # 行内代码：`code` → code
+    s = re.sub(r"`([^`\n]+)`", r"\1", s)
+    # 行首标题标记：### 标题 → 【标题】
+    s = re.sub(r"^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$", r"【\1】", s, flags=re.M)
+    # 引用：> 内容 → │ 内容
+    s = re.sub(r"^\s{0,3}>\s?(.*)$", r"│ \1", s, flags=re.M)
+    # 水平线：--- / *** / ___ → 空
+    s = re.sub(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$", "", s, flags=re.M)
+    # 列表符号规范化：* item / + item → • item
+    s = re.sub(r"^(\s*)[*+]\s+", r"\1• ", s, flags=re.M)
+    return s
+
+
+#: Markdown 单条内容上限（字符）。富文本要序列化成 json，实际限制比纯文本更紧；
+#: 这里跟随 CHUNK_CHARS 保持一致，让切块/封顶行为与纯文本路径同口径（测试也依赖这点）。
+MD_CHUNK_CHARS = CHUNK_CHARS
+
+
+#: Markdown 尾块超限时统一的截断提示（与 _chunks_capped 措辞一致）。
+_MD_TRUNCATED = "\n…（内容过长，已省略后续；完整结果可用 /status 取）"
+
+
+def _cap_markdown(pieces: List[str], limit: int = MAX_REPLIES_PER_MESSAGE) -> List[str]:
+    """Markdown 版条数封顶：超出的直接丢，并给最后一块加省略提示。
+
+    刻意**不**复用 _chunks_capped——它内部走 _chunk 按固定字数硬切，
+    会把 ```围栏劈开、把标题和正文拦腰截断。这里只裁块数，不动块内结构。
+    """
+    limit = max(1, int(limit))
+    if len(pieces) <= limit:
+        return pieces
+    dropped_chars = sum(len(p) for p in pieces[limit:])
+    kept = pieces[:limit]
+    kept[-1] = f"{kept[-1]}{_MD_TRUNCATED}"
+    return kept
+
+
+def _chunks_markdown(text: str, limit: int = MD_CHUNK_CHARS,
+                     max_pieces: int = MAX_REPLIES_PER_MESSAGE) -> List[str]:
+    """按**行边界**切分 Markdown，且绝不把标记劈成两半。
+
+    和 _chunk 的区别：Markdown 里 ``` 是成对围栏、`**` 是成对强调，砍在中间会
+    让渲染错乱。这里按行累计，围栏状态带着走；单行超长才硬切。
+
+    max_pieces：最多回几条——调用方按"这条来信还剩几次回复额度"传入
+    （回执与补发的图片也吃同一份额度）。
+    """
+    body = str(text or "").strip()
+    if not body:
+        return ["（没有输出）"]
+    # 超长围栏块（单行就超限）：整体作为一个代码块发，宁可超长也不劈开——
+    # 劈开会让渲染错乱，比超限更难读。
+    fence = re.search(r"(```.*?```)", body, flags=re.S)
+    if fence and len(fence.group(1)) > limit:
+        head = body[: fence.start()].strip()
+        tail = body[fence.end():].strip()
+        out = [head] if head else []
+        out.append(fence.group(1))
+        if tail:
+            out.extend(_chunks_markdown(tail, limit, max_pieces))
+            return _cap_markdown([x for x in out if x.strip()], max_pieces) or ["（没有输出）"]
+        return _cap_markdown([x for x in out if x.strip()], max_pieces) or ["（没有输出）"]
+    out, buf, in_fence = [], "", False
+    for line in body.splitlines(keepends=True):
+        if re.match(r"^\s{0,3}```", line):
+            in_fence = not in_fence
+        if len(buf) + len(line) > limit and buf.strip():
+            if in_fence:                      # 别让收尾停在未闭合的围栏里
+                buf += "\n```\n"
+            out.append(buf.rstrip())
+            buf = ""
+        if len(line) > limit:                # 单行超长（不在围栏内）：硬切
+            while len(line) > limit:
+                out.append(line[:limit])
+                line = line[limit:]
+        buf += line
+    if buf.strip():
+        if in_fence:                          # 收尾补围栏
+            buf += "\n```"
+        out.append(buf.rstrip())
+    # 同一条消息最多回 MAX_REPLIES_PER_MESSAGE 条，超了整条发送失败（平台报超频）。
+    # 用 _cap_markdown 只裁块数、不裁块内结构，避免把围栏/标题劈开。
+    return _cap_markdown([x for x in out if x.strip()], max_pieces) or ["（没有输出）"]
 
 
 async def _log_send_errors(coro, seq: int, passive: bool) -> None:
@@ -233,6 +472,13 @@ class UserSession:
         self.last_output = ""
         self.task_timeout = task_timeout       # 秒；<=0 表示不限时
         self.timed_out = False
+        #: 当前这一轮任务的停止信号（供 `/stop` 从**别的线程**置位）。
+        #: 每轮 run() 建新的，跑完清空；为 None 表示这台会话当前没有任务在跑。
+        self._current_stop_event = None
+        #: 本轮是被用户 /stop 停的（与"超时"区分，给出不同文案）
+        self.stopped_by_user = False
+        #: /stop 幂等标记：已按过就别重复回"收到了"
+        self._stop_pressed = False
         self._approver = approver
         self._verbose = verbose
 
@@ -266,13 +512,19 @@ class UserSession:
 
         超时不硬杀线程（杀不掉，还会留下操作同一工作区的孤儿线程），
         而是给 agent 的 stop_event 置位——它在下一个检查点优雅收尾，已完成成果保留。
+
+        同一根 stop_event 也供 `/stop` 使用：桥在**别的线程**里拿到它并 .set()，
+        效果与超时一致（都是"下一个检查点收尾"），只是文案不同。
         """
         with self.lock:
             agent = self.ensure_agent()
             self.last_run_at = time.time()
             self.turns += 1
             self.timed_out = False
+            self.stopped_by_user = False
+            self._stop_pressed = False
             stop_event = threading.Event()
+            self._current_stop_event = stop_event       # 暴露给 /stop
             timer = None
             if self.task_timeout and self.task_timeout > 0:
                 timer = threading.Timer(self.task_timeout, stop_event.set)
@@ -282,14 +534,19 @@ class UserSession:
                 self.last_output = str(agent.run(goal, keep_session=True,
                                                  stop_event=stop_event) or "")
                 if stop_event.is_set():
-                    self.timed_out = True
-                    self.last_output = (f"任务超过 {int(self.task_timeout)} 秒，已中断"
-                                        "（已完成的成果保留）。\n\n") + self.last_output
+                    if self.stopped_by_user:
+                        self.last_output = ("（已按 /stop 停止，已完成成果保留）\n\n"
+                                            ) + self.last_output
+                    else:
+                        self.timed_out = True
+                        self.last_output = (f"任务超过 {int(self.task_timeout)} 秒，已中断"
+                                            "（已完成的成果保留）。\n\n") + self.last_output
             except Exception as e:                     # noqa: BLE001
                 self.last_output = f"执行失败：{type(e).__name__}: {str(e)[:200]}"
             finally:
                 if timer is not None:
                     timer.cancel()
+                self._current_stop_event = None         # 本轮结束，/stop 该回"没有在跑的"
             return self.last_output
 
     def screenshot(self, only_live: bool = False) -> tuple:
@@ -339,6 +596,8 @@ class QQBotBridge:
     def __init__(self, config: Optional[QQBotConfig] = None, runner=None):
         self.config = config or QQBotConfig()
         self.sessions: Dict[str, UserSession] = {}
+        #: 待发的语音文本（按会话键）：/v 前缀或 /v 重播时入队，调用方消费
+        self._pending_voice: Dict[str, str] = {}
         self._recent: Dict[str, List[float]] = {}
         self._pending: Dict[str, dict] = {}
         self._always: Dict[str, set] = {}            # 用户选了"始终允许"的工具
@@ -415,6 +674,23 @@ class QQBotBridge:
         window = PASSIVE_REPLY_WINDOW_GROUP if group_openid else PASSIVE_REPLY_WINDOW_C2C
         fresh = (time.time() - float(ctx.get("recv_at") or 0.0)) <= window
         return (ctx.get("msg_id") if fresh else None), fresh
+
+    def _remaining_replies(self, key: str) -> int:
+        """这条来信还剩几次被动回复额度。
+
+        被动窗口内(msg_id 有效)时,**回执、补发的图片/语音、正文文字共用同一份额度**:
+        平台规定同一条消息最多回 MAX_REPLIES_PER_MESSAGE 次,超了整条发送失败。
+        超窗口(改主动消息)或本条还没回过时,视为满额。
+        """
+        key = self.norm_key(key)
+        msg_id, _fresh = self._reply_plan(key, self._ctx_for(key))
+        if not msg_id:
+            return MAX_REPLIES_PER_MESSAGE
+        state = self._seq.get(key) or {}
+        if state.get("msg_id") != msg_id:
+            return MAX_REPLIES_PER_MESSAGE
+        used = max(0, int(state.get("next", 1)) - 1)
+        return max(0, MAX_REPLIES_PER_MESSAGE - used)
 
     def allowed(self, user_openid: str, group_openid: str = "") -> bool:
         """私聊：本人在白名单即可；群聊：群要在群的名单里，且发言人也要在白名单里。"""
@@ -501,6 +777,51 @@ class QQBotBridge:
         """给 UserSession 用的审批回调（Agent 侧只认 request）。"""
         return lambda request: self.begin_approval(key, request)
 
+    def _handle_stop(self, key: str, text: str) -> Optional[str]:
+        """处理 `/stop`、`/stop all`。返回回复文本；不是停命令就返回 None。
+
+        语义：
+          · **按会话隔离**——在哪个会话发就停哪个（群里发停群任务、私聊发停私聊任务），
+            不会误杀另一个会话的任务；`/stop all` 才是全停兜底。
+          · **只停当前、保留排队**——同会话里排在后面的任务照常执行
+            （用户要的是"这条不要了"，不是"这个会话别干了"）。
+
+        必须在会话锁**之前**调用：正在跑的任务占着 session.lock，
+        走常规路径的消息会阻塞排队，那样永远停不掉正在跑的那个。
+        置位是线程安全的（threading.Event），且是"下一个检查点收尾"的优雅停止，
+        不是硬杀线程。
+        """
+        cmd = str(text or "").strip().lower()
+        if cmd not in ("/stop", "/stopall", "/stop all", "/停", "/停止", "/全停"):
+            return None
+        from agent import run_log
+
+        def _mark(session) -> bool:
+            """给一个会话置停止信号；返回是否真的置上了（没在跑就不置）。"""
+            ev = getattr(session, "_current_stop_event", None)
+            if ev is None or ev.is_set():
+                return False
+            session.stopped_by_user = True
+            session._stop_pressed = True
+            ev.set()
+            return True
+
+        if cmd in ("/stopall", "/stop all", "/全停"):
+            hit = [k for k, s in list(self.sessions.items()) if _mark(s)]
+            if not hit:
+                return "现在没有在跑的任务。"
+            run_log.log(f"QQ 收到 /stop all：已对 {len(hit)} 个会话置停止信号", "warn")
+            return f"已对 {len(hit)} 个会话置停止信号（下一个检查点收尾，成果保留）。"
+
+        session = self.sessions.get(self.norm_key(key))
+        if session is None or getattr(session, "_current_stop_event", None) is None:
+            return "这个会话现在没有在跑的任务。"
+        if getattr(session, "_stop_pressed", False):
+            return "已经喊停了，它在下一个检查点收尾（已完成成果保留）。"
+        _mark(session)
+        run_log.log(f"QQ 收到 /stop：会话 {session.session_name()} 置停止信号", "warn")
+        return "收到，已喊停——它在下一个检查点收尾（已完成成果保留）。"
+
     def resolve_approval(self, key: str, text: str) -> bool:
         """把用户这条回复当成审批答复；返回是否消费掉了它。"""
         key = self.norm_key(key)
@@ -546,9 +867,23 @@ class QQBotBridge:
             return
         msg_id, fresh = self._reply_plan(key, ctx)
         group_openid, user_openid = self.split_key(key)
-        for piece in _chunks_capped(text):
+        # 官方 2026-04-23 起单聊/群聊支持自定义 Markdown：msg_type=2 传 markdown.content，
+        # ** / # 等会真正渲染成粗体与标题。传了 markdown 时 content 必须为空（见官方接口文档）。
+        if USE_MARKDOWN:
+            pieces = _chunks_markdown(text)
+        else:
+            pieces = _chunks_capped(_md_to_text(text))
+        for piece in pieces:
             seq = self._next_seq(key, msg_id)
-            if group_openid:
+            if USE_MARKDOWN:
+                md = {"content": piece}
+                if group_openid:
+                    coro = api.post_group_message(group_openid=group_openid, msg_type=2,
+                                                  msg_id=msg_id, msg_seq=seq, markdown=md)
+                else:
+                    coro = api.post_c2c_message(openid=user_openid, msg_type=2, msg_id=msg_id,
+                                                msg_seq=seq, markdown=md)
+            elif group_openid:
                 coro = api.post_group_message(group_openid=group_openid, msg_type=0,
                                               msg_id=msg_id, msg_seq=seq, content=piece)
             else:
@@ -672,55 +1007,104 @@ class QQBotBridge:
     async def _send_plain(self, key: str, text: str) -> None:
         await self._send(key, text)
 
-    async def send_local_images(self, key: str, text: str) -> None:
-        """把回复文字里提到的本地图片文件直接发进 QQ（画图等工具的产物）。
+    async def send_local_images(self, key: str, text: str) -> List[str]:
+        """把回复文字里提到的本地**媒体**文件直接发进 QQ（画图 / tts 的产物）。
 
-        agent 生成的图片默认只回一个服务器路径；这里扫描回复里的本地图片
-        路径，找到就把图片本体也发过去，用户不用登录服务器取图。
-        返回成功发出的路径列表：调用方据此把文字里的路径替换掉（发失败则保留兜底）。
+        agent 生成的图片/音频默认只回一个本地路径；这里扫描回复里的媒体路径，
+        找到就把**文件本体**也发过去，用户不用登录服务器取文件。
+        按后缀选官方 file_type（图片=1 / 语音=3），这样 tts、voice_clone
+        生成的 mp3 会被当语音发出去，而不是留在文字里当路径。
+        返回成功发出的**原始文本片段**列表：调用方据此把文字里的路径替换掉
+        （发失败则保留文字兜底）。
+
+        注意：返回的是文本里**原样出现**的片段，而不是解析后的绝对路径——
+        调用方要用它做 `reply.replace(...)`，两者必须一致才对得上。
         """
         import base64
-        import re
+        import os
         from agent import run_log
         key = self.norm_key(key)
         ctx = self._ctx_for(key)
         api = ctx.get("api")
         if api is None:
             return []
-        paths: List[str] = []
-        for m in re.finditer(r"(?:/[A-Za-z0-9_.\-]+)+\.(?:png|jpe?g|gif|webp|bmp)",
-                             str(text or "")):
-            if m.group(0) not in paths:
-                paths.append(m.group(0))
-        if not paths:
+        # (原始片段, 解析后的绝对路径) 成对，后面用原始片段去替换文字
+        pairs: List[tuple] = []
+        seen_abs = set()
+        root = _project_root()
+        for raw in _find_image_paths(str(text or "")):
+            # 盘符路径按原样用；相对/纯文件名相对项目根解析
+            cand = raw if os.path.isabs(raw) else os.path.join(root, raw)
+            cand = os.path.normpath(cand)
+            if cand in seen_abs:
+                continue
+            seen_abs.add(cand)
+            ext = cand.rsplit(".", 1)[-1].lower() if "." in cand else ""
+            if _MEDIA_FILE_TYPES.get(ext) is None:
+                continue                        # 扩展名不认识就别乱发
+            # 只有**真实存在**的文件才占补发名额：回复里常只是"提了一句路径"，
+            # 先切 3 再逐个试打开会让真图被不存在的路径挤掉。
+            try:
+                if not os.path.isfile(cand):
+                    continue
+                size = os.path.getsize(cand)
+            except OSError:
+                continue
+            pairs.append((raw, cand, size))
+        if not pairs:
             return []
         group_openid, user_openid = self.split_key(key)
         sent: List[str] = []
-        for path in paths[:3]:                 # 最多补发 3 张，避免刷屏
+        for raw, path, size in pairs[:3]:        # 最多补发 3 个，避免刷屏
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+            ftype = _MEDIA_FILE_TYPES.get(ext) or 1
+            if ftype == 3 and size < 1024:
+                run_log.log(f"QQ 补发语音跳过（音频过小 {size} 字节）：{path}", "warn")
+                continue                          # TTS 偶尔产出 0 字节文件
+            # 额度：给正文文字至少留 1 条，别让图把结论挤掉（超了整条发送失败）
+            if self._remaining_replies(key) <= 1:
+                run_log.log(f"QQ 补发媒体跳过（回复额度要留给正文）：{path}", "warn")
+                break
+            kind = "语音" if ftype == 3 else "图片"
             try:
                 with open(path, "rb") as f:
                     data = base64.b64encode(f.read()).decode("ascii")
             except OSError as e:               # noqa: BLE001
-                run_log.log(f"QQ 补发图片跳过（读不到 {path}）：{type(e).__name__}", "warn")
+                run_log.log(f"QQ 补发{kind}跳过（读不到 {path}）：{type(e).__name__}", "warn")
                 continue
-            media = await self._upload_base64(api, user_openid, group_openid, data)
+            media = await self._upload_base64(api, user_openid, group_openid, data,
+                                              file_type=ftype)
             if media is None:
-                run_log.log(f"QQ 补发图片失败（{path}）：无可用上传通道", "warn")
+                run_log.log(f"QQ 补发{kind}失败（{path}）：无可用上传通道", "warn")
                 continue
+            # 必须带 msg_id/msg_seq 走**被动回复**：群主动消息每月只有 4 条，
+            # 不带 msg_id 的富媒体会被当主动消息直接拒掉（单聊同理）。
+            msg_id, _fresh = self._reply_plan(key, ctx)
+            seq = self._next_seq(key, msg_id)
             try:
                 if group_openid:
                     await api.post_group_message(group_openid=group_openid, msg_type=7,
-                                                 media=media)
+                                                 media=media, msg_id=msg_id, msg_seq=seq)
                 else:
-                    await api.post_c2c_message(openid=user_openid, msg_type=7, media=media)
-                sent.append(path)
+                    await api.post_c2c_message(openid=user_openid, msg_type=7, media=media,
+                                               msg_id=msg_id, msg_seq=seq)
+                sent.append(raw)                    # 回原始片段，调用方据此替换文字
             except Exception as e:              # noqa: BLE001
                 run_log.log(f"QQ 补发图片失败（{path}）：{type(e).__name__}: {str(e)[:120]}",
                             "warn")
         return sent
 
     async def send_voice(self, key: str, text: str) -> bool:
-        """把回复文字转成语音发进 QQ（TTS 合成 + 富媒体上传，file_type=3）。"""
+        """把回复**内容**发成语音进 QQ（file_type=3）。
+
+        两条路径，优先级不同：
+          ① **agent 已生成的音频**：回复里带 mp3/wav 路径时，直接把那个文件发出去——
+             这样保留 agent 选定的音色（voice_clone / 角色声线），而不是拿文字重合成。
+          ② **/v 前缀触发的文字转语音**：没有现成音频时才用 TTS 合成。
+
+        无论哪条，超过 MAX_VOICE_CHARS 都不念：语音是给人听的结论，
+        交接单/长报告念出来是噪音。
+        """
         import base64
         from agent import run_log
         key = self.norm_key(key)
@@ -729,19 +1113,36 @@ class QQBotBridge:
         if api is None or not str(text or "").strip():
             return False
 
-        def _synth() -> str:
-            try:
-                from models.tts import TTSModel
-                r = TTSModel().synthesize(str(text)[:500])
-                return str((r or {}).get("path") or "")
-            except Exception as e:              # noqa: BLE001
-                run_log.log(f"QQ 语音合成失败：{type(e).__name__}: {str(e)[:120]}", "warn")
-                return ""
+        # ① 优先用agent 已生成的音频（保留它选的音色）
+        existing = _first_existing_audio(str(text))
+        if existing:
+            path, raw = existing
+            run_log.log(f"QQ 语音：直接发送 agent 生成的音频 {os.path.basename(path)}")
+        else:
+            # ② 回退：拿文字合成。超长不念。
+            body = str(text).strip()
+            if len(body) > MAX_VOICE_CHARS:
+                run_log.log(f"QQ 语音跳过（文本 {len(body)} 字 > {MAX_VOICE_CHARS} 上限，"
+                            f"语音只念给人听的结论）", "warn")
+                return False
 
-        path = await asyncio.to_thread(_synth)
-        if not path or not os.path.exists(path):
-            return False
+            def _synth() -> str:
+                try:
+                    from models.tts import TTSModel
+                    r = TTSModel().synthesize(body[:MAX_VOICE_CHARS])
+                    return str((r or {}).get("path") or "")
+                except Exception as e:          # noqa: BLE001
+                    run_log.log(f"QQ 语音合成失败：{type(e).__name__}: {str(e)[:120]}", "warn")
+                    return ""
+
+            path = await asyncio.to_thread(_synth)
+            raw = ""
+            if not path or not os.path.exists(path):
+                return False
         try:
+            if os.path.getsize(path) < 1024:      # TTS 偶尔产出 0 字节/极小文件
+                run_log.log(f"QQ 语音跳过（音频过小 {os.path.getsize(path)} 字节）：{path}", "warn")
+                return False
             with open(path, "rb") as f:
                 data = base64.b64encode(f.read()).decode("ascii")
         except OSError as e:                    # noqa: BLE001
@@ -752,43 +1153,104 @@ class QQBotBridge:
         if media is None:
             run_log.log("QQ 语音上传失败：无可用上传通道", "warn")
             return False
+        # 带 msg_id 走被动回复（群聊窗口只有 5 分钟，且主动消息要占每日配额）
+        msg_id, _fresh = self._reply_plan(key, ctx)
+        seq = self._next_seq(key, msg_id)
         try:
             if group_openid:
                 await api.post_group_message(group_openid=group_openid, msg_type=7,
-                                             media=media)
+                                             media=media, msg_id=msg_id, msg_seq=seq)
             else:
-                await api.post_c2c_message(openid=user_openid, msg_type=7, media=media)
+                await api.post_c2c_message(openid=user_openid, msg_type=7, media=media,
+                                           msg_id=msg_id, msg_seq=seq)
             return True
         except Exception as e:                  # noqa: BLE001
             run_log.log(f"QQ 语音发送失败：{type(e).__name__}: {str(e)[:120]}", "warn")
             return False
 
     async def _upload_base64(self, api, user_openid: str, group_openid: str, data: str,
-                             file_type: int = 1):
-        """把 base64 媒体直接传给平台（1=图片 3=语音；官方文档未明确此字段，故失败即降级）。"""
+                             file_type: int = 1, srv_send_msg: bool = False):
+        """把 base64 媒体直传给平台，换取 file_info。
+
+        参数依官方《富媒体消息概述》：
+          file_type     1=图片 2=视频 3=语音 4=文件
+          file_data     整文件base64（官方推荐大文件走分片上传）
+          srv_send_msg  true=上传即发送、跳过发消息接口，但会**占用主动消息频次**
+        失败返回 None，由调用方降级。
+        """
         try:
             from botpy.http import Route
             route = (Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
                      if group_openid else
                      Route("POST", "/v2/users/{openid}/files", openid=user_openid))
-            resp = await api._http.request(route, json={"file_type": file_type, "file_data": data,
-                                                        "srv_send_msg": False})
-        except Exception:                            # noqa: BLE001
+            resp = await api._http.request(route, json={"file_type": file_type,
+                                                        "file_data": data,
+                                                        "srv_send_msg": srv_send_msg})
+        except Exception as e:                # noqa: BLE001
+            from agent import run_log
+            run_log.log(f"QQ 富媒体上传异常（file_type={file_type}）："
+                        f"{type(e).__name__}: {str(e)[:140]}", "warn")
             return None
         return self._media_of(resp)
 
-    async def _upload_url(self, api, user_openid: str, group_openid: str, url: str):
-        """备用通道：让平台自己去抓一个公网可达的图片地址。"""
+    async def _upload_url(self, api, user_openid: str, group_openid: str, url: str,
+                          file_type: int = 1):
+        """备用通道：让平台自己去抓一个公网可达的地址（官方 URL 上传，适合已在外网的产物）。"""
         try:
             from botpy.http import Route
             route = (Route("POST", "/v2/groups/{group_openid}/files", group_openid=group_openid)
                      if group_openid else
                      Route("POST", "/v2/users/{openid}/files", openid=user_openid))
-            resp = await api._http.request(route, json={"file_type": 1, "url": url,
-                                                       "srv_send_msg": False})
-        except Exception:                            # noqa: BLE001
+            resp = await api._http.request(route, json={"file_type": file_type, "url": url,
+                                                        "srv_send_msg": False})
+        except Exception as e:                # noqa: BLE001
+            from agent import run_log
+            run_log.log(f"QQ 富媒体 URL 上传异常：{type(e).__name__}: {str(e)[:140]}", "warn")
             return None
         return self._media_of(resp)
+
+    async def push_media(self, openid: str, path: str, file_type: int = 1,
+                         group_openid: str = "") -> bool:
+        """**主动**把本地媒体推给用户（不经用户触发）。
+
+        官方频控（2026-07 文档）：单聊/群聊每日上限 1000 条/用户|群，
+        单关系维度 20qpm、Bot 维度群 60qpm（未认证 30）—— 远比"每月 4 条"宽裕。
+        真正的前置条件：**用户没在 QQ 客户端关掉"允许主动发送"**，关了会一律失败。
+
+        主动消息**不带 msg_id**（那是被动回复专用字段），所以它不吃"每条消息回 4 次"的额度，
+        只吃每日/每分钟的主动频控。
+        """
+        import base64 as _b64
+        from agent import run_log
+        if not openid or not path or not os.path.isfile(path):
+            run_log.log(f"QQ 主动推媒体跳过：{path}", "warn")
+            return False
+        try:
+            with open(path, "rb") as f:
+                data = _b64.b64encode(f.read()).decode("ascii")
+        except OSError as e:                   # noqa: BLE001
+            run_log.log(f"QQ 主动推媒体读取失败：{type(e).__name__}", "warn")
+            return False
+        ctx = self._ctx_for(self.scope_key(openid, group_openid))
+        api = ctx.get("api")
+        if api is None:
+            run_log.log("QQ 主动推媒体失败：会话里没有 api（桥未连上？）", "warn")
+            return False
+        # 主动消息**不带 msg_id**——那是被动回复专用字段
+        media = await self._upload_base64(api, openid, group_openid, data, file_type=file_type)
+        if media is None:
+            run_log.log("QQ 主动推媒体失败：上传通道无返回", "warn")
+            return False
+        try:
+            if group_openid:
+                await api.post_group_message(group_openid=group_openid, msg_type=7, media=media)
+            else:
+                await api.post_c2c_message(openid=openid, msg_type=7, media=media)
+            run_log.log(f"QQ 主动推送{'群' if group_openid else '私聊'}媒体成功：{path}")
+            return True
+        except Exception as e:                  # noqa: BLE001
+            run_log.log(f"QQ 主动推媒体失败：{type(e).__name__}: {str(e)[:160]}", "warn")
+            return False
 
     @staticmethod
     def _media_of(resp):
@@ -831,11 +1293,25 @@ class QQBotBridge:
             await self._send(key, self.ack_text())
         reply = await asyncio.to_thread(self.handle_text, openid, text)
         if reply:
+            #剥掉"要语音"的哨兵，取出真正要念的文本
+            want_voice = reply.startswith(_VOICE_FLAG)
+            if want_voice:
+                reply = reply[len(_VOICE_FLAG):]
+            # /v 重播：handle_text已把上一条回复排进队列
+            queued = self._pending_voice.pop(key, "")
             sent = await self.send_local_images(key, reply)
-            for p in sent:                      # 图片已发出的路径不再留在文字里
-                reply = reply.replace(p, "（图片已发上图）")
+            for p in sent:                      # 已发出的媒体路径不再留在文字里
+                reply = reply.replace(p, _sent_placeholder(p))
+            # 额度由 _send 内部按"这条来信还剩几次"截断：回执 / 补发的图 / 语音 / 正文
+            # 共用同一份，超了整条发送失败（此前那个 remaining 守卫恒不成立，等于没管）。
             await self._send(key, reply)
-            if self.config.voice_reply:
+            # 语音默认**不发**（QQBOT_VOICE_REPLY=false）。三种情况才发：
+            #   ① /v 前缀 → want_voice；② /v 重播 → queued；③ 全局开关打开
+            # 语音也占「每条消息最多回 4 次」的额度，图片发多了让位给文字。
+            voice_text = queued or (reply if want_voice else "")
+            if voice_text and self._remaining_replies(key) > 0:
+                await self.send_voice(key, voice_text)
+            elif self.config.voice_reply and self._remaining_replies(key) > 0:
                 await self.send_voice(key, reply)
 
     async def handle_group_message(self, message) -> None:
@@ -855,11 +1331,22 @@ class QQBotBridge:
             await self._send(key, self.ack_text())
         reply = await asyncio.to_thread(self.handle_text, member, text, group_openid)
         if reply:
+            # 剥掉"要语音"的哨兵，取出真正要念的文本
+            want_voice = reply.startswith(_VOICE_FLAG)
+            if want_voice:
+                reply = reply[len(_VOICE_FLAG):]
+            # /v 重播：handle_text 已把上一条回复排进队列
+            queued = self._pending_voice.pop(key, "")
             sent = await self.send_local_images(key, reply)
-            for p in sent:                      # 图片已发出的路径不再留在文字里
-                reply = reply.replace(p, "（图片已发上图）")
+            for p in sent:                      # 已发出的媒体路径不再留在文字里
+                reply = reply.replace(p, _sent_placeholder(p))
+            # 额度由 _send 内部按"这条来信还剩几次"截断（群的富媒体也算一条）。
             await self._send(key, reply)
-            if self.config.voice_reply:
+            # 语音默认不发；/v 前缀、/v 重播、或全局开关打开时才发。
+            voice_text = queued or (reply if want_voice else "")
+            if voice_text and self._remaining_replies(key) > 0:
+                await self.send_voice(key, voice_text)
+            elif self.config.voice_reply and self._remaining_replies(key) > 0:
                 await self.send_voice(key, reply)
 
     async def _send(self, key: str, payload: str) -> None:
@@ -871,10 +1358,27 @@ class QQBotBridge:
             return
         msg_id, fresh = self._reply_plan(key, ctx)
         group_openid, user_openid = self.split_key(key)
-        for piece in _chunks_capped(payload):
+        # 额度：回执 / 补发的图 / 语音与正文共用同一份（同一条消息最多回 4 次，超了整条失败）
+        budget = self._remaining_replies(key)
+        if budget <= 0:
+            from agent import run_log
+            run_log.log("QQ 回复额度已用尽（同一条消息最多回 "
+                        f"{MAX_REPLIES_PER_MESSAGE} 次），本条正文跳过", "warn")
+            return
+        pieces = (_chunks_markdown(payload, max_pieces=budget) if USE_MARKDOWN
+                  else _chunks_capped(_md_to_text(payload), budget))
+        for piece in pieces:
             seq = self._next_seq(key, msg_id)
             try:
-                if group_openid:
+                if USE_MARKDOWN:
+                    md = {"content": piece}
+                    if group_openid:
+                        await api.post_group_message(group_openid=group_openid, msg_type=2,
+                                                     msg_id=msg_id, msg_seq=seq, markdown=md)
+                    else:
+                        await api.post_c2c_message(openid=user_openid, msg_type=2, msg_id=msg_id,
+                                                   msg_seq=seq, markdown=md)
+                elif group_openid:
                     await api.post_group_message(group_openid=group_openid, msg_type=0,
                                                  msg_id=msg_id, msg_seq=seq, content=piece)
                 else:
@@ -888,6 +1392,7 @@ class QQBotBridge:
     def handle_text(self, openid: str, text: str, group_openid: str = "") -> str:
         """核心：门控 → 审批答复 → 对话 / 任务。返回要发回去的文本（空=不回）。"""
         from agent import run_log
+        from models.prompts import QQ_CHANNEL_HINT
         if not openid:
             return ""
         key = self.scope_key(openid, group_openid)
@@ -895,8 +1400,15 @@ class QQBotBridge:
             run_log.log(f"QQ 消息被拒（不在白名单）: 用户尾号 {openid[-6:]}"
                         + (f"，群尾号 {group_openid[-6:]}" if group_openid else ""), "warn")
             return self.reject_hint(openid, group_openid)
+        self._touch(key)          # 记活动时间，顺带按 TTL 回收空闲会话
         if self.resolve_approval(key, text):
             return "收到，已按你的答复处理。"
+        # /stop 必须在这一层处理（和审批同级）——**不能走到下面的会话锁**：
+        # 正在跑的任务占着 session.lock，任何走常规路径的消息都会阻塞排队，
+        # 那样 /stop 永远轮不到执行、也就永远停不掉正在跑的任务。
+        stop_reply = self._handle_stop(key, text)
+        if stop_reply is not None:
+            return stop_reply
         if not self.rate_ok(key, consume=True):
             return f"消息太频繁了（上限 {self.config.per_minute} 条/分钟），稍后再试。"
         goal = self.trim(text)
@@ -910,27 +1422,47 @@ class QQBotBridge:
         session = self._session_for(key)
         lowered = goal.lower()
 
+        # ---- 按需语音：/v 前缀（或 /say）—— 必须排在所有斜杠分支**之前**，
+        # 否则 "/v 帮我查下天气" 会被 /chat//do/startswith("/") 依次吃掉、内容丢失。----
+        want_voice = False
+        for prefix in ("/v ", "/v　", "/say ", "/say　"):
+            if goal.lower().startswith(prefix):
+                goal, want_voice = goal[len(prefix):].strip(), True
+                break
+        if goal.lower() in ("/v", "/say"):
+            # 「/v」单独发 = 把上一条回复重播成语音
+            return self._replay_voice(key)
+        lowered = goal.lower()
+
         # ---- 对话 / 任务的显式切换 ----
         if lowered.startswith("/chat"):
             rest = goal[len("/chat"):].strip()
             if rest:
-                return self._chat_once(session, key, rest)
+                out = self._chat_once(session, key, rest)
+                return f"{_VOICE_FLAG}{out}" if want_voice and out else out
             session.mode = "chat"
             return "已切到对话模式：直接说话就是聊天，要干活用 /do <任务>。"
         if lowered.startswith("/do") or lowered.startswith("/task"):
             cut = 3 if lowered.startswith("/do") else 5
             rest = goal[cut:].strip()
             if rest:
-                return self._execute_task(session, key, rest)
+                out = self._execute_task(session, key, rest)
+                return f"{_VOICE_FLAG}{out}" if want_voice and out else out
             session.mode = "task"
             return "已切到任务模式：发什么都当成任务执行（寒暄仍会当聊天回你）。"
+
         if goal.startswith("/"):
             return self._slash(key, goal)
+        if not goal:
+            return "发一句话告诉我要做什么。"
 
         # ---- 默认路由：寒暄一律走对话；否则按会话模式 ----
         if looks_like_chitchat(goal) or session.mode == "chat":
-            return self._chat_once(session, key, goal)
-        return self._execute_task(session, key, goal)
+            out = self._chat_once(session, key, goal)
+        else:
+            out = self._execute_task(session, key, f"{goal}\n\n{QQ_CHANNEL_HINT}")
+        # 用哨兵标记把"要语音"的意图传给调用方（它负责真正发 send_voice）
+        return f"{_VOICE_FLAG}{out}" if want_voice and out else out
 
     def _session_for(self, key: str) -> "UserSession":
         return self.sessions.setdefault(
@@ -984,7 +1516,10 @@ class QQBotBridge:
                     f"引擎 {self.config.chat_engine}")
         if self.config.chat_engine == "llm":
             try:
-                return session.chat(text) or "（没有回复）"
+                out = session.chat(text) or "（没有回复）"
+                # 记进 last_output：`/v` 重播要念"上一条回复"，闲聊也得能念
+                session.last_output = out
+                return out
             except Exception as e:                    # noqa: BLE001
                 run_log.log(f"QQ 对话失败：{type(e).__name__}: {str(e)[:160]}", "warn")
                 return f"对话出错了：{type(e).__name__}。稍后再试，或用 /do <任务> 直接执行。"
@@ -1038,12 +1573,30 @@ class QQBotBridge:
             self.schedule_frame(key, only_live=True)   # B：任务收尾把画面发到 QQ（没开浏览器就跳过）
         return output or "（没有输出）"
 
+    def _replay_voice(self, key: str) -> str:
+        """`/v` 单独发 = 把上一条回复重播成语音（不用重新跑一遍 agent）。
+
+        语音是异步发送的，而 handle_text 是同步的，所以这里把要念的文本
+        放进 _pending_voice，由调用方（handle_c2c / handle_group_message）
+        发完文字后再消费。
+        """
+        from agent import run_log
+        session = self.sessions.get(self.norm_key(key))
+        last = str(getattr(session, "last_output", "") or "").strip()
+        if not last:
+            return "还没有可念的内容，先跟我说点什么。"
+        self._pending_voice[self.norm_key(key)] = last
+        run_log.log(f"QQ 语音重播已排队：{len(last)} 字")
+        return f"{last}\n\n🔊 正在合成语音…"
+
     def _slash(self, key: str, goal: str) -> str:
         cmd = goal.split()[0].lower()
         session = self.sessions.get(key)
         if cmd in ("/help", "/?", "/h"):
             return ("可用：直接说话=聊天（寒暄），/do <任务> 执行一次任务，/chat 切对话模式，"
-                    "/task 切任务模式，/status 看状态，/new 开新会话，/shot 发一张当前画面。"
+                    "/task 切任务模式，/status 看状态，/new 开新会话，/shot 发一张当前画面，"
+                    "/v <内容> 让这条回语音，/say 把上次回复念一遍，"
+                    "/stop 停本会话在跑的任务（/stop all 停全部）。"
                     "需要批准时会问你，回 y/a/n。")
         if cmd == "/status":
             if not session:
@@ -1105,8 +1658,31 @@ def _build_client(bridge: QQBotBridge):
             from agent import run_log
             run_log.log("收到频道(guild)消息：本桥不支持频道，已忽略", "warn")
 
+    # public_messages 覆盖群/C2C 公域消息事件（botpy Intents 文档如此标注）
     intents = botpy.Intents(public_messages=True)
-    return _Client(intents=intents, is_sandbox=bool(bridge.config.sandbox))
+    client = _Client(intents=intents, is_sandbox=bool(bridge.config.sandbox))
+    # botpy 缺 GROUP_MESSAGE_CREATE 的 parser 注册 —— 见下面补丁的注释。
+    #（这个事件本桥不处理：只响应 @机器人；但必须让它"安全落地"，否则会中断整个分发。）
+    try:
+        import botpy.gateway as _gw
+        _WS = _gw.BotWebSocket
+        # 幂等：重复调用 _build_client 时别把已打补丁的 __init__ 再包一层（会无限套娃）
+        if not getattr(_WS, "_myagent_group_msg_patch", False):
+            _orig_init = _WS.__init__
+
+            def _patched_ws_init(self, *a, **kw):
+                _orig_init(self, *a, **kw)
+                parsers = getattr(self, "_parser", None)
+                if isinstance(parsers, dict) and "group_message_create" not in parsers:
+                    parsers["group_message_create"] = lambda payload: None
+
+            _WS.__init__ = _patched_ws_init
+            _WS._myagent_group_msg_patch = True
+    except Exception as e:                              # noqa: BLE001
+        from agent import run_log
+        run_log.log(f"QQ 全量消息事件兜底注册失败（不影响 @ 消息）："
+                    f"{type(e).__name__}: {str(e)[:120]}", "warn")
+    return client
 
 
 def _write_pid_file() -> str:
