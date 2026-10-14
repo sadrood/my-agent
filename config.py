@@ -196,6 +196,13 @@ QQBOT_CONFIG = {
     "permission": os.getenv("QQBOT_PERMISSION", "ask"),
     "max_chars": int(os.getenv("QQBOT_MAX_CHARS", "2000")),
     "rate_per_minute": int(os.getenv("QQBOT_RATE_PER_MINUTE", "6")),
+    # 同时执行的 agent 循环上限（小机器上用）：超出的请求排队等待，等不到就回"任务较多"。
+    "max_concurrent_tasks": int(os.getenv("QQBOT_MAX_CONCURRENT_TASKS", "2")),
+    # 等待空闲执行位的最长秒数（等不到就回"任务较多"）
+    "task_queue_timeout": int(os.getenv("QQBOT_TASK_QUEUE_TIMEOUT", "30")),
+    # 空闲会话回收（秒）：超过这么久没消息就丢弃该用户的常驻 agent（对话已落盘）。
+    # 0 = 不回收。此前会话只增不减，常驻服务内存会一直涨。
+    "session_ttl": int(os.getenv("QQBOT_SESSION_TTL", "7200")),
     # 单条任务上限（秒）：到点给 agent 置停止信号优雅收尾，<=0 不限时
     "task_timeout": int(os.getenv("QQBOT_TASK_TIMEOUT", "1800")),
     # 连沙箱还是正式环境。新机器人默认只存在于沙箱，连错环境会"连上了却收不到消息"
@@ -769,6 +776,9 @@ ROLLOUT_CONFIG = {
     # 落盘文本上限。追踪文件是事后诊断的唯一依据，截得太狠等于没有记录：agent 的最终报告被截到 300 字、断在半句，复盘时只能去翻会话文件。0 = 不截断（不建议：单次 run 的 JSONL 会长得很快）。
     "text_limit": int(os.getenv("ROLLOUT_TEXT_LIMIT", "4000")),      # 模型输出/最终回答
     "result_limit": int(os.getenv("ROLLOUT_RESULT_LIMIT", "2000")),  # 工具返回
+    # 内存里保留的事件条数上限：完整记录已落 JSONL，内存只留尾部够用即可
+    # （此前无上限，长会话/常驻服务里只增不减）。
+    "max_memory_events": int(os.getenv("ROLLOUT_MAX_MEMORY_EVENTS", "2000")),
 }
 
 # ============================================================

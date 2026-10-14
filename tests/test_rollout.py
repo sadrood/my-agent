@@ -180,3 +180,16 @@ class TestClipLimits:
     def test_zero_limit_means_no_truncation(self):
         big = "q" * 20000
         assert clip_text(big, limit=0) == big
+
+
+def test_events_trimmed_in_memory(tmp_path):
+    """内存只留尾部 N 条：完整记录已落 JSONL，长会话/常驻服务不能只增不减。"""
+    r = Rollout(run_id="t-trim", config={"enabled": True, "dir": str(tmp_path),
+                                         "max_memory_events": 5})
+    for i in range(20):
+        r.emit("tick", {"i": i})
+    r.close()
+    assert len(r.events) == 5
+    assert r.events[0].data["i"] == 15 and r.events[-1].data["i"] == 19
+    with open(r.log_path, encoding="utf-8") as f:      # 落盘仍是完整的 20 条
+        assert len(f.readlines()) == 20

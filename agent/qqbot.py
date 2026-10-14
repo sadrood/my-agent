@@ -108,6 +108,16 @@ def _chunks_capped(text: str, limit: int = MAX_REPLIES_PER_MESSAGE) -> List[str]
     return kept
 
 
+def _int_or(env: dict, key: str, alias: str, default: int) -> int:
+    """取整数配置：**0 是合法值**，不能像 `or` 那样被默认值吃掉；空串/缺失才回默认。"""
+    raw = env.get(key)
+    if raw is None or str(raw).strip() == "":
+        raw = env.get(alias)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return int(raw)
+
+
 class QQBotConfig:
     """桥配置：默认读 config.QQBOT_CONFIG（来自 .env），也可注入 dict（测试用）。"""
 
@@ -131,6 +141,14 @@ class QQBotConfig:
         self.preset = preset if preset in ALLOWED_PRESETS else "ask"
         self.max_chars = int(env.get("QQBOT_MAX_CHARS") or env.get("max_chars") or 2000)
         self.per_minute = int(env.get("QQBOT_RATE_PER_MINUTE") or env.get("rate_per_minute") or 6)
+        # 并发闸门：同时最多跑几个 agent 循环（2 核机器上别让它无限并发）
+        self.max_concurrent_tasks = max(1, int(env.get("QQBOT_MAX_CONCURRENT_TASKS")
+                                              or env.get("max_concurrent_tasks") or 2))
+        # 下面两个 0 是**有意义**的值（0 = 不等待 / 不回收），不能用 `or` 兜底——0 是假值会被默认值吃掉
+        self.task_queue_timeout = max(0, int(_int_or(env, "QQBOT_TASK_QUEUE_TIMEOUT",
+                                                     "task_queue_timeout", 30)))
+        self.session_ttl = max(0, int(_int_or(env, "QQBOT_SESSION_TTL",
+                                              "session_ttl", 7200)))
         self.task_timeout = int(env.get("QQBOT_TASK_TIMEOUT")
                                 or env.get("task_timeout") or TASK_TIMEOUT)
         # 新机器人默认只存在于沙箱：连错环境会"连上了却收不到任何消息"，所以默认沙箱
@@ -331,6 +349,11 @@ class QQBotBridge:
         self._loop = None
         self.approve_timeout = APPROVE_TIMEOUT       # 审批等待上限（测试可调小）
         self._run_task = runner                     # 可注入（测试/替换执行体）
+        #: 并发闸门：同时执行的任务数上限（信号量按配置建好）
+        self._slots = threading.BoundedSemaphore(max(1, int(self.config.max_concurrent_tasks)))
+        self._running: set = set()                  # 正在执行任务的会话键（不参与空闲回收）
+        self._last_active: Dict[str, float] = {}    # 会话 → 最近活动时间
+        self._last_prune = 0.0                      # 上次回收的时间（限频）
 
     # ---------------- 门控 ----------------
 
@@ -917,6 +940,38 @@ class QQBotBridge:
                              chat_turns=self.config.chat_turns,
                              chat_max_tokens=self.config.chat_max_tokens))
 
+    def _touch(self, key: str) -> None:
+        """记一次活动时间；顺带按 TTL 回收空闲会话（限频扫描，不必每条消息都全扫）。"""
+        self._last_active[self.norm_key(key)] = time.time()
+        self._prune_sessions()
+
+    def _prune_sessions(self, force: bool = False) -> int:
+        """回收空闲会话：该用户的常驻 agent 与各种按会话存的状态一并丢弃。
+
+        正在跑任务或挂着待审批的会话不动——那会中断用户正等着的结果。
+        对话本身已落盘，用户回来时新建 agent 仍能续上。
+        此前会话只增不减，常驻服务的内存会一直爬。
+        """
+        ttl = int(self.config.session_ttl or 0)
+        if ttl <= 0:
+            return 0
+        now = time.time()
+        if not force and now - self._last_prune < 60:
+            return 0
+        self._last_prune = now
+        dropped = 0
+        for key in list(self.sessions):
+            if key in self._running or key in self._pending:
+                continue
+            if now - self._last_active.get(key, now) < ttl:
+                continue
+            self.sessions.pop(key, None)
+            for store in (self._ctx, self._seq, self._recent,
+                          self._pending_voice, self._always, self._last_active):
+                store.pop(key, None)
+            dropped += 1
+        return dropped
+
     def _chat_once(self, session: "UserSession", key: str, text: str) -> str:
         """闲聊：默认走**同一个 agent 会话**（上下文与任务共享、落盘、需要时仍可用工具）。
 
@@ -946,6 +1001,20 @@ class QQBotBridge:
 
         kind="chat" 时是闲聊：也推帧（agent 可能在聊天中开浏览器）。
         """
+        # 并发闸门：小机器上同时跑多个 agent 循环会互相抢核、内存峰值叠加。
+        # 等不到空位就明确回绝，别让无限排队把线程也占满。
+        if not self._slots.acquire(timeout=max(0, int(self.config.task_queue_timeout))):
+            return (f"现在同时在跑的任务已达上限（{self.config.max_concurrent_tasks} 个），"
+                    "请稍后再发，或等前面那条跑完。")
+        self._running.add(key)
+        try:
+            return self._execute_task_locked(session, key, goal, kind)
+        finally:
+            self._running.discard(key)
+            self._slots.release()
+
+    def _execute_task_locked(self, session: "UserSession", key: str, goal: str,
+                             kind: str = "task") -> str:
         from agent import run_log
         run_log.log(f"QQ {'任务' if kind == 'task' else '聊天'}：会话 {session.session_name()}，"
                     f"{len(goal)} 字，档位 {session.preset}")

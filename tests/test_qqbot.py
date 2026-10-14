@@ -493,3 +493,63 @@ class TestTaskTimeout:
 
     def test_session_defaults_to_module_timeout(self):
         assert UserSession("u").task_timeout == TASK_TIMEOUT
+
+
+class TestSessionEviction:
+    """空闲会话回收：常驻服务里会话不能只增不减（每个用户都挂着一个 agent）。"""
+
+    def test_idle_session_is_reclaimed(self):
+        b = QQBotBridge(_cfg(session_ttl=100), runner=lambda g: "ok")
+        b.handle_text("me", "你好")
+        assert b.sessions, "先得建出会话"
+        for k in list(b._last_active):
+            b._last_active[k] -= 1000          # 把活动时间推回过去
+        assert b._prune_sessions(force=True) >= 1
+        assert not b.sessions, "空闲会话应被回收"
+
+    def test_running_session_is_kept(self):
+        b = QQBotBridge(_cfg(session_ttl=100), runner=lambda g: "ok")
+        b.handle_text("me", "你好")
+        key = QQBotBridge.scope_key("me")
+        b._running.add(key)                    # 假装正在跑任务
+        b._last_active[key] -= 1000
+        assert b._prune_sessions(force=True) == 0
+        assert key in b.sessions, "正在跑的会话不能被回收"
+
+    def test_pending_approval_session_is_kept(self):
+        b = QQBotBridge(_cfg(session_ttl=100), runner=lambda g: "ok")
+        b.handle_text("me", "你好")
+        key = QQBotBridge.scope_key("me")
+        b._pending[key] = {"tool": "terminal"}
+        b._last_active[key] -= 1000
+        assert b._prune_sessions(force=True) == 0
+        assert key in b.sessions, "挂着待审批的会话不能被回收"
+
+    def test_ttl_zero_disables_reclaim(self):
+        b = QQBotBridge(_cfg(session_ttl=0), runner=lambda g: "ok")
+        b.handle_text("me", "你好")
+        for k in list(b._last_active):
+            b._last_active[k] -= 100000
+        assert b._prune_sessions(force=True) == 0
+        assert b.sessions
+
+
+class TestConcurrencyGate:
+    """并发闸门：小机器上别让无限并发把核与内存拉满。"""
+
+    def test_refuses_when_slots_full(self):
+        b = QQBotBridge(_cfg(max_concurrent_tasks=1, task_queue_timeout=0),
+                        runner=lambda g: "ok")
+        s = b._session_for("c:me")
+        b._slots.acquire()                      # 占满唯一名额
+        try:
+            out = b._execute_task(s, "c:me", "干活")
+        finally:
+            b._slots.release()
+        assert "上限" in out
+
+    def test_slot_released_after_run(self):
+        b = QQBotBridge(_cfg(max_concurrent_tasks=1), runner=lambda g: "ok")
+        s = b._session_for("c:me")
+        assert b._execute_task(s, "c:me", "干活") == "ok"
+        assert b._execute_task(s, "c:me", "再干") == "ok", "名额必须释放，否则第二次排不上"

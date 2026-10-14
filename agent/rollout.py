@@ -81,6 +81,8 @@ class Rollout:
         self.run_id = run_id or f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 100000}"
         self.events: List[RolloutEvent] = []
         self.summarizer = summarizer
+        # 内存里最多留这么多条事件；完整记录已写 JSONL，内存只留尾部（此前无上限）
+        self._max_memory_events = max(0, int(self.config.get("max_memory_events", 2000)))
         self._log_file = None
         self._log_path = ""
 
@@ -97,6 +99,8 @@ class Rollout:
             return
         event = RolloutEvent(ts=time.time(), event_type=event_type, data=data or {})
         self.events.append(event)
+        if self._max_memory_events and len(self.events) > self._max_memory_events:
+            del self.events[:len(self.events) - self._max_memory_events]
         if self._log_file:
             try:
                 self._log_file.write(event.to_line() + "\n")
