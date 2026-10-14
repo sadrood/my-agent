@@ -730,6 +730,8 @@ SUPERVISOR_CONFIG = {
     "min_turns": int(os.getenv("SUPERVISOR_MIN_TURNS", "1")),
     # 目标短于这么多字视为闲聊问答，不审（真任务一律复核）
     "min_goal_chars": int(os.getenv("SUPERVISOR_MIN_GOAL_CHARS", "12")),
+    # 判"未完成"前先做一轮独立复核（只依据证据核对缺口是否真存在），减少误报导致的白跑
+    "verify_continue": os.getenv("SUPERVISOR_VERIFY_CONTINUE", "true").lower() == "true",
 }
 
 # ============================================================
@@ -911,6 +913,31 @@ TOOL_CONFIG = {
     "computer_a11y_max_depth": int(os.getenv("COMPUTER_A11Y_MAX_DEPTH", "8")),
     "computer_screenshot_dir": (resolve_under_root(os.getenv("COMPUTER_SCREENSHOT_DIR", ""))
                                 if os.getenv("COMPUTER_SCREENSHOT_DIR", "").strip() else ""),   # 空=generated_images/computer
+}
+
+# ============================================================
+# 工具 schema 门控（省 token：低频大工具的 schema 默认不随每轮请求发送）
+# ============================================================
+# 判据：schema 大（≥1KB）且多数会话用不到 → 由 `tools` 工具按需装载。
+# tools: 默认不常驻的工具名；keywords: 目标文本命中即自动装载；idle_turns: 连续空闲多少轮自动卸下。
+TOOL_GATING_CONFIG = {
+    "tools": frozenset({
+        "zhihu", "zhihu_draft", "toonflow", "video_edit", "video_gen", "tts",
+        "article", "installer", "computer", "hello_local",
+    }),
+    "keywords": {
+        "zhihu": ("知乎", "zhihu"),
+        "zhihu_draft": ("知乎草稿", "存草稿"),
+        "toonflow": ("短剧", "toonflow"),
+        "video_edit": ("视频剪辑", "剪视频", "ffmpeg"),
+        "video_gen": ("生成视频", "文生视频", "短视频"),
+        "tts": ("配音", "语音合成", "tts"),
+        "article": ("文章工坊", "写文章", "公众号"),
+        "computer": ("桌面操控", "操作电脑", "鼠标键盘"),
+        "installer": ("安装插件", "技能包", "mcp 插件"),
+        "hello_local": ("hello_local",),
+    },
+    "idle_turns": int(os.getenv("TOOL_GATING_IDLE_TURNS", "5")),
 }
 
 # ============================================================

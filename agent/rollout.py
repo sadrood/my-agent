@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from config import ROLLOUT_CONFIG, resolve_under_root
+from agent.context_compaction import leading_system_messages, repair_tool_boundary
+from agent.retention import list_by_mtime
 
 COMPACT_SYSTEM_PROMPT = """你是一个对话压缩器。请把下面的执行过程压缩成一份精炼的摘要。
 
@@ -184,12 +186,7 @@ class Rollout:
             return list(messages)
 
         # 开头的 system 消息（执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）必须**原样保留**，不能被压进摘要。
-        head_msgs = []
-        for _m in messages:
-            if _m.get('role') == 'system':
-                head_msgs.append(_m)
-            else:
-                break
+        head_msgs = leading_system_messages(messages)
         if len(messages) - len(head_msgs) <= keep + 4:
             return list(messages)          # 去掉系统提示后没多少可压的
 
@@ -223,19 +220,8 @@ class Rollout:
             {"role": "system",
              "content": "## 之前的执行摘要" + chr(10) + summary.strip()[:3000]},
         ]
-        # 截断点必须在完整工具闭环之后：从尾部向前扫描，确保保留部分里不存在"孤立的 tool 消息"（其 tool_calls 被截断线切走）。
-        keep_msgs = list(messages[-keep:])
-        while keep_msgs and keep_msgs[0].get("role") == "tool":
-            # 保留区以 tool 消息开头 → 向前补它的 assistant(tool_calls)
-            start = len(messages) - len(keep_msgs) - 1
-            if start < 0:
-                break
-            prev = messages[start]
-            if prev.get("role") == "assistant" and prev.get("tool_calls"):
-                keep_msgs.insert(0, prev)
-                break
-            # 前面不是配对消息：直接裁掉这条孤立 tool 消息
-            keep_msgs.pop(0)
+        # 保留区取尾 keep 条并修掉孤立的 tool 消息（其 tool_calls 被截断线切走会让下一轮 400）
+        keep_msgs = repair_tool_boundary(messages, keep)
         compacted.extend(keep_msgs)
         self.emit("compaction", {
             "before_events": len(old_part),
@@ -248,12 +234,9 @@ class Rollout:
         """清理旧追踪文件，仅保留最近 N 个。"""
         try:
             d = resolve_under_root(self.config.get("dir", "./rollouts"))
-            files = sorted(
-                (os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")),
-                key=os.path.getmtime,
-            )
             max_files = int(self.config.get("max_files", 20))
-            for f in files[:-max_files]:
+            entries = list_by_mtime(d, suffix=".jsonl")   # 最旧在前
+            for _, f in entries[:-max_files]:
                 try:
                     os.remove(f)
                 except Exception:

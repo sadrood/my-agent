@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from config import PROJECT_ROOT, SESSION_CONFIG
 from agent.atomic_io import atomic_write_json
+from agent.retention import list_by_mtime
 
 
 def _resolve_session_dir(config: dict) -> str:
@@ -270,12 +271,9 @@ class SessionStore:
     def _cleanup(self):
         """保留最近 max_sessions 个会话文件。"""
         try:
-            files = sorted(
-                (os.path.join(self.dir, f) for f in os.listdir(self.dir) if f.endswith(".json")),
-                key=os.path.getmtime,
-            )
+            entries = list_by_mtime(self.dir, suffix=".json")   # 最旧在前
             max_files = int(self.config.get("max_sessions", 50))
-            doomed = files[:-max_files] if max_files > 0 else []
+            doomed = [p for _, p in entries[:-max_files]] if max_files > 0 else []
             if doomed:
                 print(f"[Session] 会话数超过上限（{max_files}），将清理最旧的 "
                       f"{len(doomed)} 个会话文件。它们是对话的唯一副本，"

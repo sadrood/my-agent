@@ -42,10 +42,13 @@ def _v(verdict, reason="", nxt=""):
 
 class TestSupervisorParsing:
     def test_continue_with_instruction(self):
-        s = Supervisor(llm=FakeJudge(_v("continue", "只写了第 1 章", "继续写第 2、3 章")))
+        # 判"未完成"后会再做一轮独立复核：脚本要给出复核结论（这里复核也确认缺口成立）
+        s = Supervisor(llm=FakeJudge(_v("continue", "只写了第 1 章", "继续写第 2、3 章"),
+                                     _v("continue", "交付里确实只有第 1 章")))
         v = s.review("写三章小说", "第 1 章写完了")
         assert v.verdict == "continue" and v.next_instruction == "继续写第 2、3 章"
         assert v.used is True and s.continue_count == 1
+        assert s.verify_count == 1, "复核轮应真的发生过"
 
     def test_done(self):
         s = Supervisor(llm=FakeJudge(_v("done", "三章齐全")))
@@ -53,7 +56,8 @@ class TestSupervisorParsing:
 
     def test_fenced_json_tolerated(self):
         s = Supervisor(llm=FakeJudge("好的：\n```json\n" + _v("continue", "缺第3章", "写第3章")
-                                     + "\n```"))
+                                     + "\n```",
+                                     _v("continue", "确认缺第 3 章")))
         assert s.review("写三章", "两章").verdict == "continue"
 
     @pytest.mark.parametrize("raw", ["胡说八道", "", "[1,2,3]", '{"verdict": "maybe"}'])
@@ -166,6 +170,7 @@ class TestExecutorIntegration:
     def test_early_finish_is_pushed_back(self):
         judge = FakeJudge(_v("continue", "只写了第 1 章，目标要三章",
                              "继续写第 2、3 章，写完再一起交付"),
+                          _v("continue", "复核确认：交付里只有第 1 章"),   # 独立复核轮
                           _v("done", "三章齐全"))
         sup = Supervisor(llm=judge)
         llm = FakeLLM([_tool_call(1), _tool_call(2),
@@ -275,6 +280,7 @@ class TestVisibility:
         from agent.metrics import RunMetrics
 
         sup = Supervisor(llm=FakeJudge(_v("continue", "只写了第 1 章", "继续写第 2 章"),
+                                       _v("continue", "复核确认缺口成立"),
                                        _v("done", "ok")))
         llm = FakeLLM([_tool_call(1), _tool_call(2),
                        LLMToolResponse(content="第 1 章。"),
@@ -318,3 +324,40 @@ class TestFirstTurnReview:
         ex.execute_goal_loop(goal="写一部三章的小说，每章至少 300 字，全部写完再统一交付",
                              system_prompt="你是写作助手")
         assert judge.calls, "第 2 轮（1 基）起应复核"
+
+
+class TestIndependentVerification:
+    """判"未完成"前先独立复核一次：复核不成立就放行（不为不存在的问题白跑一轮）。"""
+
+    def test_verifier_downgrades_false_continue(self):
+        s = Supervisor(llm=FakeJudge(_v("continue", "说还缺第 3 章", "继续写第 3 章"),
+                                     _v("done", "交付里其实三章齐全")))
+        v = s.review("写三章", "三章都写完了")
+        assert v.verdict == "done", "复核不成立应放行"
+        assert s.continue_count == 0 and s.verify_count == 1
+
+    def test_verifier_unparseable_keeps_continue(self):
+        s = Supervisor(llm=FakeJudge(_v("continue", "缺第 3 章", "写第 3 章"),
+                                     "复核模型胡说八道，没有 JSON"))
+        assert s.review("写三章", "两章").verdict == "continue", "复核输出无法解析时维持原判"
+
+    def test_verify_can_be_disabled(self):
+        s = Supervisor(llm=FakeJudge(_v("continue", "缺第 3 章", "写第 3 章")),
+                       config={"enabled": True, "verify_continue": False,
+                               "max_rounds": 3, "timeout": 30, "model": "", "min_turns": 1})
+        assert s.review("写三章", "两章").verdict == "continue"
+        assert s.verify_count == 0, "关掉后不该多花一次复核调用"
+
+    def test_verifier_error_keeps_continue(self):
+        class BoomSecond:
+            def __init__(self):
+                self.n = 0
+
+            def chat(self, messages, **kw):
+                self.n += 1
+                if self.n == 1:
+                    return _v("continue", "缺第 3 章", "写第 3 章")
+                raise RuntimeError("复核端点挂了")
+
+        s = Supervisor(llm=BoomSecond())
+        assert s.review("写三章", "两章").verdict == "continue", "复核故障不放大缺口损失"

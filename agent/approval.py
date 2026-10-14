@@ -59,6 +59,18 @@ def security_critical_name_hits(text: str) -> list:
             hits.append(name)
     return hits
 
+
+def escalate_critical(risk_level: str, names, reason_prefix: str = "目标是安全关键文件"):
+    """命中安全关键目标时的统一升级规则：风险升为 high、要求人工确认，并说明命中哪个名字。
+
+    返回 (risk_level, approval, reason)；names 为空则不升级（approval 保持 auto、reason 为空）。
+    检测"是否命中"各工具不同（路径 / 命令文本 / 代码文本），所以只统一升级这一步。
+    """
+    hit = [n for n in (names or ()) if n]
+    if not hit:
+        return risk_level, "auto", ""
+    return "high", "on-request", f"{reason_prefix}：{', '.join(hit)}"
+
 # ============================================================
 # 命令安全分类（终端工具）
 # ============================================================
