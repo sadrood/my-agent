@@ -448,3 +448,50 @@ class TestRepeatedCallFolding:
         agent._loop_tool_event("run_end", {"status": "completed"})
 
         assert capsys.readouterr().out == ""
+
+
+class TestInterruptedRunMarker:
+    """Ctrl+C 中断的那一轮要往会话里留一条记录——否则会话只剩一串没有结论的工具结果。"""
+
+    def _interrupt(self, tmp_path, monkeypatch, session_name):
+        monkeypatch.setenv("SESSION_DIR", str(tmp_path / "sessions"))
+        agent = make_agent(tmp_path, [], session_name=session_name)
+
+        def boom(*a, **kw):
+            # 模拟：已跑过几轮工具、消息已落盘，然后在工具循环里被 Ctrl+C
+            agent._last_messages = [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "干活"},
+                {"role": "tool", "content": "执行失败: 炸了"},
+                {"role": "tool", "content": "ok"},
+            ]
+            agent._persisted_count = 0
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(agent.executor, "execute_goal_loop", boom)
+        with pytest.raises(KeyboardInterrupt):
+            agent.run("干活")
+        return agent
+
+    def test_marker_written_to_session(self, tmp_path, monkeypatch):
+        self._interrupt(tmp_path, monkeypatch, "conv-int-1")
+        files = list((tmp_path / "sessions").glob("*.json"))
+        assert files, "会话文件应被写出"
+        data = json.loads(files[0].read_text(encoding="utf-8"))
+        joined = " ".join(str(m.get("content", "")) for m in data["messages"])
+        assert "【本轮被中断】" in joined, "中断记录必须落进会话"
+        assert "失败 1 条" in joined, "应统计出失败的工具条数"
+
+    def test_no_marker_without_session_name(self, tmp_path, monkeypatch):
+        self._interrupt(tmp_path, monkeypatch, "")
+        assert list((tmp_path / "sessions").glob("*.json")) == []
+
+    def test_marker_recorded_only_once(self, tmp_path, monkeypatch):
+        agent = self._interrupt(tmp_path, monkeypatch, "conv-int-2")
+        agent._mark_interrupted()          # 再来一次不该重复追加
+        msgs = agent._last_messages
+        assert sum(1 for m in msgs if isinstance(m, dict) and m.get("_interrupted")) == 1
+
+    def test_note_reports_no_tools_when_none(self):
+        assert "尚未产生工具结果" in Agent._interrupted_note(
+            [{"role": "user", "content": "干活"}])

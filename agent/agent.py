@@ -1301,14 +1301,24 @@ class Agent:
             if interval > 0 and now - float(getattr(self, "_persist_last_at", 0.0)) < interval:
                 return
             self._persist_last_at = now
+            # 模型标识用 getattr 取：LLM 对象换个形态（如没有 .client）不该让整份落盘失败
+            model = str(getattr(self.llm, "default_model", "") or "")
+            base_url = str(getattr(getattr(self.llm, "client", None), "base_url", "") or "")
             self.session_store.append_messages(
-                name, entries[done:],
-                model=self.llm.default_model,
-                base_url=str(self.llm.client.base_url),
+                name, entries[done:], model=model, base_url=base_url,
             )
             self._persisted_count = len(entries)
-        except Exception:                            # noqa: BLE001
-            pass                                     # 落盘失败不能影响主流程
+        except Exception as e:                       # noqa: BLE001
+            # 落盘失败不影响主流程，但**不能静默**：以前这里吞掉一切，结果 LLM 对象
+            # 一换形态会话就再没落过盘，查起来毫无线索。只告警一次，避免刷屏。
+            if not getattr(self, "_persist_warned", False):
+                self._persist_warned = True
+                try:
+                    from agent import run_log
+                    run_log.log("会话增量落盘失败（后续不再重复告警）："
+                                f"{type(e).__name__}: {str(e)[:160]}", "warn")
+                except Exception:                    # noqa: BLE001
+                    pass
 
     def flush_on_exit(self, reason: str = "") -> None:
         """进程即将消失（关窗/注销/关机）时的兜底：把当前消息刷进会话文件。"""
@@ -1324,6 +1334,39 @@ class Agent:
                 self._incremental_save(messages)
             except Exception:                        # noqa: BLE001
                 pass
+
+    def _mark_interrupted(self) -> None:
+        """把「这一轮执行到一半被中断、没有结论」写进会话并立刻落盘（只记一次）。
+
+        正常收尾由 _finalize_run → _save_session_if_requested 保存；Ctrl+C 会直接
+        raise 跳过整段尾巴，所以这里单独补一条，否则会话只留下一串工具结果。
+        """
+        messages = getattr(self, "_last_messages", None)
+        if not messages or not self.config.session_name:
+            return
+        last = messages[-1] if isinstance(messages[-1], dict) else None
+        if last is not None and last.get("_interrupted"):
+            return                                   # 同一份 messages 只记一次
+        messages.append({"role": "assistant",
+                         "content": self._interrupted_note(messages),
+                         "_interrupted": True})
+        try:
+            self._persist_last_at = 0.0              # 跳过节流，立刻写
+            self._incremental_save(messages)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _interrupted_note(messages: list) -> str:
+        """中断标记的正文：说清"没做完 + 已经做过什么"，供下次接上时对齐断点。"""
+        tools = [m for m in (messages or [])[-20:]
+                 if isinstance(m, dict) and m.get("role") == "tool"]
+        failed = sum(1 for m in tools
+                     if str(m.get("content") or "").startswith("执行失败"))
+        did = (f"本轮已产生 {len(tools)} 条工具结果（其中失败 {failed} 条）"
+               if tools else "本轮尚未产生工具结果")
+        return (f"【本轮被中断】任务执行到一半被中断，没有产出最终结论。{did}；"
+                "上面各条【工具结果】就是已经做过的事。续跑请接着断点继续，不要从头重做。")
 
     def _save_session_if_requested(self, final_summary: str):
         """会话持久化：结束时保存**全部**对话记录（不截断）+ 绑定当前模型。"""
@@ -1681,6 +1724,8 @@ class Agent:
         # 增量落盘：每完成一次工具调用就把新消息写进会话文件，终端被强杀最多丢最后一条
         self._persisted_count = 0
         self._persist_last_at = 0.0
+        # 本轮的消息列表引用（中断兜底要用）；置空避免误用上一轮的残留
+        self._last_messages = None
         try:
             self.executor.persist_callback = self._incremental_save
         except Exception:                        # noqa: BLE001
@@ -1701,8 +1746,10 @@ class Agent:
                 stop_event=stop_event,
             )
         except KeyboardInterrupt:
-            # Ctrl+C：停转圈、给出提示后向上传播（交互模式会回到提示符）
+            # Ctrl+C：这一轮没有结论。必须往会话里留一条「被中断」记录——否则会话里只剩
+            # 一串没有结论的工具结果，下次接上会话看不出这轮断在哪、也看不出它没做完。
             self._stop_turn_spinner()
+            self._mark_interrupted()
             print_warning("已中断（Ctrl+C）。", use_rich=self.config.verbose)
             raise
         except Exception as e:
