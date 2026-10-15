@@ -37,6 +37,8 @@ PASSIVE_REPLY_WINDOW_C2C = 3540.0
 PASSIVE_REPLY_WINDOW_GROUP = 240.0
 #: 同一条消息最多回复几条（官方写 5 次；2026-01 更新说明调整为 4 次，取更严的）
 MAX_REPLIES_PER_MESSAGE = 4
+#: chat_history 硬上限（条）：全量群消息进上下文后涨得快，超了丢最老的
+HISTORY_HARD_CAP = 200
 #: 允许的权限档（不给 full：聊天通道不允许提权）
 ALLOWED_PRESETS = ("ask", "block")
 
@@ -64,8 +66,13 @@ def looks_like_chitchat(text: str) -> bool:
     return any(hint in body for hint in CHITCHAT_QUESTION_HINTS)
 
 
+def _strip_at_markup(text: str) -> str:
+    """去掉 QQ 消息正文里的 @ 标记（<@!xxx> / <@xxx>），只留人说的话。"""
+    return re.sub(r"<@!?\S+>\s*", "", str(text or ""))
+
+
 #: 补发图片时识别的扩展名
-_IMAGE_EXTS = ("png", "jpg", "jpeg", "gif", "webp", "bmp")
+_IMAGE_EXTS = ("png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mp3", "wav", "m4a", "aac", "ogg")
 
 #: 补发**音频**时识别的扩展名。agent 用tts / voice_clone 工具生成的语音文件
 #: 落在这个目录，之前 _IMAGE_EXTS 不含这些扩展名 → mp3 压根没进补发流程，
@@ -616,6 +623,8 @@ class QQBotBridge:
         self._running: set = set()                  # 正在执行任务的会话键（不参与空闲回收）
         self._last_active: Dict[str, float] = {}    # 会话 → 最近活动时间
         self._last_prune = 0.0                      # 上次回收的时间（限频）
+        self._recent_at_ids: set = set()            # 近期已处理的 @ 消息 id（全量消息去重用）
+        self._robot_id = None                       # 机器人自身 id（on_ready 记下，识别全量消息里的 @机器人）
 
     # ---------------- 门控 ----------------
 
@@ -1335,12 +1344,16 @@ class QQBotBridge:
     async def handle_group_message(self, message) -> None:
         """QQ 群 @机器人：群白名单 + 发言人白名单都通过才执行（每个人独立上下文）。"""
         from agent import run_log
+        msg_id = str(getattr(message, "id", "") or "")
+        if msg_id and msg_id in self._recent_at_ids:
+            return          # @ 与全量双通道可能重复投递同一条消息
         group_openid = str(getattr(message, "group_openid", "") or "")
         author = getattr(message, "author", None)
         member = str(getattr(author, "member_openid", "") or "")
         text = str(getattr(message, "content", "") or "").strip()
         key = self.scope_key(member, group_openid)
         self.remember_context(key, message, asyncio.get_running_loop())
+        self._note_at_id(msg_id)
         if not self.allowed(member, group_openid):
             run_log.log(f"QQ 群消息被拒：群 {group_openid[-6:]} 成员 {member[-6:]}", "warn")
             await self._send(key, self.reject_hint(member, group_openid))
@@ -1366,6 +1379,55 @@ class QQBotBridge:
                 await self.send_voice(key, voice_text)
             elif self.config.voice_reply and self._remaining_replies(key) > 0:
                 await self.send_voice(key, reply)
+
+    def observe_group_payload(self, payload) -> None:
+        """全量群消息（GROUP_MESSAGE_CREATE）里的**非 @**消息：只写进群会话上下文。
+
+        群管理员开启「消息接收」后，QQ 把群里所有消息都从这条通道推过来，
+        @机器人 的消息在解析器层就被分流去 handle_group_message 正常处理了，
+        到这里的都是普通聊天：记上下文、不回复不执行。
+        安全策略与 @ 消息一致：非白名单群直接忽略（连上下文都不进）。
+        """
+        try:
+            data = (payload or {}).get("d") or {}
+            group_openid = str(data.get("group_openid") or "")
+            msg_id = str(data.get("id") or "")
+            member = str((data.get("author") or {}).get("member_openid") or "")
+            text = str(data.get("content") or "").strip()
+        except Exception:                            # noqa: BLE001
+            return
+        if not group_openid or not text:
+            return
+        if not self.allowed("", group_openid):
+            return
+        if msg_id and msg_id in self._recent_at_ids:
+            return
+        text = _strip_at_markup(text)
+        if not text:
+            return
+        key = self.scope_key(member, group_openid)
+        session = self._session_for(key)
+        tail = member[-6:] if member else "??????"
+        session.chat_history.append(
+            {"role": "user", "content": f"[旁听·群友{tail}] {text}"})
+        self._cap_history(session)
+        self._touch(key)   # 群里持续聊天 = 会话活跃，上下文别被 TTL 回收
+        from agent import run_log
+        run_log.log(f"旁听群消息（群尾号 {group_openid[-6:]}）：{text[:40]}", "info")
+
+    def _note_at_id(self, msg_id: str) -> None:
+        """记下已正常处理的 @ 消息 id，供全量消息去重（超量整体清空，id 不会复现）。"""
+        if not msg_id:
+            return
+        if len(self._recent_at_ids) >= 500:
+            self._recent_at_ids.clear()
+        self._recent_at_ids.add(msg_id)
+
+    def _cap_history(self, session) -> None:
+        """chat_history 硬上限：全量群消息会让它涨得比私聊快，超了丢最老的。"""
+        history = getattr(session, "chat_history", None)
+        if isinstance(history, list) and len(history) > HISTORY_HARD_CAP:
+            del history[:len(history) - HISTORY_HARD_CAP]
 
     async def _send(self, key: str, payload: str) -> None:
         """按 scope key 发消息（群/私聊自动分流）；单条失败只记日志，不炸掉事件处理。"""
@@ -1475,6 +1537,16 @@ class QQBotBridge:
             return "发一句话告诉我要做什么。"
 
         # ---- 默认路由：寒暄一律走对话；否则按会话模式 ----
+        # 群聊场景更保守：只有明确的任务指令（帮我/请/查/做/写/搜/打开等）才走任务，
+        # 疑问句和闲聊一律走轻量聊天——避免『为什么你不回复』这类疑问被当成任务
+        # 去调查、触发工具循环卡在审批上。
+        if group_openid and session.mode != "task":
+            task_verbs = ("帮我", "请", "查", "搜索", "搜", "做", "写", "生成", "打开",
+                          "下载", "翻译", "分析", "总结", "画", "配", "算", "找")
+            is_task = any(goal.startswith(v) for v in task_verbs)
+            if not is_task:
+                out = self._chat_once(session, key, goal)
+                return f"{_VOICE_FLAG}{out}" if want_voice and out else out
         if looks_like_chitchat(goal) or session.mode == "chat":
             out = self._chat_once(session, key, goal)
         else:
@@ -1641,6 +1713,7 @@ def _build_client(bridge: QQBotBridge):
         async def on_ready(self):
             from agent import run_log
             where = "沙箱" if bridge.config.sandbox else "正式"
+            bridge._robot_id = getattr(self.robot, "id", None)
             run_log.log(f"QQ 机器人已连接（{where}环境）：{self.robot.name}（{bridge.config}）")
             if bridge.config.sandbox:
                 run_log.log("当前连的是沙箱：只有开放平台「沙箱配置」里列出的账号/群能收到回复；"
@@ -1680,7 +1753,7 @@ def _build_client(bridge: QQBotBridge):
     intents = botpy.Intents(public_messages=True)
     client = _Client(intents=intents, is_sandbox=bool(bridge.config.sandbox))
     # botpy 缺 GROUP_MESSAGE_CREATE 的 parser 注册 —— 见下面补丁的注释。
-    #（这个事件本桥不处理：只响应 @机器人；但必须让它"安全落地"，否则会中断整个分发。）
+    #（全量群消息事件：@机器人 → 正常处理；其余只读进群会话上下文、不回复。）
     try:
         import botpy.gateway as _gw
         _WS = _gw.BotWebSocket
@@ -1692,9 +1765,58 @@ def _build_client(bridge: QQBotBridge):
                 _orig_init(self, *a, **kw)
                 parsers = getattr(self, "_parser", None)
                 if isinstance(parsers, dict) and "group_message_create" not in parsers:
-                    parsers["group_message_create"] = lambda payload: None
+                    def _observe_group_msg(payload, _bridge=bridge, _ws=self):
+                        # 全量群消息：@机器人 → 正常处理；其余 → 只读进上下文。
+                        # 开启「消息接收」后 @ 消息**只走这条通道**（GROUP_AT_MESSAGE_CREATE
+                        # 不再下发），这里不分流机器人就会「失聪」。
+                        # 解析器在事件循环里同步执行：异步处理用 create_task，异常不能炸分发。
+                        try:
+                            data = (payload or {}).get("d") or {}
+                            from agent import run_log
+                            run_log.log("全量消息原始内容："
+                                        + str(data)[:300], "info")
+                            mentions = [m for m in (data.get("mentions") or [])
+                                        if isinstance(m, dict)]
+                            rid = str(_bridge._robot_id or "")
+                            at_bot = any(bool(m.get("bot")) for m in mentions) or (
+                                bool(rid) and any(str(m.get("id") or "") == rid
+                                                  for m in mentions))
+                            content = str(data.get("content") or "")
+                            if not at_bot and rid and f"<@!{rid}>" in content:
+                                at_bot = True
+                            if at_bot:
+                                from agent import run_log
+                                run_log.log("全量通道收到 @机器人 消息，转正常处理", "info")
+                                from botpy.message import GroupMessage
+                                state = getattr(getattr(_ws, "_connection", None), "state", None)
+                                msg = GroupMessage(getattr(state, "api", None),
+                                                   (payload or {}).get("id"), data)
+                                msg.content = _strip_at_markup(content)
+                                asyncio.get_running_loop().create_task(
+                                    _bridge.handle_group_message(msg))
+                            else:
+                                _bridge.observe_group_payload(payload)
+                        except Exception:            # noqa: BLE001
+                            pass
+                    parsers["group_message_create"] = _observe_group_msg
 
             _WS.__init__ = _patched_ws_init
+            # 诊断：记录每个到达的事件名（排查群消息收不到时用，确认后可移除）
+            _orig_on_msg = _WS.on_message
+
+            async def _patched_on_message(self, ws, message, _orig=_orig_on_msg):
+                try:
+                    import json as _json
+                    if isinstance(message, str):
+                        _t = (_json.loads(message) or {}).get("t")
+                        if _t:
+                            from agent import run_log
+                            run_log.log(f"WS事件到达：{_t}", "info")
+                except Exception:                    # noqa: BLE001
+                    pass
+                return await _orig(self, ws, message)
+
+            _WS.on_message = _patched_on_message
             _WS._myagent_group_msg_patch = True
     except Exception as e:                              # noqa: BLE001
         from agent import run_log
