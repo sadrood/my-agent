@@ -847,3 +847,18 @@ class TestBotpyPatchIdempotent:
         before = gw.BotWebSocket.__init__
         _build_client(b)
         assert gw.BotWebSocket.__init__ is before, "重复调用又包了一层"
+
+
+
+class TestChatEngineConfig:
+    """QQBOT_CHAT_ENGINE 必须真的接在 config 上 —— 以前 QQBotConfig 读它、QQBOT_CONFIG
+    里却没有这个键，导致 .env 设了也不生效（闲聊始终走 agent 循环）。"""
+
+    def test_chat_engine_key_exists(self):
+        from config import QQBOT_CONFIG
+        assert "chat_engine" in QQBOT_CONFIG, "QQBOT_CHAT_ENGINE 会读不到"
+
+    def test_chat_engine_value_parsed(self):
+        assert QQBotConfig({"chat_engine": "llm"}).chat_engine == "llm"
+        assert QQBotConfig({"chat_engine": "agent"}).chat_engine == "agent"
+        assert QQBotConfig({"chat_engine": "乱写"}).chat_engine == "agent"   # 非法值回默认

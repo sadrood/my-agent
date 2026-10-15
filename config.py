@@ -233,6 +233,10 @@ QQBOT_CONFIG = {
     "default_mode": os.getenv("QQBOT_DEFAULT_MODE", "task"),
     "chat_turns": int(os.getenv("QQBOT_CHAT_TURNS", "10")),
     "chat_max_tokens": int(os.getenv("QQBOT_CHAT_MAX_TOKENS", "1000")),
+    # 闲聊引擎：agent（默认，与任务同一会话、可用工具）/ llm（纯聊天，不落盘不带工具）。
+    # 注意：这一项以前只写在 QQBotConfig 里读，QQBOT_CONFIG 里没这个键 —— 导致
+    # .env 设 QQBOT_CHAT_ENGINE=llm 一直不生效（闲聊始终走 agent 循环）。
+    "chat_engine": os.getenv("QQBOT_CHAT_ENGINE", "agent"),
     # 桥的工作目录（留空 = 当前目录）
     "workspace": os.getenv("QQBOT_WORKSPACE", ""),
 }

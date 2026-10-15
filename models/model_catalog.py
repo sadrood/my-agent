@@ -27,6 +27,10 @@ LOCAL_OVERRIDES_BY_HOST = {
                            "vision": True, "reasoning": True},
         "deepseek-v4.1-flash": {"context": 1_048_576, "output": 65_536,
                                 "vision": True, "reasoning": True},
+        # 旗舰档：网关 /models 不给窗口，models.dev 也查不到 → 不写就落 240K 兜底，
+        # 历史会在 240K 就提前压缩（它们实际 1M，能撑到 ~750K）。
+        "glm-5.2": {"context": 1_048_576},
+        "kimi-k3": {"context": 1_048_576},
     },
     "172.16.10.242": {
         "deepseek-flash": {"vision": True},
