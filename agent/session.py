@@ -69,6 +69,42 @@ def _atomic_dump(path: str, payload: dict) -> None:
     atomic_write_json(path, payload, compact=True, lock=_dump_lock_for(path))
 
 
+#: 追加在首条 user 消息后面的上下文段从这里开始（技能 / 经验 / 策略 / 系统提示 / 闲聊提示）。
+#: 会话标题只该取"用户自己说的那句话"，别把注入内容当成名字。
+_CTX_MARKERS = ("\n\n## ", "\n\n[系统提示]", "\n\n（")
+
+
+def title_from_user(text: str) -> str:
+    """从首条 user 消息里取用户真正说的第一行（去掉追加的上下文段），最多 60 字。"""
+    body = str(text or "").strip()
+    for marker in _CTX_MARKERS:
+        cut = body.find(marker)
+        if cut > 0:
+            body = body[:cut]
+            break
+    body = body.strip()
+    line = body.splitlines()[0].strip() if body else ""
+    return line[:60]
+
+
+def _title_looks_injected(title: str) -> bool:
+    return any(marker.strip() in str(title or "") for marker in _CTX_MARKERS)
+
+
+def _first_user(messages) -> str:
+    return next((str(m.get("content", "")) for m in (messages or [])
+                 if m.get("role") == "user"), "")
+
+
+def display_title(payload: dict) -> str:
+    """展示用标题：历史遗留的"注入内容标题"就地纠正，且永远压成一行（不改文件）。"""
+    title = str((payload or {}).get("title", "") or "")
+    if _title_looks_injected(title):
+        title = title_from_user(_first_user((payload or {}).get("messages"))) or title
+    line = title.strip().splitlines()[0].strip() if title.strip() else ""
+    return line[:60] if line else title
+
+
 class SessionStore:
     """会话文件存储。"""
 
@@ -113,22 +149,28 @@ class SessionStore:
 
         if not title:
             title = (existing or {}).get("title", "")
-        if not title and messages:
+        # title_auto：自动生成的标题（兜底/小模型）才允许被重新生成；用户改过的不动。
+        title_auto = (existing or {}).get("title_auto")
+        if title_auto is None:
+            title_auto = (not title) or _title_looks_injected(title)
+        # 小模型起标题：以前只在"完全没有标题"时才跑，而增量落盘一开始就写了兜底标题
+        # → title_fn 永远轮不到（实测会话名全是首条消息截断）。
+        if title_fn is not None and title_auto and messages:
             generated = ""
-            if title_fn is not None:
-                try:
-                    generated = str(title_fn(messages) or "").strip()
-                except Exception:               # noqa: BLE001
-                    generated = ""              # 小模型坏了不能挡住保存
+            try:
+                generated = str(title_fn(messages) or "").strip()
+            except Exception:               # noqa: BLE001
+                generated = ""              # 小模型坏了不能挡住保存
             if generated:
-                title = generated
-            else:
-                first_user = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
-                title = (first_user or "").strip()[:60] or "新对话"
+                title, title_auto = generated, False
+        if not title and messages:
+            title = title_from_user(_first_user(messages)) or "新对话"
+            title_auto = True
 
         payload = {
             "id": conv_id,
             "title": title,
+            "title_auto": title_auto,
             "created_at": created_at,
             "updated_at": now,
             "messages": messages,        # 全量记录
@@ -166,6 +208,7 @@ class SessionStore:
             if payload is None:
                 return False
             payload["title"] = str(title or "").strip()[:120]
+            payload["title_auto"] = False        # 用户改过：以后别再自动重生成
             payload["updated_at"] = datetime.now().isoformat()
             _atomic_dump(path, payload)
         return True
@@ -199,7 +242,7 @@ class SessionStore:
             msgs = payload.get("messages", [])
             result.append({
                 "id": payload["id"],
-                "title": payload.get("title", ""),
+                "title": display_title(payload),
                 "count": len(msgs),
                 "created_at": payload.get("created_at", ""),
                 "updated_at": payload.get("updated_at", ""),

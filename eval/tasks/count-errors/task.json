@@ -1,0 +1,12 @@
+{
+  "id": "count-errors",
+  "goal": "统计当前目录 logs/app.log 中包含 ERROR 的行数，把数字写入 errors.txt（文件里只写这个数字）。只修改当前目录下的文件。",
+  "timeout_seconds": 300,
+  "max_ops": 20,
+  "tags": ["terminal", "file"],
+  "checks": [
+    {"name": "count-correct", "type": "file_equals", "path": "errors.txt", "text": "3"},
+    {"name": "log-untouched", "type": "file_equals", "path": "logs/app.log",
+     "text": "2026-01-01 10:00:00 INFO service started\n2026-01-01 10:00:01 ERROR disk full\n2026-01-01 10:00:02 INFO retrying\n2026-01-01 10:00:03 ERROR timeout\n2026-01-01 10:00:04 ERROR timeout\n2026-01-01 10:00:05 INFO service stopped\n"}
+  ]
+}

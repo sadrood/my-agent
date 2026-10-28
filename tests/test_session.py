@@ -334,3 +334,60 @@ class TestRestoreModelRespectsExplicitConfig:
         data = agent.session_store.load_conversation("conv-bound")
         agent._restore_conversation_model(data)
         assert agent.llm.default_model == "sensenova-6.8-flash-lite"
+
+
+class TestSessionTitle:
+    """会话标题只取"用户说的第一行"，不把追加的上下文（技能/经验/闲聊提示）当名字。"""
+
+    def _store(self, tmp_path):
+        from agent.session import SessionStore
+        return SessionStore(config={"dir": str(tmp_path)})
+
+    def test_title_from_user_strips_injected_context(self):
+        from agent.session import title_from_user
+        assert title_from_user("rxit\n\n## 可用技能（Skills）\n技能索引：\n- x") == "rxit"
+        assert title_from_user("你叫什么名字\n\n（这是在聊天窗口里闲聊，直接按对话回我就行）") == "你叫什么名字"
+        assert title_from_user("写一部小说\n\n## 历史经验（可参考）\n...") == "写一部小说"
+
+    def test_fallback_title_is_first_line_only(self, tmp_path):
+        store = self._store(tmp_path)
+        store.save_conversation("conv-x", messages=[
+            {"role": "user", "content": "rxit\n\n## 可用技能（Skills）\n技能索引：\n- academy"}])
+        assert store.load_conversation("conv-x")["title"] == "rxit"
+
+    def test_legacy_injected_title_is_sanitized_when_listing(self, tmp_path):
+        store = self._store(tmp_path)
+        store.save_conversation(
+            "conv-legacy",
+            messages=[{"role": "user", "content": "rxit\n\n## 可用技能（Skills）"}],
+            title="rxit\n\n## 可用技能（Skills）")      # 模拟历史遗留的脏标题
+        got = [c for c in store.list_conversations() if c["id"] == "conv-legacy"][0]
+        assert got["title"] == "rxit"
+
+    def test_title_fn_runs_after_incremental_fallback(self, tmp_path):
+        """增量落盘先写了兜底标题时，小模型标题仍应能补上（以前永远轮不到）。"""
+        store = self._store(tmp_path)
+        msgs = [{"role": "user", "content": "rxit\n\n## 可用技能（Skills）"}]
+        store.save_conversation("conv-a", messages=msgs)
+        assert store.load_conversation("conv-a")["title"] == "rxit"
+        store.save_conversation("conv-a", messages=msgs, title_fn=lambda m: "小模型标题")
+        assert store.load_conversation("conv-a")["title"] == "小模型标题"
+
+    def test_user_renamed_title_is_not_overwritten(self, tmp_path):
+        store = self._store(tmp_path)
+        msgs = [{"role": "user", "content": "原始目标"}]
+        store.save_conversation("conv-r", messages=msgs)
+        assert store.set_title("conv-r", "我改的名字")
+        store.save_conversation("conv-r", messages=msgs, title_fn=lambda m: "小模型标题")
+        assert store.load_conversation("conv-r")["title"] == "我改的名字"
+
+    def test_display_title_is_always_single_line(self, tmp_path):
+        """旧标题可能带换行（旧逻辑直接截断整条消息）→ 列表里必须压成一行。"""
+        store = self._store(tmp_path)
+        store.save_conversation(
+            "conv-multi",
+            messages=[{"role": "user", "content": "写视频\n\n【目标】时长 60 秒"}],
+            title="写视频\n\n【目标】时长 60 秒")
+        got = [c for c in store.list_conversations() if c["id"] == "conv-multi"][0]
+        assert "\n" not in got["title"]
+        assert got["title"] == "写视频"

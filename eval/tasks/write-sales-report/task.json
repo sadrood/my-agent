@@ -1,0 +1,15 @@
+{
+  "id": "write-sales-report",
+  "goal": "读取当前目录下的 data.csv，创建 report.md：写明总销售额（total）和销售额最高的商品。只修改当前目录下的文件。",
+  "timeout_seconds": 300,
+  "max_ops": 20,
+  "tags": ["file", "analysis"],
+  "checks": [
+    {"name": "report-exists", "type": "file_exists", "path": "report.md"},
+    {"name": "total-present", "type": "file_contains", "path": "report.md", "text": "60"},
+    {"name": "top-item", "type": "file_contains", "path": "report.md",
+     "text": "cherry", "ignore_case": true},
+    {"name": "data-untouched", "type": "file_equals", "path": "data.csv",
+     "text": "item,amount\napple,10\nbanana,20\ncherry,30\n"}
+  ]
+}

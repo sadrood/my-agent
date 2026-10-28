@@ -1,0 +1,14 @@
+{
+  "id": "fix-json-config",
+  "goal": "config.json 不是合法 JSON，导致当前目录下的测试失败。修复它并让 pytest 通过；不要修改测试文件。",
+  "timeout_seconds": 300,
+  "max_ops": 20,
+  "tags": ["bugfix", "config"],
+  "checks": [
+    {"name": "pytest", "type": "command", "cmd": ["{python}", "-m", "pytest", "-q"]},
+    {"name": "json-parses", "type": "command",
+     "cmd": ["{python}", "-c", "import json; json.load(open('config.json', encoding='utf-8'))"]},
+    {"name": "tests-untouched", "type": "file_equals", "path": "test_loader.py",
+     "text": "from loader import load_config\n\n\ndef test_config_values():\n    assert load_config() == {\"name\": \"demo\", \"retries\": 3}\n"}
+  ]
+}

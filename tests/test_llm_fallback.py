@@ -296,3 +296,19 @@ def test_stream_path_switches_endpoint_on_quota(monkeypatch):
     assert llm.providers[1]["client"].last_kwargs["model"] == "backup-model"
     kinds = [e["event"] for e in events]
     assert "quota_limited" in kinds and "switch" in kinds and "call_ok" in kinds
+
+
+def test_failover_to_thinking_model_recomputes_temperature(monkeypatch):
+    """备用链切到 kimi-k3（只接受 temperature=1）时必须按新模型重算温度。
+
+    实测：主模型 glm-5.2 被限流 → 切到 kimi-k3，却沿用 0.7 → 400
+    "only 1 is allowed for this model"（日志 run-20261019-112728）。
+    """
+    from config import LLM_CONFIG
+    monkeypatch.setitem(LLM_CONFIG, "default_model", "glm-5.2")
+    llm = _make_llm(monkeypatch, primary="429", backup="ok",
+                    fallback_models=("kimi-k3",))
+    assert llm.chat([{"role": "user", "content": "hi"}]) == "ok"
+    call = llm.providers[1]["client"].completions.calls[-1]
+    assert call["model"] == "kimi-k3"
+    assert call["temperature"] == 1, "kimi-k3 只接受 1，沿用主模型的温度会 400"

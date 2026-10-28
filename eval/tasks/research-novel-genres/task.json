@@ -1,0 +1,10 @@
+{
+  "id": "research-novel-genres",
+  "goal": "阅读当前目录 sources/ 下的三份资料，写一份 report.md：至少 5 个适合 AI 批量产出、容易在番茄等平台起量的小说类型，每个类型给出理由和风险；标注引用的资料文件名；最后给出推荐优先级。只修改当前目录下的文件。",
+  "timeout_seconds": 600,
+  "max_ops": 30,
+  "tags": ["research", "synthesis"],
+  "checks": [
+    {"name": "report-rules", "type": "custom", "script": "check.py"}
+  ]
+}

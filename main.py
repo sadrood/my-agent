@@ -7,11 +7,16 @@ import argparse
 import json
 import threading
 import time
+from typing import TYPE_CHECKING, Optional
 
 from agent import Agent, AgentConfig, Team
 from tools import ToolManager
 from agent.memory import Memory
 from config import LOG_CONFIG
+
+if TYPE_CHECKING:
+    from rich.console import Console
+    from agent.session import SessionStore
 
 
 def parse_model_spec(spec: str) -> tuple:
@@ -36,7 +41,7 @@ def parse_model_spec(spec: str) -> tuple:
     return model_name or None, base_url, api_key
 
 
-def build_config(args) -> AgentConfig:
+def build_config(args: argparse.Namespace) -> AgentConfig:
     """根据命令行参数构建 AgentConfig。
     注意字段传 None 才是"读配置中心"；传恒定 bool 会把 .env 总开关顶掉
     （rollout_enabled / approval_interactive 就是这样让 ROLLOUT_ENABLED=false 失效的）。"""
@@ -164,7 +169,7 @@ def start_desktop_app():
     launch_desktop()
 
 
-def _preflight_error(args) -> str:
+def _preflight_error(args: argparse.Namespace) -> str:
     """入口预检：缺主模型密钥时立刻给一行可执行指引，别等第一次调用才报 Missing credentials。
 
     元命令（--doctor / --upgrade* / --llm-health / --list-tools）不需要模型，必须放行——
@@ -181,7 +186,7 @@ def _preflight_error(args) -> str:
     return ""
 
 
-def _session_title_for(agent, messages) -> str:
+def _session_title_for(agent: Agent, messages: list) -> str:
     """按对话内容起一个短会话名：优先小模型（与自动起名同一实现），失败回退主模型。"""
     small = getattr(agent, "small_model", None)
     if small is not None:
@@ -228,7 +233,32 @@ def _parse_command(goal: str):
     return None, None
 
 
-def _show_worktree_diff(c) -> None:
+def _open_conversation(agent: Agent, store: "SessionStore", c: "Console",
+                       conv_id: str) -> bool:
+    """切到指定对话并显示最近记录；/open 与 /sessions 的编号选择共用。"""
+    from agent.ui_theme import print_info, print_warning
+
+    target = store.load_conversation(conv_id)
+    if target is None:
+        print_warning(f"对话不存在: {conv_id}（用 /sessions 查看全部）", use_rich=True)
+        return False
+    # 切换：当前对话已在每轮自动保存；载入目标对话的全部记录
+    agent.config.session_name = conv_id
+    agent.memory.clear_session()
+    for m in target.get("messages", []):
+        agent.memory.add_message(m.get("role", "user"), m.get("content", ""))
+    agent.last_execution_summary = target.get("last_summary", "")
+    agent._restore_conversation_model(target)   # 恢复该对话绑定的模型
+    print_info(
+        f"已打开对话 {conv_id}（{len(target.get('messages', []))} 条记录）",
+        style="accent",
+    )
+    _print_transcript(c, target.get("messages", []), limit=10, width=160,
+                      header="—— 该对话的最近记录 ——")
+    return True
+
+
+def _show_worktree_diff(c: "Console") -> None:
     """`/diff`：把工作区未提交改动渲染出来（对应同类 CLI 的 /diff 面板）。"""
     import subprocess
 
@@ -273,7 +303,7 @@ def _show_worktree_diff(c) -> None:
         c.print(f"[dim]  …（未跟踪文件共 {len(untracked)} 个）[/dim]")
 
 
-def _load_rollout_events(agent) -> list:
+def _load_rollout_events(agent: Agent) -> list:
     """取本轮回放用的事件：优先内存里的 rollout，回退到磁盘上最新的 jsonl。"""
     import json
     import os
@@ -306,7 +336,7 @@ def _load_rollout_events(agent) -> list:
     return out
 
 
-def _show_transcript(agent, arg: str) -> None:
+def _show_transcript(agent: Agent, arg: str) -> None:
     """`/transcript [条数|all]`：回放本轮每个工具的完整参数与输出（折叠摘要的展开入口）。"""
     import agent.ui_theme as ui
     limit = 40
@@ -339,7 +369,7 @@ def _switch_theme(arg: str) -> None:
     ui.print_info(f"已切换主题: {name}（本会话生效，不写 .env）", style="accent")
 
 
-def _print_transcript(c, messages: list, limit: int = 10, width: int = 160,
+def _print_transcript(c: "Console", messages: list, limit: int = 10, width: int = 160,
                       header: str = "") -> None:
     """把对话记录打印到终端（恢复旧对话时用）。
     恢复上下文却不显示上下文等于让人猜，所以这里必须打印。
@@ -399,7 +429,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                              "base_url": str(agent.llm.client.base_url)})
         agent._closed_by_signal = False
 
-        def _flush_on_exit(reason):
+        def _flush_on_exit(reason: str):
             agent._closed_by_signal = True
             agent.flush_on_exit(reason)
 
@@ -548,23 +578,43 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             _switch_theme(cmd_args)
             continue
         if cmd == "tools":
+            from agent.pager import page
             from agent.ui_theme import print_step_header
             c.print()
             print_step_header(0, 1, "工具列表", use_rich=True)
-            c.print(agent.tool_manager.get_tools_description())
+            # 工具描述/参数里可能带 [ ]（JSON 示例），别让 rich 当标记吞掉
+            page(agent.tool_manager.get_tools_description().splitlines(),
+                 print_fn=lambda s: c.print(s, markup=False))
             continue
         if cmd == "sessions":
+            from agent.pager import page
             convs = store.list_conversations()
             if not convs:
                 print_info("暂无历史对话。", style="info")
             else:
                 print_info(f"历史对话（{len(convs)} 个）:", style="primary")
-                for cv in convs:
+                lines = []
+                for i, cv in enumerate(convs, 1):
                     mark = "●" if cv["id"] == conv_id else " "
-                    c.print(
-                        f"[dim]  {mark} {cv['id']}  {cv['title'][:36]}  "
+                    lines.append(
+                        f"[dim]  {mark} {i:>2}. {cv['id']}  {cv['title'][:36]}  "
                         f"{cv['count']} 条 · {cv['updated_at'][:16].replace('T', ' ')}[/dim]"
                     )
+                if sys.stdin.isatty():
+                    from agent.picker import select
+                    disp = []
+                    for i, cv in enumerate(convs, 1):
+                        mark = "●" if cv["id"] == conv_id else " "
+                        disp.append(
+                            f"{mark} {i:>2}. {cv['id']}  {cv['title'][:36]}  "
+                            f"{cv['count']} 条 · {cv['updated_at'][:16].replace('T', ' ')}"
+                        )
+                    idx = select(disp, title=f"历史对话（{len(convs)} 个）↑/↓ 选择 · 回车打开 · Esc 取消")
+                    if idx is not None:
+                        _open_conversation(agent, store, c, convs[idx]["id"])
+                else:
+                    # 非 TTY（管道/脚本）：只打印，不弹选择，免得吞掉下一条输入
+                    page(lines, print_fn=c.print)
             continue
         if cmd == "rename":
             new_name = (cmd_args or "").strip()
@@ -593,24 +643,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             if not cmd_args:
                 print_warning("用法: /open <对话ID>", use_rich=True)
                 continue
-            target = store.load_conversation(cmd_args.strip())
-            if target is None:
-                print_warning(f"对话不存在: {cmd_args.strip()}（用 /sessions 查看全部）", use_rich=True)
-                continue
-            # 切换：当前对话已在每轮自动保存；载入目标对话的全部记录
-            conv_id = cmd_args.strip()
-            agent.config.session_name = conv_id
-            agent.memory.clear_session()
-            for m in target.get("messages", []):
-                agent.memory.add_message(m.get("role", "user"), m.get("content", ""))
-            agent.last_execution_summary = target.get("last_summary", "")
-            agent._restore_conversation_model(target)   # 恢复该对话绑定的模型
-            print_info(
-                f"已打开对话 {conv_id}（{len(target.get('messages', []))} 条记录）",
-                style="accent",
-            )
-            _print_transcript(c, target.get("messages", []), limit=10, width=160,
-                              header="—— 该对话的最近记录 ——")
+            _open_conversation(agent, store, c, cmd_args.strip())
             continue
         if cmd == "history":
             # 查看当前对话的历史（打开旧对话后、或长任务跑完想回看时用）
@@ -867,8 +900,10 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 print_info(f"目标已保存: {cmd_args.strip()[:80]}", style="success")
             continue
         if cmd == "help":
+            from agent.pager import page
             c.print()
             print_info("可用命令:", style="primary")
+            _help_lines = []
             for line in [
                 "/team <任务>        团队协作模式",
                 "/research <主题>     深度研究",
@@ -885,7 +920,7 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/shortcuts          快捷键与常用命令面板",
                 "/transcript [N|all] 回放本轮工具调用与输出（折叠摘要的展开入口）",
                 "/theme [名字]       终端配色（default / ocean / paper / mono）",
-                "/sessions           历史对话列表",
+                "/sessions           历史对话（↑/↓ 选择，回车打开，Esc 取消）",
                 "/open <对话ID>       打开并恢复历史对话（会显示该对话记录）",
                 "/history [条数]      查看当前对话的历史记录（默认 20 条）",
                 "/new                新开一个对话",
@@ -896,8 +931,9 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                 "/help               本帮助",
                 "exit / q            退出",
             ]:
-                c.print(f"[dim]  {line}[/dim]")
-            c.print("[dim]  多行输入: 直接粘贴整块提交；行尾 [white]\\\\[/white] + 回车 = 手工换行[/dim]")
+                _help_lines.append(f"[dim]  {line}[/dim]")
+            _help_lines.append("[dim]  多行输入: 直接粘贴整块提交；行尾 [white]\\\\[/white] + 回车 = 手工换行[/dim]")
+            page(_help_lines, print_fn=c.print)
             continue
         if goal.startswith("/"):
             # 打错的斜杠命令（如 /resrarch）给出提示与最近命令建议
@@ -1074,7 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_skills_install(args) -> int:
+def run_skills_install(args: argparse.Namespace) -> int:
     """安装/更新技能包（CLI 入口）；全部成功返回 0，部分失败/整体失败返回 1。"""
     from agent.skills import SkillPackManager
     from config import SKILLS_CONFIG
@@ -1103,7 +1139,7 @@ def run_skills_install(args) -> int:
     return 0 if result.ok else 1
 
 
-def _prompt_callbacks(console, prompt_cls=None):
+def _prompt_callbacks(console: "Console", prompt_cls: Optional[type] = None):
     """按平台给出"主提示符/续行提示符"回调。
 
     ↑ POSIX：只**显示**提示符——读取独占 stdin（单一字节读取者），避免 input()/readline
@@ -1154,6 +1190,19 @@ def main():
 
     parser = build_parser()
     args = parser.parse_args()
+
+    # 配置启动校验：明显不可用的值直接停下（--doctor 等元命令放行，便于排障）
+    if not any(getattr(args, f, False) for f in ("doctor", "upgrade", "upgrade_check",
+                                                 "upgrade_stash", "llm_health", "ps",
+                                                 "list_tools")):
+        from config import validate_config
+        problems = validate_config()
+        if problems:
+            print("配置有误，未启动：", file=sys.stderr)
+            for problem in problems:
+                print(f"  - {problem}", file=sys.stderr)
+            print("修正后重试，或运行 main.py --doctor 查看完整环境自检。", file=sys.stderr)
+            return 2
 
     # Windows conhost 防卡：QuickEdit 选区会永久阻塞 stdout（看 MY_AGENT_DISABLE_QUICKEDIT）
     try:
@@ -1284,7 +1333,7 @@ def main():
             "output": str(getattr(result, "output", None) or result or ""),
             "error": str(getattr(result, "error", "") or ""),
         }
-        print(json.dumps(payload, ensure_ascii=False))
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
         return 0 if payload["ok"] else 1
 
     if args.article and args.goal:

@@ -14,7 +14,7 @@ from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
 from agent.rollout import clip_result, clip_text
 # 动态轮数预算（有进展就续期、连续无进展提前停）——见模块 docstring
 from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
-from agent.context_compaction import leading_system_messages, repair_tool_boundary
+from agent.compactor import Compactor
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
     EXECUTOR_BROWSER_SYSTEM_PROMPT,
@@ -55,11 +55,6 @@ def stream_label(tool_name: str, arguments: dict = None) -> str:
         depth = 0
     return f"sub:{runtime}#{depth + 1}" if depth else f"sub:{runtime}"
 
-
-def _one_line(text: str, limit: int = 200) -> str:
-    """把一段文本压成单行（零驻留指针里只留能认出"这是什么"的那点信息）。"""
-    flat = re.sub(r"\s+", " ", str(text or "")).strip()
-    return flat[:limit] + ("…" if len(flat) > limit else "")
 
 # think 伪工具的 schema（不注册进 ToolManager，由 Executor 拦截处理）
 THINK_TOOL_SCHEMA = {
@@ -144,6 +139,15 @@ class Executor:
         self._pending_reset: set = set()
         self._checkpoint_warned = False           # 检查点失败只告警一次
         self._hooks = None                       # HookManager（首次工具调用时延迟获取）
+
+    @property
+    def compactor(self) -> Compactor:
+        """压缩器（懒建：能拿到最终注入的 llm / _emit，测试替换也生效）。"""
+        comp = self.__dict__.get("_compactor")
+        if comp is None:
+            comp = Compactor(getattr(self, "llm", None), emit=getattr(self, "_emit", None))
+            self.__dict__["_compactor"] = comp
+        return comp
 
     @property
     def vision_model(self):
@@ -1298,162 +1302,44 @@ class Executor:
         return "\n".join(lines)
 
     # ================================================================
-    # 上下文压缩（借鉴同类实现的 compaction）
+    # 上下文压缩（实现见 agent/compactor.py；这里保留同名薄委托）
     # ================================================================
 
     @staticmethod
     def _estimate_tokens(messages: list) -> int:
-        """估算消息列表 token 数（与 rollout 共用同一实现，避免两套口径对同一阈值漂移）。"""
-        from agent.rollout import Rollout
-        return Rollout.messages_token_estimate(messages)
+        return Compactor.estimate_tokens(messages)
 
     def _compact_threshold(self) -> int:
-        """压缩触发阈值：模块级 COMPACT_CONFIG.token_threshold 显式 >0 优先
-        （含测试注入）；否则委托 LLM（按网关报告窗口 × 比例）；窗口不可知兜底。"""
-        try:
-            explicit = int(COMPACT_CONFIG.get("token_threshold") or 0)
-            if explicit > 0:
-                return explicit
-            llm = getattr(self, "llm", None)
-            if llm is not None and hasattr(llm, "compact_threshold_tokens"):
-                return llm.compact_threshold_tokens()
-        except Exception:
-            pass
-        return 240_000
+        return self.compactor.compact_threshold(cfg=COMPACT_CONFIG)
 
     def _maybe_compact(self, messages: list) -> list:
-        """上下文压缩：token 超阈值时，把旧历史交给 LLM 总结成摘要替换。
-        失败安全：总结失败/未超阈值则原样返回，不破坏对话。"""
-        threshold = self._compact_threshold()
-        keep = int(COMPACT_CONFIG.get("keep_last", 20))
-        # 开头的 system 消息（含项目指令注入）必须原样保留，不能被压进摘要
-        head_msgs = leading_system_messages(messages)
-        body_start = len(head_msgs)
-        if len(messages) - body_start <= keep + 2 or self._estimate_tokens(messages) < threshold:
-            return messages
-        # 保留区取尾 keep 条并修掉孤立的 tool 消息（切在工具闭环中间会让下一轮请求 400）
-        recent = repair_tool_boundary(messages, keep)
-        old = messages[body_start:len(messages) - len(recent)] if recent else []
-        if not recent:
-            # 全被判成孤立 tool（极端情况）：宁可这轮不压缩，也不能只剩摘要
-            self._emit("compaction", {"ok": False,
-                                      "error": "保留区全为孤立 tool 消息，已跳过压缩"})
-            return messages
-        if not old:
-            # 全 system / 没有可压的正文：同样原样返回
-            self._emit("compaction", {"ok": False,
-                                      "error": "没有可压缩的正文（仅剩系统提示与保留区），已跳过压缩"})
-            return messages
-        if self._compact_mode() == "pointer":
-            folded, saved = self._fold_old_messages(old)
-            if folded:
-                compacted = head_msgs + [
-                    {"role": "system", "content": "## 之前的执行摘要（零驻留指针）\n" + folded}
-                ] + recent
-                self._emit("compaction", {"ok": True, "mode": "pointer", "folded": len(old),
-                                          "kept": len(recent), "saved_chars": saved})
-                return compacted
-        try:
-            summary = self._summarize_old(old)
-        except Exception as e:
-            self._emit("compaction", {"ok": False, "error": str(e)[:200]})
-            return messages
-        compacted = head_msgs + [
-            {"role": "system", "content": "## 之前的执行摘要\n" + summary}
-        ] + recent
-        self._emit("compaction", {"ok": True, "summarized": len(old), "kept": len(recent)})
-        return compacted
-
-    # ------------------------------------------------------------
-    # 零驻留：大负载只留确定性指针，原文落盘可按句柄逐字取回
-    # ------------------------------------------------------------
+        return self.compactor.maybe_compact(
+            messages, COMPACT_CONFIG,
+            estimate=self._estimate_tokens,
+            threshold=self._compact_threshold,
+            mode=self._compact_mode,
+            fold=self._fold_old_messages,
+            summarize=self._summarize_old,
+        )
 
     @staticmethod
     def _compact_mode() -> str:
-        try:
-            from config import CONTEXT_STORE_CONFIG
-            mode = str(CONTEXT_STORE_CONFIG.get("compact_mode") or "pointer").strip().lower()
-        except Exception:                            # noqa: BLE001
-            mode = "pointer"
-        return mode if mode in ("pointer", "summary") else "pointer"
+        return Compactor.compact_mode()
 
     def _ctx_namespace(self) -> str:
-        """本次运行的指针命名空间（句柄前缀，便于按运行列出/清理）。"""
-        ns = getattr(self, "_ctx_ns", "")
-        if not ns:
-            from agent import context_store as store
-            ns = self._ctx_ns = store.new_namespace()
-        return ns
+        return self.compactor.ctx_namespace()
 
     def _next_handle(self) -> str:
-        from agent import context_store as store
-        self._ctx_seq = int(getattr(self, "_ctx_seq", 0)) + 1
-        return store.handle_for(self._ctx_namespace(), self._ctx_seq)
+        return self.compactor.next_handle()
 
     def _fold_result(self, text: str) -> str:
-        """超过阈值的工具结果：落盘 + 只把指针放进消息（原文可按句柄取回）。"""
-        try:
-            from agent import context_store as store
-            folded, done = store.fold(self._next_handle(), text)
-            if done:
-                self._ctx_folded = int(getattr(self, "_ctx_folded", 0)) + 1
-            return folded
-        except Exception:                            # noqa: BLE001
-            return text
+        return self.compactor.fold_result(text)
 
     def _fold_old_messages(self, old_messages: list) -> tuple:
-        """把旧历史折成确定性指针清单（不调模型；原文落盘，句柄可 recall）。"""
-        from agent import context_store as store
-
-        lines, saved = [], 0
-        for m in old_messages:
-            role = str(m.get("role") or "")
-            content = m.get("content")
-            if role == "tool":
-                text = str(content or "")
-                handle = self._next_handle()
-                folded, done = store.fold(handle, text)
-                if done:
-                    saved += max(0, len(text) - len(folded))
-                    lines.append("[工具结果] " + folded.split("\n")[0])
-                elif text.strip():
-                    lines.append("[工具结果] " + _one_line(text, 200))
-            elif role == "assistant":
-                calls = m.get("tool_calls") or []
-                if calls:
-                    names = []
-                    for call in calls[:6]:
-                        fn = (call or {}).get("function") or {}
-                        names.append(f"{(fn.get('name') or '?')}({_one_line(fn.get('arguments') or '', 80)})")
-                    lines.append("[助手→工具] " + "；".join(names))
-                text = str(content or "")
-                if text.strip():
-                    lines.append("[助手] " + _one_line(text, 240))
-            elif role == "user":
-                lines.append("[用户] " + _one_line(str(content or ""), 300))
-            elif role == "system":
-                lines.append("[提示] " + _one_line(str(content or ""), 200))
-        joined = "\n".join(lines)
-        cap = int(COMPACT_CONFIG.get("pointer_max_chars", 8000))
-        return joined[:cap], saved
+        return self.compactor.fold_old_messages(old_messages, cfg=COMPACT_CONFIG)
 
     def _summarize_old(self, old_messages: list) -> str:
-        """把旧历史交给 LLM 压缩成摘要。"""
-        text = "\n".join(
-            f"[{m.get('role', 'user')}] {str(m.get('content', ''))[:500]}"
-            for m in old_messages
-        )
-        prompt = (
-            "你是对话历史压缩器。把下面这段 AI 助手与用户的对话历史压缩成一段简洁摘要，"
-            "务必保留：已确认的事实、已做的决定、未完成的任务、关键约束、用户偏好、"
-            "相关文件路径与已执行的操作结果。输出 200-500 字。\n\n"
-            f"{text}"
-        )
-        resp = self.llm.chat(
-            [{"role": "user", "content": prompt}],
-            max_tokens=800, temperature=0.2,
-        )
-        return (resp or "").strip() or "(历史已压缩)"
+        return self.compactor.summarize_old(old_messages)
 
     def _consents_enabled(self) -> bool:
         try:

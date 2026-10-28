@@ -97,17 +97,42 @@ def _first_choice_message(response):
 
 
 def _is_minute_quota_error(e: Exception) -> bool:
-    """是否为按分钟窗口重置的配额耗尽（TPM/RPM）。
-    这类错误必须跨过分钟边界再试——退避 6s/12s 会全部撞在同一窗口内。
+    """是否为"按窗口重置"的配额耗尽（TPM/RPM 分钟窗口，或中文的限速模式）。
+
+    这类错误必须跨过窗口边界再试——普通指数退避（6s/12s/24s）会全部撞在同一窗口内。
     """
     if isinstance(e, _EmptyChoicesError):
         # 实测这类"200 空响应"就是 TPM/RPM 打满的伪装（sensenova 网关），同样要跨分钟窗口
         return True
     msg = str(e).lower()
-    return any(k in msg for k in (
+    if any(k in msg for k in (
         "tpm", "rpm", "tokens per minute", "requests per minute",
         "per minute", "rate limit exceeded", "quota_exceeded",
-    ))
+        # 明确"按窗口限速"的中文措辞（实测 agnes 端点："今日文本额度已用完，当前处于限速模式：每 3 分钟最多 1 次"）
+        "限速", "额度已用完", "额度用完", "每分钟",
+    )):
+        return True
+    return bool(re.search(r"每\s*\d+\s*(?:秒|分钟|小时)", msg)
+                or re.search(r"(?:every|per)\s*\d+\s*(?:min|minute|minutes)", msg)
+                or re.search(r"\d+\s*(?:minutes?|mins?)\b", msg))
+
+
+def _quota_window_seconds(e: Exception) -> float:
+    """解析供应商提示的窗口长度（秒）；解析不出返回 0。
+
+    实测中文端点会写"每 3 分钟最多 1 次"——按普通分钟边界等 60s 会在窗口内反复撞墙。
+    """
+    msg = str(e).lower()
+    m = re.search(r"每\s*(\d+)\s*(秒|分钟|小时)", msg)
+    if m:
+        return float(m.group(1)) * {"秒": 1.0, "分钟": 60.0, "小时": 3600.0}[m.group(2)]
+    m = re.search(r"(?:every|per)\s*(\d+)\s*(?:min|minute|minutes)", msg)
+    if m:
+        return float(m.group(1)) * 60.0
+    m = re.search(r"(\d+)\s*(?:minutes?|mins?)\b", msg)
+    if m:
+        return float(m.group(1)) * 60.0
+    return 0.0
 
 
 def _is_quota_error(e: Exception) -> bool:
@@ -261,6 +286,8 @@ class LLM:
         self._window_cache: dict = {}
         # 固定温度：某些 thinking 模型只接受特定值（如必须为 1），设置后忽略所有传入 temperature（否则 400 invalid_request_error）
         self.fixed_temperature = LLM_CONFIG.get("fixed_temperature")
+        #: 运行期学到的"某模型只接受某温度"（按请求模型名记，避免污染备用链上的其它模型）
+        self._learned_temperature: dict = {}
         # 该模型已知不支持的请求参数（400 后自动记录，后续请求自动移除/转换）
         self.param_blacklist: set[str] = set()
 
@@ -277,6 +304,11 @@ class LLM:
         self.switched_at = time.time()
         self.fallback_after = max(1, int(LLM_CONFIG.get("fallback_after", 2)))
         self.probe_seconds = float(LLM_CONFIG.get("fallback_probe_seconds", 300))
+        # 长窗口限流阈值：供应商说"每 N 分钟"/Retry-After 很长，就认为该端点短时间没救，
+        # 立刻回试主端点，而不是在原地等满 probe_seconds（实测在链尾免费端点上蹲了几小时）。
+        self.long_throttle_seconds = float(LLM_CONFIG.get("fallback_long_throttle_seconds", 60))
+        # 每个端点最近一次"长窗口限流"的时刻：用于记账 + 判断主端点是否也刚被限
+        self._provider_throttled_at: dict = {}
         self.provider_notifier = None
         self.health_notifier = None      # 健康遥测回调（Agent 注入）
         # 401 突发保护：记住哪些端点本会话成功过；成功一次就重置退避次数
@@ -287,15 +319,22 @@ class LLM:
         # : 限流等待回调（可选）：Agent 注入 cb(seconds, attempt)，用于把"正在等配额": 显示给用户并记进 rollout。见 _notify_rate_limit。
         self.retry_notifier = None
         self.retry_base_delay = float(LLM_CONFIG.get("retry_base_delay", 2.0))
+        # 限流单次等待上限：供应商窗口可能是"每 3 分钟最多 1 次"，65s 那种硬顶会在窗口内空转
+        self.quota_max_wait = float(LLM_CONFIG.get("quota_max_wait", 300.0))
 
         # 运行时统计（由 Agent 注入 RunMetrics，可留空）
         self.metrics = None
 
-    def _model_fixed_temperature(self) -> float:
-        """按模型名适配固定温度（.env 显式设置优先）。
-        部分 thinking 模型只接受 temperature=1。
+    def _model_fixed_temperature(self, model: str = None) -> float:
+        """按**本次请求的模型**适配固定温度（.env 显式设置优先）。
+
+        不能只看 self.default_model：备用链切到别的模型后，请求的不是主模型，
+        而 kimi-k3 这类 thinking 模型只接受 temperature=1（否则 400）。
         """
-        name = (self.default_model or "").lower()
+        name = str(model or self.default_model or "").lower()
+        learned = self._learned_temperature.get(name)
+        if learned is not None:
+            return learned
         if name.startswith("kimi-k3"):
             return 1.0
         return self.fixed_temperature if self.fixed_temperature is not None else None
@@ -327,11 +366,9 @@ class LLM:
     # 自动重试
     # ================================================================
 
-    def _resolve_temperature(self, temperature: float = None) -> float:
-        """解析请求温度：固定温度优先。
-        thinking 模型传入非 1 会 400 "only 1 is allowed for this model"。
-        """
-        fixed = self._model_fixed_temperature()
+    def _resolve_temperature(self, temperature: float = None, model: str = None) -> float:
+        """解析请求温度：固定温度优先（按本次请求的模型判断）。"""
+        fixed = self._model_fixed_temperature(model)
         if fixed is not None:
             return fixed
         return temperature if temperature is not None else self.default_temperature
@@ -466,6 +503,9 @@ class LLM:
                 if _is_quota_error(e):
                     # 429 变体（包装成 invalid_request_error 的配额错误）：提取不出参数名，直接 raise 会导致零重试——按限流处理
                     last_error = e
+                    if self._probe_primary_if_throttled(e, kwargs):
+                        attempt = 0            # 回切主端点：重新给满重试预算（不占 failover 预算）
+                        continue
                     if attempt >= self.max_retries:
                         self._notify_health(dict(self._active_meta(), event="quota_limited",
                                                  wait=0.0, attempt=attempt + 1,
@@ -486,7 +526,8 @@ class LLM:
                 param = self._extract_bad_param(e)
                 # temperature 特例：thinking 模型硬性要求 1（错误文本可能带"temperature" 字样也可能不带，统一按 param 识别）
                 if param == "temperature" and "only 1 is allowed" in str(e).lower() and kwargs.get("temperature") != 1:
-                    self.fixed_temperature = 1.0  # 记住该模型限制，后续请求直接生效
+                    self._learned_temperature[
+                        str(kwargs.get("model") or self.default_model).lower()] = 1.0
                     kwargs["temperature"] = 1
                     attempt += 1
                     continue
@@ -498,6 +539,9 @@ class LLM:
                 raise
             except _openai_errors() as e:
                 last_error = e
+                if _is_quota_error(e) and self._probe_primary_if_throttled(e, kwargs):
+                    attempt = 0                # 长窗口限流：立刻回试主端点（不占 failover 预算）
+                    continue
                 if attempt >= self.max_retries:
                     if _is_quota_error(e):
                         self._notify_health(dict(self._active_meta(), event="quota_limited",
@@ -555,8 +599,48 @@ class LLM:
             return False            # 已经在链尾
         self._activate_provider(target, reason)
         kwargs["model"] = self.providers[target]["model"]
+        # 换了模型就按新模型重算温度：kimi-k3 这类 thinking 模型只接受 1，
+        # 沿用上一个模型的温度会直接 400（实测备用链切过去时踩到）。
+        kwargs["temperature"] = self._resolve_temperature(kwargs.get("temperature"), kwargs["model"])
         self._notify_health(dict(self._active_meta(), event="switch",
                                  primary=target == 0, reason=reason))
+        return True
+
+    def _note_long_throttle(self, err) -> bool:
+        """记录"当前端点进入长窗口限流"，返回是否属于长窗口（≥ 阈值）。
+
+        长窗口 = 供应商明确说了"每 N 分钟"，或 Retry-After 很长。这类端点短时间没救。
+        """
+        window = _quota_window_seconds(err)
+        retry_after = 0.0
+        try:
+            headers = getattr(getattr(err, "response", None), "headers", None) or {}
+            retry_after = float(str(headers.get("retry-after") or headers.get("Retry-After") or 0))
+        except Exception:                       # noqa: BLE001
+            retry_after = 0.0
+        if max(window, retry_after) < self.long_throttle_seconds:
+            return False
+        self._provider_throttled_at[self.provider_index] = time.time()
+        return True
+
+    def _probe_primary_if_throttled(self, err, kwargs: dict) -> bool:
+        """当前端点进入长窗口限流时，**立刻**回试主端点（不等 probe 定时器）。
+
+        只有主端点自己不在最近一次长窗口限流里时才回试，避免两个端点互相弹跳。
+        """
+        if not self._note_long_throttle(err):
+            return False
+        if self.provider_index == 0 or len(self.providers) < 2:
+            return False
+        if time.time() - self._provider_throttled_at.get(0, 0.0) < max(
+                60.0, self.long_throttle_seconds):
+            return False                        # 主端点刚才也被长窗口限了，别弹跳
+        self._activate_provider(0, "当前端点长窗口限流，回试主端点")
+        kwargs["model"] = self.providers[0]["model"]
+        kwargs["temperature"] = self._resolve_temperature(
+            kwargs.get("temperature"), kwargs["model"])
+        self._notify_health(dict(self._active_meta(), event="switch", primary=True,
+                                 reason="长窗口限流回切主端点"))
         return True
 
     def _retry_delay(self, attempt: int, quota: bool = False) -> float:
@@ -565,32 +649,42 @@ class LLM:
         return base * (2 ** attempt)
 
     def _quota_wait(self, err, attempt: int) -> float:
-        """429 等待：优先 retry-after，否则对齐到下一个分钟边界，单次上限 65s。
-        分钟窗口配额下纯指数退避会一直在同一窗口内硬怼。
+        """429 等待：优先用供应商给的窗口/Retry-After，否则对齐到下一个分钟边界。
+
+        关键：窗口可能不止 1 分钟（实测某端点"每 3 分钟最多 1 次"）——等太短会在同一窗口里
+        反复撞墙、白烧重试次数。单次等待上限由 LLM_QUOTA_MAX_WAIT 控制（默认 300s）。
         """
         delay = self._retry_delay(attempt, quota=True)
+        max_wait = max(30.0, float(getattr(self, "quota_max_wait", 300.0)))
+        window = _quota_window_seconds(err)
+        retry_after = 0.0
         try:
             headers = getattr(getattr(err, "response", None), "headers", None) or {}
             ra = headers.get("retry-after") or headers.get("Retry-After")
             if ra:
-                val = float(str(ra))
-                if val > 0:
-                    # 供应商明确告知了等待时长：以它为准（上限 65s）
-                    return max(delay, min(val, 65.0))
+                retry_after = float(str(ra))
         except Exception:
             pass
-        if _is_minute_quota_error(err):
-            # 无 retry-after 的分钟级配额：等到下一个分钟边界（+1s 余量）
+        # 计算等待时长（三条路径都**不提前 return**：后面的提示与面板通知是统一出口）
+        if retry_after > 0:
+            # 供应商明确告知了等待时长：以它为准（上限可调，别被 65s 卡住）
+            delay = max(delay, min(retry_after, max_wait))
+        elif window > 0:
+            # 供应商明说了窗口长度：等到窗口末尾（+5s 余量），别在窗口内硬怼
+            delay = min(max(delay, window + 5.0), max_wait)
+        elif _is_minute_quota_error(err):
+            # 无窗口信息的分钟级配额：等到下一个分钟边界（+1s 余量）
             now = time.time()
             to_next_minute = 60.0 - (now % 60.0) + 1.0
-            delay = max(delay, min(to_next_minute, 65.0))
+            delay = max(delay, min(to_next_minute, max_wait))
         # 长等待（分钟级窗口）给出可见提示：否则 CLI 静默等 1 分钟，看起来像卡死。走 stderr，不干扰富文本 stdout 渲染。
         if delay >= 5:
             try:
                 import sys as _sys
+                extra = f"（供应商窗口 {window:.0f}s）" if window > 0 else ""
                 _sys.stderr.write(
-                    "\n[限流] 上游配额已满，等待 %.0f 秒后重试（第 %d 次）…\n"
-                    % (delay, attempt + 1)
+                    "\n[限流] 上游配额已满%s，等待 %.0f 秒后重试（第 %d 次）…\n"
+                    % (extra, delay, attempt + 1)
                 )
                 _sys.stderr.flush()
             except Exception:
@@ -623,7 +717,7 @@ class LLM:
         kwargs = {
             "model": model or self.default_model,
             "messages": messages,
-            "temperature": self._resolve_temperature(temperature),
+            "temperature": self._resolve_temperature(temperature, model or self.default_model),
             "max_tokens": max_tokens if max_tokens is not None else self.default_max_output_tokens,
         }
         if top_p is not None:
@@ -660,7 +754,7 @@ class LLM:
             "messages": messages,
             "tools": tools,
             "tool_choice": tool_choice,
-            "temperature": self._resolve_temperature(temperature),
+            "temperature": self._resolve_temperature(temperature, model or self.default_model),
             "max_tokens": max_tokens if max_tokens is not None else self.default_max_output_tokens,
         }
         if top_p is not None:
@@ -727,7 +821,7 @@ class LLM:
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "temperature": self._resolve_temperature(temperature),
+            "temperature": self._resolve_temperature(temperature, model or self.default_model),
             "max_tokens": max_tokens if max_tokens is not None else self.default_max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},   # 让供应商在最后一块返回 usage
@@ -803,7 +897,8 @@ class LLM:
                     continue
                 param = self._extract_bad_param(e)
                 if param == "temperature" and "only 1 is allowed" in str(e).lower() and kwargs.get("temperature") != 1:
-                    self.fixed_temperature = 1.0
+                    self._learned_temperature[
+                        str(kwargs.get("model") or self.default_model).lower()] = 1.0
                     kwargs["temperature"] = 1
                     attempt += 1
                     continue

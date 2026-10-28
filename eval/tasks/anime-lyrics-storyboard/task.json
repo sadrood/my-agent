@@ -1,0 +1,10 @@
+{
+  "id": "anime-lyrics-storyboard",
+  "goal": "你是短视频制作 agent。根据当前目录 song/lyrics.txt、song/beat.txt 和 song/style.md，交付两个文件：1) storyboard.md：Markdown 表格，表头包含“时间戳 | 歌词 | 画面意境描述 | 转场方式”，至少 8 行数据；2) lyrics.lrc：标准 LRC 时间轴，每行格式 [mm:ss.xx]歌词，时间戳严格递增，覆盖全部歌词，总时长 30—60 秒。只修改当前目录下的文件。",
+  "timeout_seconds": 600,
+  "max_ops": 30,
+  "tags": ["video", "creative"],
+  "checks": [
+    {"name": "storyboard-and-lrc", "type": "custom", "script": "check.py"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "split-novel-chapters",
+  "goal": "把 novel/《潮汐》全稿.md 按章节拆开，放到当前目录的 chapters/ 目录：一章一个 txt 文件，文件名用“第01章.txt”到“第06章.txt”，每个文件包含该章标题和正文。不要改动文字内容。",
+  "timeout_seconds": 300,
+  "max_ops": 30,
+  "tags": ["novel", "file"],
+  "checks": [
+    {"name": "chapters-split", "type": "custom", "script": "check.py"}
+  ]
+}

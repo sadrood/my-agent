@@ -1,0 +1,12 @@
+{
+  "id": "implement-slugify",
+  "goal": "实现 strings_utils.py 里的 slugify 函数（转小写，非字母数字转连字符，合并连续连字符并去掉首尾连字符），让当前目录下的 pytest 全部通过。只修改当前目录下的文件。",
+  "timeout_seconds": 300,
+  "max_ops": 20,
+  "tags": ["feature", "pytest"],
+  "checks": [
+    {"name": "pytest", "type": "command", "cmd": ["{python}", "-m", "pytest", "-q"]},
+    {"name": "tests-untouched", "type": "file_equals", "path": "test_strings.py",
+     "text": "from strings_utils import slugify\n\n\ndef test_basic():\n    assert slugify(\"Hello World\") == \"hello-world\"\n\n\ndef test_extra_spaces():\n    assert slugify(\"  A  B \") == \"a-b\"\n\n\ndef test_punctuation():\n    assert slugify(\"Hello, World!\") == \"hello-world\"\n"}
+  ]
+}

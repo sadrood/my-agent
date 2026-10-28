@@ -1,0 +1,12 @@
+{
+  "id": "fix-off-by-one",
+  "goal": "修复 calc.py 里的 bug，让当前目录下的 pytest 全部通过。只修改当前目录下的文件，不要改动测试。",
+  "timeout_seconds": 300,
+  "max_ops": 20,
+  "tags": ["bugfix", "pytest"],
+  "checks": [
+    {"name": "pytest", "type": "command", "cmd": ["{python}", "-m", "pytest", "-q"]},
+    {"name": "tests-untouched", "type": "file_equals", "path": "test_calc.py",
+     "text": "from calc import sum_to\n\n\ndef test_sum_to_five():\n    assert sum_to(5) == 15\n\n\ndef test_sum_to_zero():\n    assert sum_to(0) == 0\n"}
+  ]
+}

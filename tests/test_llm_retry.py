@@ -145,8 +145,17 @@ def test_temperature_only_1_self_heal_via_message():
     ])
     out = llm.chat([{"role": "user", "content": "hi"}])
     assert out == "ok"
-    assert llm.fixed_temperature == 1.0
+    # 学到的是"这个模型"的限制（按请求模型记，不污染备用链上的其它模型）
+    assert llm._learned_temperature.get(llm.default_model.lower()) == 1.0
     assert llm.client.chat.completions.calls[1]["temperature"] == 1
+
+
+def test_temperature_uses_requested_model_not_default():
+    """备用链切到 kimi-k3 时按它的规则（只接受 1），别拿主模型的温度去打它。"""
+    llm = LLM(api_key="k", base_url="http://127.0.0.1:1/v1", model="glm-5.2")
+    assert llm._resolve_temperature(0.7, "glm-5.2") == 0.7
+    assert llm._resolve_temperature(0.7, "kimi-k3") == 1.0
+    assert llm._resolve_temperature(0.7, "Kimi-K3") == 1.0    # 大小写不敏感
 
 
 def test_max_tokens_downgraded_to_max_completion_tokens():
@@ -322,7 +331,7 @@ class TestMinuteQuotaAlignment:
             assert llm._quota_wait(err, 0) >= 45
 
     def test_retry_after_header_takes_precedence(self):
-        """供应商明确给了 retry-after 时以它为准（上限 65s），不做分钟对齐。"""
+        """供应商明确给了 retry-after 时以它为准（上限可配，默认 LLM_QUOTA_MAX_WAIT=300s）。"""
         llm = make_llm([])
         err = self._tpm_err()
         err.response.headers = {"retry-after": "30"}
@@ -330,7 +339,12 @@ class TestMinuteQuotaAlignment:
 
         err2 = self._tpm_err()
         err2.response.headers = {"retry-after": "120"}
-        assert llm._quota_wait(err2, 0) == 65.0   # 上限
+        # 旧实现硬顶 65s；窗口可能长于 1 分钟，故改成可配上上限
+        assert llm._quota_wait(err2, 0) == pytest.approx(min(120.0, llm.quota_max_wait))
+
+        err_big = self._tpm_err()
+        err_big.response.headers = {"retry-after": "9999"}
+        assert llm._quota_wait(err_big, 0) == pytest.approx(llm.quota_max_wait)
 
         err3 = self._tpm_err()
         err3.response.headers = {"retry-after": "0.001"}

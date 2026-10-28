@@ -244,16 +244,16 @@ class TestForegroundTimeout:
         from config import TOOL_CONFIG
         monkeypatch.setitem(TOOL_CONFIG, "terminal_fg_timeout", 0.5)
         tool = TerminalTool()
-        cmd = f'"{sys.executable}" -c "import time; time.sleep(3)"'
+        cmd = f'"{sys.executable}" -c "import time; time.sleep(10)"'
         t0 = time.time()
         result = tool._run_command(cmd)
         elapsed = time.time() - t0
         assert result.success is False
         assert "超时" in result.error
         assert "background" in result.error or "后台" in result.error
-        # 超时后还有约 2s 的终止/回收收尾（terminate → wait → kill），实测总耗时≈2.5s；
-        # 原来的 2.5 阈值正好压在这条线上，负载一高就 0.001s 之差判失败。
-        assert elapsed < 2.9, f"应在 3s 睡眠结束前返回（实测 {elapsed:.2f}s）"
+        # 收尾要跑 taskkill /T（机器忙时实测能到 ~2.5s），所以不能用接近睡眠时长的阈值。
+        # 睡眠放大到 10s、阈值取 8s：真没杀掉的话必然等满 10s，回归仍能被抓住。
+        assert elapsed < 8.0, f"应在 10s 睡眠结束前返回（实测 {elapsed:.2f}s）"
 
     def test_fg_timeout_default_from_config(self, monkeypatch):
         from config import TOOL_CONFIG

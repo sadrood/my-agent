@@ -132,6 +132,13 @@ LLM_CONFIG = {
     # --- 自动重试（OpenRouter 等供应商限流/网络抖动时自动重试） ---
     "max_retries": int(os.getenv("LLM_MAX_RETRIES", "2")),
     "retry_base_delay": float(os.getenv("LLM_RETRY_BASE_DELAY", "2.0")),
+    # 限流单次等待上限（秒）：供应商窗口可能长于 1 分钟（实测"每 3 分钟最多 1 次"），
+    # 硬顶 65s 会在同一窗口里反复撞墙、白烧重试次数。
+    "quota_max_wait": float(os.getenv("LLM_QUOTA_MAX_WAIT", "300")),
+    # 备用端点进入"长窗口限流"（供应商说每 N 分钟 / Retry-After 很长）的判定阈值（秒）：
+    # 达到即认为该端点短时间没救，立刻回试主端点，而不是在原地等满 fallback_probe_seconds。
+    "fallback_long_throttle_seconds": float(
+        os.getenv("LLM_FALLBACK_LONG_THROTTLE_SECONDS", "60")),
     # --- 请求超时（秒）：防止上游挂起导致无限等待 ---
     "timeout": float(os.getenv("LLM_TIMEOUT", "300")),
     # --- 备用链：主端点限流/不可用时顶上（同视觉的写法：`模型名` 用共享备用端点，`模型名@预设名` 用预设端点）---
@@ -1099,3 +1106,100 @@ UPGRADE_CONFIG = {
     # 仓库目录（留空 = 当前工作目录）
     "repo_dir": os.getenv("UPGRADE_REPO_DIR", ""),
 }
+
+
+# ============================================================
+# 启动校验：只报"肯定不可用"的值（联网连通性交给 --doctor / --llm-health）
+# ============================================================
+
+def _range_problem(label: str, value, low=None, high=None,
+                   low_exclusive: bool = False, high_exclusive: bool = False) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return f"{label} 应为数字，当前 {value!r}"
+    if low is not None and (value <= low if low_exclusive else value < low):
+        op = ">" if low_exclusive else ">="
+        return f"{label} 必须 {op} {low}，当前 {value}"
+    if high is not None and (value >= high if high_exclusive else value > high):
+        op = "<" if high_exclusive else "<="
+        return f"{label} 必须 {op} {high}，当前 {value}"
+    return ""
+
+
+def _fallback_problems(label: str, entries, presets: dict, preset_prefix: str) -> list:
+    problems = []
+    for entry in entries or []:
+        name, _, preset = str(entry).partition("@")
+        if not name.strip():
+            problems.append(f"{label} 含空模型名：{entry!r}")
+        elif preset and preset.strip().lower() not in (presets or {}):
+            problems.append(
+                f"{label} 条目 {entry!r} 引用了未定义的端点预设 {preset.strip()!r}"
+                f"（需要 {preset_prefix}{preset.strip().upper()}_BASE_URL / _API_KEY）")
+    return problems
+
+
+def validate_config() -> list:
+    """返回配置问题列表（空列表 = 可以启动）。
+
+    只查语义边界（负数超时、空模型名、未定义的端点预设），不发起任何网络请求。
+    """
+    problems = []
+    checks = (
+        ("LLM_CONFIG.default_temperature", LLM_CONFIG.get("default_temperature"), 0, 2, False, False),
+        ("LLM_CONFIG.default_max_output_tokens", LLM_CONFIG.get("default_max_output_tokens"), 1, None, False, False),
+        ("LLM_CONFIG.max_retries", LLM_CONFIG.get("max_retries"), 0, None, False, False),
+        ("LLM_CONFIG.retry_base_delay", LLM_CONFIG.get("retry_base_delay"), 0, None, False, False),
+        ("LLM_CONFIG.timeout", LLM_CONFIG.get("timeout"), 0, None, True, False),
+        ("LLM_CONFIG.auth_retry_max", LLM_CONFIG.get("auth_retry_max"), 0, None, False, False),
+        ("LLM_CONFIG.auth_retry_delay", LLM_CONFIG.get("auth_retry_delay"), 0, None, False, False),
+        ("LLM_CONFIG.fallback_after", LLM_CONFIG.get("fallback_after"), 1, None, False, False),
+        ("LLM_CONFIG.fallback_probe_seconds", LLM_CONFIG.get("fallback_probe_seconds"), 0, None, False, False),
+        ("COMPACT_CONFIG.window_ratio", COMPACT_CONFIG.get("window_ratio"), 0, 1, True, False),
+        ("COMPACT_CONFIG.keep_last", COMPACT_CONFIG.get("keep_last"), 1, None, False, False),
+        ("COMPACT_CONFIG.token_threshold", COMPACT_CONFIG.get("token_threshold"), 0, None, False, False),
+        ("CONTEXT_STORE_CONFIG.threshold_chars", CONTEXT_STORE_CONFIG.get("threshold_chars"), 0, None, False, False),
+        ("RUN_LOG_CONFIG.incremental_interval_seconds",
+         RUN_LOG_CONFIG.get("incremental_interval_seconds"), 0, None, True, False),
+        ("QQBOT_CONFIG.max_concurrent_tasks", QQBOT_CONFIG.get("max_concurrent_tasks"), 1, None, False, False),
+        ("QQBOT_CONFIG.rate_per_minute", QQBOT_CONFIG.get("rate_per_minute"), 1, None, False, False),
+        ("QQBOT_CONFIG.max_chars", QQBOT_CONFIG.get("max_chars"), 1, None, False, False),
+        ("QQBOT_CONFIG.task_timeout", QQBOT_CONFIG.get("task_timeout"), 0, None, False, False),
+        ("QQBOT_CONFIG.session_ttl", QQBOT_CONFIG.get("session_ttl"), 0, None, False, False),
+        ("SESSION_CONFIG.max_sessions", SESSION_CONFIG.get("max_sessions"), 0, None, False, False),
+        ("TOOL_CONFIG.max_step_ops", TOOL_CONFIG.get("max_step_ops"), 1, None, False, False),
+        ("TOOL_CONFIG.max_parallel_tools", TOOL_CONFIG.get("max_parallel_tools"), 1, None, False, False),
+        ("TOOL_CONFIG.tool_timeout", TOOL_CONFIG.get("tool_timeout"), 0, None, True, False),
+        ("TOOL_CONFIG.max_loop_ops", TOOL_CONFIG.get("max_loop_ops"), 1, None, False, False),
+        ("VISION_CONFIG.timeout", VISION_CONFIG.get("timeout"), 0, None, True, False),
+        ("VISION_CONFIG.fallback_timeout", VISION_CONFIG.get("fallback_timeout"), 0, None, True, False),
+        ("BROWSER_CONFIG.viewport_width", BROWSER_CONFIG.get("viewport_width"), 1, None, False, False),
+        ("BROWSER_CONFIG.viewport_height", BROWSER_CONFIG.get("viewport_height"), 1, None, False, False),
+        ("BROWSER_CONFIG.download_timeout", BROWSER_CONFIG.get("download_timeout"), 0, None, True, False),
+        ("UPGRADE_CONFIG.timeout_seconds", UPGRADE_CONFIG.get("timeout_seconds"), 0, None, True, False),
+    )
+    for label, value, low, high, low_ex, high_ex in checks:
+        problem = _range_problem(label, value, low, high, low_ex, high_ex)
+        if problem:
+            problems.append(problem)
+
+    fixed = LLM_CONFIG.get("fixed_temperature")
+    if fixed is not None:
+        problem = _range_problem("LLM_CONFIG.fixed_temperature", fixed, 0, 2)
+        if problem:
+            problems.append(problem)
+
+    base_url = str(LLM_CONFIG.get("base_url") or "").strip()
+    if base_url and not base_url.startswith(("http://", "https://")):
+        problems.append(f"LLM_CONFIG.base_url 必须是 http(s) 地址，当前 {base_url!r}")
+
+    mode = str(CONTEXT_STORE_CONFIG.get("compact_mode") or "").strip().lower()
+    if mode not in ("pointer", "summary"):
+        problems.append(f"CONTEXT_STORE_CONFIG.compact_mode 只能是 pointer / summary，当前 {mode!r}")
+
+    problems.extend(_fallback_problems(
+        "LLM_CONFIG.fallback_models", LLM_CONFIG.get("fallback_models"),
+        LLM_CONFIG.get("fallback_presets"), LLM_FALLBACK_PRESET_PREFIX))
+    problems.extend(_fallback_problems(
+        "VISION_CONFIG.fallback_models", VISION_CONFIG.get("fallback_models"),
+        VISION_CONFIG.get("fallback_presets"), VISION_FALLBACK_PRESET_PREFIX))
+    return problems
