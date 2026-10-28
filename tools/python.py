@@ -1,14 +1,20 @@
 """Python 代码执行工具模块：受限命名空间——**护栏不是沙箱**。
-真正的隔离依赖 OS 级沙箱（SANDBOX_EXECUTION=appcontainer）与审批策略；
-本模块只做语法/导入层面的拦截，别把它当成安全边界。"""
-import sys
-import io
-import threading
+
+执行放在独立子进程里（tools/py_runner.py）：进程可被硬杀，且装了审计钩子，
+内省逃逸拿到 subprocess 也会在钩子上被拦。真正的隔离仍靠 OS 级沙箱
+（SANDBOX_EXECUTION=appcontainer）与审批策略。"""
 import builtins as _builtins
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import traceback
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
+from tools.proc_util import kill_process_tree
 
 # v2 安全收紧：即使有 __builtins__.__import__，也不允许导入这些模块（防止绕过 terminal 工具的审批门执行系统命令 / 网络 / 底层操作）
 BLOCKED_IMPORTS = {
@@ -17,6 +23,8 @@ BLOCKED_IMPORTS = {
     "importlib", "inspect", "sys", "gc", "traceback", "code", "compileall",
     # nt / posix 是 os 的底层实现模块——`os.system` 就是它们的 `system`，而 _winapi 直接给 CreateProcess。
     "nt", "posix", "_winapi",
+    # builtins 直接给出真实的 exec/compile/__import__：拿到它等于整层黑名单失效
+    "builtins",
 }
 
 # 被禁模块的"出路"提示：模型撞上黑名单时最需要知道的是「那我该用什么」。（漫剧任务）：模型想复制 5 张图 → shutil 被拦 → 报错只说"代码执行出错" → 连续 3 轮瞎猜（换绝对路径、换相对路径、查 cwd）。
@@ -43,6 +51,7 @@ _BLOCKED_HINTS = {
     "nt": "执行系统命令请用 terminal 工具（走审批门）",
     "posix": "执行系统命令请用 terminal 工具（走审批门）",
     "_winapi": "底层 Windows API 调用不受支持，请用 terminal 工具",
+    "builtins": "内置函数可直接使用；执行系统命令请用 terminal 工具（走审批门）",
 }
 
 
@@ -70,30 +79,36 @@ def _timeout_seconds() -> float:
         return 30.0
 
 
+def blocked_import_message(name: str) -> str:
+    """黑名单命中的说明（导入拦截与子进程审计钩子共用，口径保持一致）。"""
+    root = name.split(".")[0]
+    hint = _BLOCKED_HINTS.get(name) or _BLOCKED_HINTS.get(root, "")
+    msg = (
+        f"安全限制：python 工具不允许导入模块 '{name}'"
+        "（该模块可绕过 terminal 工具的审批门执行系统级操作）。"
+    )
+    if hint:
+        msg += f"替代方案：{hint}。"
+    return msg
+
+
 def _safe_import(name, *args, **kwargs):
     """受限 __import__：黑名单模块直接拒绝；os 只给受限代理。"""
     root = name.split(".")[0]
     if root in BLOCKED_IMPORTS or name in BLOCKED_IMPORTS:
-        hint = _BLOCKED_HINTS.get(name) or _BLOCKED_HINTS.get(root, "")
-        msg = (
-            f"安全限制：python 工具不允许导入模块 '{name}'"
-            "（该模块可绕过 terminal 工具的审批门执行系统级操作）。"
-        )
-        if hint:
-            msg += f"替代方案：{hint}。"
-        raise BlockedImportError(msg)
+        raise BlockedImportError(blocked_import_message(name))
     if root == "os":
         # 关键：`import os` 也必须给受限代理，否则用户代码里再 import 一次就重新拿到真实的 os，绕过预导入那层的封锁。
         return _restricted_os(__import__(name, *args, **kwargs))
     return __import__(name, *args, **kwargs)
 
 
-def _format_user_traceback(exc: BaseException, max_frames: int = 6) -> str:
-    """只保留用户代码帧的 traceback。"""
+def format_user_traceback(exc: BaseException, max_frames: int = 6) -> str:
+    """只保留用户代码帧的 traceback（内部执行器的帧对使用者是噪声）。"""
     frames = []
     tb = exc.__traceback__
     while tb is not None:
-        if tb.tb_frame.f_code.co_filename != __file__:
+        if tb.tb_frame.f_code.co_filename == "<python-tool>":
             frames.append(tb)
         tb = tb.tb_next
 
@@ -105,25 +120,26 @@ def _format_user_traceback(exc: BaseException, max_frames: int = 6) -> str:
     return "\n".join(lines)
 
 
-class _CappedBuffer(io.StringIO):
-    """有上限的输出缓冲：超过上限就丢弃后续写入。"""
+def _read_capped(path: str) -> str:
+    """读子进程写出的用户输出（上限与执行器保持一致）。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(_CAPTURE_LIMIT)
+    except OSError:
+        return ""
 
-    def __init__(self, limit: int):
-        super().__init__()
-        self._limit = max(1000, int(limit))
-        self.dropped = 0
 
-    def write(self, s):
-        if not isinstance(s, str):
-            s = str(s)
-        room = self._limit - self.tell()
-        if room <= 0:
-            self.dropped += len(s)
-            return len(s)
-        if len(s) > room:
-            self.dropped += len(s) - room
-            s = s[:room]
-        return super().write(s)
+def _parse_status(stdout: str) -> dict:
+    """子进程最后一行是 JSON 状态；解析不出来返回空 dict（调用方当异常处理）。"""
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return {}
 
 
 #: 允许执行外部程序 / 操作进程的 os 入口，一律拒绝
@@ -218,6 +234,7 @@ class PythonTool(BaseTool):
             "复制文件请用 file 的 copy）；"
             "可用 os/pathlib 读写文件、json/math/re/datetime 等常用模块；"
             "执行超时时间为 %d 秒（超时会直接失败）。"
+            "每次调用起一个独立进程（约 0.4 秒开销），一次多写点、别把同一个循环拆成几十次调用。"
             "**不要在本工具里用 sleep 轮询等待外部任务**——长任务（测试/构建/下载）"
             "请改用 terminal 的 background=true 启动，再用 bg output 查看输出。"
             "安全黑名单（导入即报错，别试）：subprocess/socket/shutil/sys/ctypes/"
@@ -268,87 +285,82 @@ class PythonTool(BaseTool):
             min_sandbox_mode=self.min_sandbox_mode,
         )
 
+    #: 子进程执行器（用户代码在其中运行；本工具只负责起停与结果整形）
+    _RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_runner.py")
+
+    def _runner_argv(self, out_path: str):
+        """起执行器的命令行；起不来时返回 None（打包版没有解释器可用）。"""
+        if not getattr(sys, "frozen", False):
+            return [sys.executable, self._RUNNER, out_path]
+        # PyInstaller 打包后 sys.executable 是应用自身：再拉一次会跑成后端进程
+        exe = shutil.which("python") or shutil.which("python3")
+        if exe and os.path.isfile(self._RUNNER):
+            return [exe, self._RUNNER, out_path]
+        return None
+
     def execute(self, input_str: str) -> ToolResult:
         code = input_str.strip()
         if not code:
             return ToolResult(success=False, output="", error="代码为空。")
 
-        # 捕获 stdout：用**有上限**的缓冲。超时的代码不会被杀死（Python 无法强杀线程），一个 `while True: print(...)` 会continue往缓冲里写。
-        old_stdout = sys.stdout
-        sys.stdout = captured = _CappedBuffer(_CAPTURE_LIMIT)
-
-        # 受限的全局命名空间安全收紧：__import__ 换成黑名单过滤版，禁止导入 subprocess 等系统级模块，防止绕过 terminal 审批门；其余内置项以真实 builtins 为基底（见 build_safe_builtins）。
-        safe_globals = {
-            "__builtins__": build_safe_builtins(),
-            # 预导入常用模块
-            "json": __import__("json"),
-            "math": __import__("math"),
-            "datetime": __import__("datetime"),
-            "re": __import__("re"),
-            "random": __import__("random"),
-            "itertools": __import__("itertools"),
-            "collections": __import__("collections"),
-            "os": _restricted_os(__import__("os")),   # 受限代理，非真实 os
-            "pathlib": __import__("pathlib"),
-        }
-
+        timeout = _timeout_seconds()
+        fd, out_path = tempfile.mkstemp(prefix="my_agent_py_", suffix=".log")
+        os.close(fd)
         try:
-            # 超时保护：exec 无法被中断（sleep/死循环会一直挂），因此放到守护线程执行 + join 超时。超时后线程仍在后台（Python 无法强杀线程），但工具立即返回明确错误，不再拖到工具层 300s 硬超时。
-            _timeout = _timeout_seconds()
-            box: dict = {}
-
-            def _run() -> None:
+            argv = self._runner_argv(out_path)
+            if argv is None:
+                return ToolResult(
+                    success=False, output="",
+                    error=("python 工具需要独立的 Python 解释器：当前是打包版且 PATH 上没有 python。"
+                           "请改用 terminal 工具，或用源码方式运行（.venv 里的 python）。"),
+                )
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            try:
+                stdout, stderr = proc.communicate(code, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # 进程可被硬杀：死循环不再挂住宿主，也不会继续往缓冲里写
+                kill_process_tree(proc)
                 try:
-                    exec(code, safe_globals)
-                    box["ok"] = True
-                except BaseException as e:   # noqa: BLE001
-                    box["err"] = e
-
-            t = threading.Thread(target=_run, daemon=True, name="py-tool")
-            t.start()
-            t.join(_timeout)
-
-            if t.is_alive():
-                # 超时：尽力回传已产生的输出，便于判断卡在哪一步
-                partial = captured.getvalue()
+                    proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
                 return ToolResult(
                     success=False,
-                    output=partial.strip()[:1000],
-                    error=(f"python 代码执行超时（>{_timeout:.0f}s）。"
+                    output=_read_capped(out_path)[:1000],
+                    error=(f"python 代码执行超时（>{timeout:.0f}s）。"
                            "不要在本工具里轮询等待外部任务；长任务请用 terminal 的 "
                            "background=true 启动、再用 bg output 查看输出。"),
                 )
 
-            if "err" in box:
-                raise box["err"]
-
-            output = captured.getvalue()
-            dropped = getattr(captured, "dropped", 0)
-            text = output.strip()
+            status = _parse_status(stdout)
+            output = _read_capped(out_path)
+            dropped = int(status.get("dropped") or 0)
             if dropped:
-                text += f"\n[输出过长，已丢弃 {dropped} 字符]"
-            return ToolResult(
-                success=True,
-                output=text if text else "代码执行完成（无输出）。",
-            )
-        except BlockedImportError as e:
-            # 黑名单命中：把「为什么 + 改用哪个工具」同时放进 output 和 error，模型无论读哪个字段都能立刻换路，不必反复试探。
-            partial = captured.getvalue().strip()
-            msg = str(e)
-            return ToolResult(
-                success=False,
-                output=f"{partial}\n{msg}".strip() if partial else msg,
-                error=msg,
-            )
-        except Exception as e:  # noqa: BLE001
-            error_msg = _format_user_traceback(e)
-            output = captured.getvalue()
-            full_output = output + "\n" + error_msg if output else error_msg
-            return ToolResult(
-                success=False,
-                output=full_output.strip(),
-                # error 字段之前恒为「代码执行出错。」——模型据此认为报错无详情。现在带上异常类型与消息，一眼可见根因。
-                error=f"{type(e).__name__}: {e}"[:400],
-            )
+                output += f"\\n[输出过长，已丢弃 {dropped} 字符]"
+
+            kind = status.get("kind")
+            if kind == "blocked":
+                msg = str(status.get("message") or "安全限制：导入被拒绝")
+                merged = f"{output.strip()}\\n{msg}".strip() if output.strip() else msg
+                return ToolResult(success=False, output=merged, error=msg)
+            if kind == "error":
+                tb = str(status.get("traceback") or "")
+                text = (output + "\\n" + tb).strip() if output else tb
+                return ToolResult(success=False, output=text,
+                                  error=str(status.get("error") or "代码执行出错")[:400])
+            if not status.get("ok"):
+                # 子进程没给出可解析状态：多半是解释器/执行器起不来
+                detail = (stderr or "").strip().splitlines()
+                return ToolResult(success=False, output=output.strip(),
+                                  error=(detail[-1] if detail else "python 子进程异常退出")[:400])
+            return ToolResult(success=True,
+                              output=output.strip() or "代码执行完成（无输出）。")
         finally:
-            sys.stdout = old_stdout
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass

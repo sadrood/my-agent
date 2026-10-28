@@ -116,7 +116,14 @@ def run_research(topic: str):
 
     tool_manager = ToolManager()
     llm = LLM()
-    researcher = DeepResearcher(tool_manager=tool_manager, llm=llm)
+    # 研究员内部直接调 ToolManager，没有审批门；注入同一套策略，别让同一动作看路径下菜
+    from agent.approval import ApprovalPolicy, make_tool_guard
+    from config import APPROVAL_CONFIG
+    _policy = ApprovalPolicy(mode=APPROVAL_CONFIG["approval_policy"],
+                             sandbox_mode=APPROVAL_CONFIG["sandbox_mode"],
+                             interactive=APPROVAL_CONFIG["interactive"])
+    researcher = DeepResearcher(tool_manager=tool_manager, llm=llm,
+                                guard=make_tool_guard(_policy, tool_manager))
     report = researcher.research(topic, depth=3)
 
     report_text = f"置信度: {report.confidence:.0%}\n\n{report.summary[:800]}"

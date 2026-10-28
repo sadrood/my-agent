@@ -82,8 +82,13 @@ def _run_agent(
     if mode == "research":
         from tools.research import DeepResearcher
         from models import LLM
+        from agent.approval import ApprovalPolicy, make_tool_guard
         tool_manager = ToolManager()
-        researcher = DeepResearcher(tool_manager=tool_manager, llm=LLM())
+        # 与 single 模式同一套策略（MCP 无人值守）：研究员的内部浏览器调用同样过门
+        policy = ApprovalPolicy(mode=approval_policy, sandbox_mode=sandbox_mode,
+                                interactive=False)
+        researcher = DeepResearcher(tool_manager=tool_manager, llm=LLM(),
+                                    guard=make_tool_guard(policy, tool_manager))
         report = researcher.research(goal, depth=3)
         sections = "\n\n".join(
             f"### {s.get('title', '')}\n{s.get('content', '')[:1500]}"

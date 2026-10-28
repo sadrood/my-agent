@@ -847,6 +847,7 @@ class ArticlePipeline:
             if self.tool_manager is None:
                 return []
             from tools.research import DeepResearcher
+            # 不传 guard：这条链路在已通过审批的 article 工具调用内部，外层门已经放行了
             researcher = DeepResearcher(tool_manager=self.tool_manager, llm=None)
             return list(researcher.lookup_snippets(query, limit=limit) or [])
         self.warnings.append(f"未知的检索通道 {source!r}（可用 zhihu / browser）")

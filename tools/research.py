@@ -4,6 +4,7 @@ import re
 import time
 from typing import List, Dict, Any
 from dataclasses import dataclass, field
+from urllib.parse import quote_plus
 
 from tools.tool_manager import ToolManager
 
@@ -40,10 +41,22 @@ class DeepResearcher:
         "duckduckgo": "https://duckduckgo.com/?q={query}",
     }
 
-    def __init__(self, tool_manager: ToolManager, llm=None):
+    def __init__(self, tool_manager: ToolManager, llm=None, guard=None):
         self.tool_manager = tool_manager
         self.llm = llm
+        # 守卫：(tool_name, input_str) -> 拒绝原因；直接调 ToolManager 不走审批门，
+        # 由调用方注入同一套策略（agent.approval.make_tool_guard）
+        self.guard = guard
         self._results_cache: Dict[str, Any] = {}
+
+    def _browse(self, command: str):
+        """所有 browser 调用走这里：先过守卫，再执行。"""
+        if self.guard is not None:
+            denied = self.guard("browser", command)
+            if denied:
+                from tools.base import ToolResult
+                return ToolResult(success=False, output="", error=denied)
+        return self.tool_manager.execute("browser", command)
 
     def research(
         self,
@@ -160,19 +173,19 @@ class DeepResearcher:
                 query=quote_plus(query)
             )
 
-            goto_result = self.tool_manager.execute("browser", f"goto {search_url}")
+            goto_result = self._browse(f"goto {search_url}")
             if not goto_result.success:
                 return sources
 
             time.sleep(1)
 
             # 获取页面文本，提取链接
-            text_result = self.tool_manager.execute("browser", "text")
+            text_result = self._browse("text")
             if not text_result.success:
                 return sources
 
             # 从文本中提取 URL
-            href_result = self.tool_manager.execute("browser", "html")
+            href_result = self._browse("html")
             urls = self._extract_urls_from_html(href_result.output) if href_result.success else []
 
             # 尝试从搜索结果中提取标题和摘要
@@ -203,11 +216,11 @@ class DeepResearcher:
     def _extract_page_content(self, url: str) -> str:
         """访问页面并提取正文内容。"""
         try:
-            self.tool_manager.execute("browser", f"goto {url}")
+            self._browse(f"goto {url}")
             time.sleep(0.5)
 
             # 尝试提取主要文本
-            text_result = self.tool_manager.execute("browser", "text")
+            text_result = self._browse("text")
             if text_result.success and text_result.output:
                 text = text_result.output
                 # 清理：去掉导航、页脚等噪音
@@ -355,7 +368,7 @@ class DeepResearcher:
         """从页面文本中为 URL 提取标题。"""
         # 找包含**域名特征词**的行当标题。
         try:
-            from urllib.parse import quote_plus, urlparse
+            from urllib.parse import urlparse
             domain = urlparse(url).netloc.lower()
             page_lines = page_text.split("\n")
             # 取有意义的域名片段：`domain.split(".")[:1]` 对 www.example.com 得到的是 `www` —— 于是页面上任何含 www 的行都会被当标题。跳过 www/m 这类前缀，且片段至少 3 个字符。

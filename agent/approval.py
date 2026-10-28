@@ -239,6 +239,18 @@ def check_tool_execution(approval, tool_manager, tool_name: str, arguments: dict
     return "" if decision.allowed else decision.reason
 
 
+def make_tool_guard(approval, tool_manager):
+    """构造 (tool_name, input_str) -> 拒绝原因 的守卫，给不经 Executor 的调用路径用。
+
+    直接调 `ToolManager.execute` 的模块（research 这类内部流水线）没有审批门，
+    用这个把同一套策略接上，避免同一条命令"走 tool 调用会被拦、走内部调用就不会"。
+    """
+    def guard(tool_name: str, tool_input) -> str:
+        return check_tool_execution(approval, tool_manager, tool_name,
+                                    arguments_from_string(tool_input))
+    return guard
+
+
 class CommandSafety:
     """终端命令风险分类器（基于关键词启发式，借鉴同类实现的命令安全思路）。"""
 
