@@ -7,22 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from config import ROLLOUT_CONFIG, resolve_under_root
-from agent.context_compaction import leading_system_messages, repair_tool_boundary
 from agent.retention import list_by_mtime
-
-COMPACT_SYSTEM_PROMPT = """你是一个对话压缩器。请把下面的执行过程压缩成一份精炼的摘要。
-
-要求：
-1. 保留：目标、已完成的工具操作及关键结果、出现的错误、当前进展状态
-2. 省略：重复内容、冗长的输出细节、无信息量的过程
-3. 输出一段连贯的中文摘要（不超过 1500 字），供后续决策使用。"""
-
-COMPACT_USER_TEMPLATE = """目标: {goal}
-
-执行过程（按时间顺序）:
-{transcript}
-
-请压缩为摘要。"""
 
 
 def estimate_tokens(text: str) -> int:
@@ -173,66 +158,24 @@ class Rollout:
         max_tokens: int = None,
         keep_recent: int = None,
     ) -> List[dict]:
-        """当消息列表超过 token 阈值时，压缩较早的消息。"""
-        # 阈值单一来源：调用方（executor）传入窗口比例制阈值；未传时仅当配置显式给出 compact_tokens > 0 才触发——不再有 24K 死默认
-        threshold = max_tokens or 0
-        if threshold <= 0:
-            threshold = int(self.config.get("compact_tokens") or 0)
+        """兼容入口：压缩实现已统一到 agent.compactor.Compactor（这里只做参数适配）。
+
+        rollout 侧从不做指针折叠，所以固定 summary 模式；keep 与阈值仍按本类配置解析。
+        """
+        from agent.compactor import Compactor
+
+        threshold = int(max_tokens or 0) or int(self.config.get("compact_tokens") or 0)
         if threshold <= 0:
             return list(messages)
         keep = keep_recent or int(self.config.get("keep_recent_messages", 8))
-
-        if self.messages_token_estimate(messages) <= threshold:
-            return list(messages)
-        if self.summarizer is None:
-            return list(messages)
-        if len(messages) <= keep + 4:
-            return list(messages)
-
-        # 开头的 system 消息（执行器系统提示：一次只调一个工具、参数必须来自 schema、收尾用自然语言…）必须**原样保留**，不能被压进摘要。
-        head_msgs = leading_system_messages(messages)
-        if len(messages) - len(head_msgs) <= keep + 4:
-            return list(messages)          # 去掉系统提示后没多少可压的
-
-        old_part = messages[len(head_msgs):-keep]
-        transcript_lines = []
-        for m in old_part:
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if str(content).strip():
-                transcript_lines.append(f"{role}: {str(content)[:800]}")
-        transcript = "\n".join(transcript_lines)
-
-        try:
-            summary = self.summarizer([
-                {"role": "system", "content": COMPACT_SYSTEM_PROMPT},
-                {"role": "user", "content": COMPACT_USER_TEMPLATE.format(
-                    goal=goal, transcript=transcript
-                )},
-            ])
-            if not summary:
-                return list(messages)
-        except Exception:
-            return list(messages)
-
-        compacted = list(head_msgs) + [
-            {"role": "system",
-             "content": "## 之前的执行摘要" + chr(10) + summary.strip()[:3000]},
-        ]
-        # 保留区取尾 keep 条并修掉孤立的 tool 消息（其 tool_calls 被截断线切走会让下一轮 400）
-        keep_msgs = repair_tool_boundary(messages, keep)
-        compacted.extend(keep_msgs)
-        self.emit("compaction", {
-            "before_events": len(old_part),
-            "after_messages": len(compacted),
-            "summary": summary.strip()[:500],
-        })
-        return compacted
+        comp = Compactor(summarizer=self.summarizer, emit=self.emit)
+        out = comp.maybe_compact(
+            messages,
+            {"keep_last": keep, "token_threshold": threshold},
+            mode=lambda: "summary",
+        )
+        # 未压缩时 Compactor 原样返回同一个列表；这条入口历来返回副本，别让调用方改动串味
+        return out if out is not messages else list(messages)
 
     def cleanup_old_logs(self):
         """清理旧追踪文件，仅保留最近 N 个。"""

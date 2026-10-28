@@ -313,10 +313,9 @@ class Executor:
         for _ in range(self.max_step_ops):
             # 每轮重取工具集：模型中途 tools load 装载的工具，从下一轮起就能调用
             tools = self._fc_tools()
-            # 上下文压缩（阈值与循环模式同一来源：窗口比例制）
-            if self.rollout is not None:
-                messages = self.rollout.maybe_compact(
-                    messages, goal, max_tokens=self._compact_threshold())
+            # 上下文压缩：与主循环同一实现（Compactor）；此前这里用 rollout 自带的
+            # 旧实现，rollout 关掉时这条路径干脆不压缩
+            messages = self._maybe_compact(messages)
 
             response = self.llm.chat_with_tools(messages, tools)
             # 思考模式会话：出现过推理字段后，后续每条 assistant 消息都要回传该字段

@@ -24,9 +24,11 @@ class Compactor:
     同名方法（含测试替换）原样接进来。
     """
 
-    def __init__(self, llm=None, emit=None):
+    def __init__(self, llm=None, emit=None, summarizer=None):
         self.llm = llm
         self.emit = emit or (lambda *args, **kwargs: None)
+        # 摘要来源：优先注入的 summarizer（如 Rollout 的兼容入口），否则用 llm.chat
+        self.summarizer = summarizer
         self._ctx_ns = ""        # 指针命名空间（懒建，按运行区分）
         self._ctx_seq = 0        # 句柄序号
 
@@ -108,6 +110,10 @@ class Compactor:
         except Exception as e:                   # noqa: BLE001
             self.emit("compaction", {"ok": False, "error": str(e)[:200]})
             return messages
+        if not str(summary or "").strip():
+            # 空摘要等于白丢历史（没有摘要器的调用方会走到这里）
+            self.emit("compaction", {"ok": False, "error": "摘要为空，已跳过压缩"})
+            return messages
         compacted = head_msgs + [
             {"role": "system", "content": SUMMARY_SECTION + summary}
         ] + recent
@@ -187,8 +193,11 @@ class Compactor:
             "相关文件路径与已执行的操作结果。输出 200-500 字。\n\n"
             f"{text}"
         )
-        resp = self.llm.chat(
-            [{"role": "user", "content": prompt}],
-            max_tokens=800, temperature=0.2,
-        )
+        messages = [{"role": "user", "content": prompt}]
+        if self.summarizer is not None:
+            resp = self.summarizer(messages)
+        elif self.llm is not None:
+            resp = self.llm.chat(messages, max_tokens=800, temperature=0.2)
+        else:
+            return ""
         return (resp or "").strip() or "(历史已压缩)"
