@@ -72,6 +72,19 @@ class TestBackgroundJobHygiene:
         time.sleep(1.5)
         assert len(tool._jobs) <= 21, f"任务表未淘汰: {len(tool._jobs)}"
 
+    def test_running_jobs_are_killed_when_over_cap(self, monkeypatch, tool):
+        """全都在跑也要压回上限：不终止就没法回收句柄和日志（只能攒着）。"""
+        import tools.terminal_jobs as tj
+        monkeypatch.setattr(tj.TerminalJobsMixin, "_is_finished", staticmethod(lambda job: False))
+        killed = []
+        monkeypatch.setattr(tj, "kill_process_tree", lambda proc: killed.append(proc))
+        tool._jobs = {f"j{i}": {"proc": object(), "started": i, "out_path": ""}
+                      for i in range(24)}
+        evicted = tool._prune_jobs(max_jobs=20)
+        assert len(tool._jobs) == 19, "应压回 max_jobs-1，给新任务留位"
+        assert len(evicted) == 5 and len(killed) == 5
+        assert evicted == [f"j{i}" for i in range(5)], "按启动时间从老到新淘汰"
+
     def test_release_is_idempotent(self, tool):
         jid = start_bg(tool, "echo idem")
         time.sleep(0.8)

@@ -22,7 +22,7 @@ class TerminalJobsMixin:
             job_id = f"job-{int(time.time() * 1000)}-{len(self._jobs) + 1}"
             out_path = os.path.join(tempfile.gettempdir(), f"my_agent_bg_{job_id}.log")
             f_out = open(out_path, "w", encoding="utf-8", errors="replace")
-            self._prune_jobs()          # 先按上限淘汰老任务（顺带关句柄、删日志）
+            evicted = self._prune_jobs()   # 先按上限淘汰老任务（顺带关句柄、删日志）
             proc = subprocess.Popen(
                 command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
                 **new_process_group_kwargs(),
@@ -45,12 +45,16 @@ class TerminalJobsMixin:
             "proc": proc, "command": command, "out_path": out_path,
             "started": time.time(), "handle": f_out,   # 保存句柄，结束/淘汰时关闭
         }
+        # 淘汰运行中任务时不静默：被终止的任务本来还能用，必须让人/模型知道
+        note = (f"\n注意：后台任务已达上限，已终止最老的 {len(evicted)} 个：{', '.join(evicted)}"
+                if evicted else "")
         return ToolResult(
             success=True,
             output=(
                 f"已启动后台任务 {job_id}（PID {proc.pid}）。\n"
                 f'查看输出: 再调用 terminal 工具，command="bg output {job_id} 30"\n'
                 f'结束任务: command="bg kill {job_id}"'
+                + note
             ),
         )
 
@@ -81,16 +85,37 @@ class TerminalJobsMixin:
             lines.append(f"- {job_id}  [{status}]  {job['command'][:80]}")
         return ToolResult(success=True, output="后台任务:\n" + "\n".join(lines))
 
-    def _prune_jobs(self, max_jobs: int = 20):
-        """淘汰已结束的老任务：关掉日志句柄并删除临时日志。"""
+    @staticmethod
+    def _is_finished(job: dict) -> bool:
+        proc = job.get("proc")
+        return proc is None or proc.poll() is not None
+
+    def _prune_jobs(self, max_jobs: int = 20) -> list:
+        """把任务表压回 max_jobs 以内，给即将启动的任务留一个位置；返回被终止的 id。
+
+        已结束的先淘汰（关句柄、删日志）。仍超限时淘汰最老的**运行中**任务并终止它：
+        运行中任务的日志正被写入、bg output 还要读，不终止就没法回收句柄和文件——
+        只留一部分运行中任务却永远攒着句柄，才是真的泄漏。
+        """
         if len(self._jobs) < max_jobs:
-            return
-        finished = [(jid, j) for jid, j in self._jobs.items()
-                    if (j.get("proc") is None or j["proc"].poll() is not None)]
-        finished.sort(key=lambda kv: kv[1].get("started", 0))
-        for jid, job in finished[:max(1, len(self._jobs) - max_jobs + 1)]:
+            return []
+        excess = len(self._jobs) - max_jobs + 1
+        ordered = sorted(self._jobs.items(), key=lambda kv: kv[1].get("started", 0))
+        victims = [jid for jid, job in ordered if self._is_finished(job)][:excess]
+        if len(victims) < excess:
+            running = [jid for jid, job in ordered if not self._is_finished(job)]
+            victims += running[:excess - len(victims)]
+        killed = []
+        for jid in victims:
+            job = self._jobs.get(jid)
+            if job is None:
+                continue
+            if not self._is_finished(job):
+                kill_process_tree(job.get("proc"))
+                killed.append(jid)
             self._finish_job(job)
             self._jobs.pop(jid, None)
+        return killed
 
     @staticmethod
     def _release_job(job: dict):

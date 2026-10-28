@@ -17,10 +17,19 @@ SENTINEL = "@@EGO_RESULT@@"
 DEFAULT_CLI = os.path.expanduser(
     "~/.dsh/profiles/web/node_modules/dsh-ego-browser/runtime/ego-linux/bin/ego-browser.mjs")
 
+#: Windows 上 Edge 的机器级安装位置；用户级位置（%LOCALAPPDATA%）在 resolve_chrome 里补
 EDGE_CANDIDATES = (
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 )
+
+#: PATH 兜底：与运行时 ego-linux/src/chrome.mjs 的候选保持一致
+_CHROME_BINARIES_WIN = ("msedge", "chrome", "chromium")
+_CHROME_BINARIES_POSIX = ("google-chrome", "google-chrome-stable", "chromium",
+                          "chromium-browser", "brave-browser", "microsoft-edge")
+
+#: ego 运行时要求 Node ≥ 22：CDP 连接用全局 WebSocket，Node 21 以下没有这个全局对象
+NODE_MIN_MAJOR = 22
 
 #: Linux 移植版靠 EGO_LINUX_CHROME 找浏览器；Windows 上必须显式给 Edge 路径
 CHROME_ENV = ("EGO_LINUX_CHROME", "BROWSER_EGO_CHROME")
@@ -69,20 +78,75 @@ def resolve_cli() -> str:
 
 
 def resolve_chrome() -> str:
-    """Edge/Chrome 可执行文件路径（env 覆盖 → 常见 Edge 安装位置）。"""
+    """浏览器可执行文件路径：env 覆盖 → 安装位置 → PATH。
+
+    Windows 优先 Edge：ego 是 Edge 内核的共享浏览器，跑在 Chrome 上拿不到用户日常的
+    登录态。只在探测不到 Edge 时才退到 Chrome/Chromium（否则会静默换浏览器）。
+    """
     for key in CHROME_ENV:
         value = str(os.getenv(key, "") or "").strip()
         if value:
             return value
-    for path in EDGE_CANDIDATES:
-        if os.path.isfile(path):
-            return path
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA") or ""
+        candidates = list(EDGE_CANDIDATES)
+        if local:
+            # 用户级安装（部分机器 Edge 不在 Program Files）
+            candidates.insert(0, os.path.join(local, r"Microsoft\Edge\Application\msedge.exe"))
+        candidates.extend(_CHROME_BINARIES_WIN)
+    else:
+        candidates = list(_CHROME_BINARIES_POSIX)
+    for path in candidates:
+        if os.path.isabs(path):
+            if os.path.isfile(path):
+                return path
+            continue
+        found = shutil.which(path)
+        if found:
+            return found
+    return ""
+
+
+_node_major_cache: Dict[str, int] = {}
+
+
+def node_major_version() -> int:
+    """node 主版本号；探测不出来返回 0（未知，不据此判死环境）。"""
+    node = shutil.which("node")
+    if not node:
+        return 0
+    if node not in _node_major_cache:
+        major = 0
+        try:
+            out = subprocess.run([node, "--version"], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()
+            match = re.match(r"v?(\d+)", out)
+            if match:
+                major = int(match.group(1))
+        except (OSError, subprocess.SubprocessError):
+            major = 0
+        _node_major_cache[node] = major
+    return _node_major_cache[node]
+
+
+def ego_unavailable_reason() -> str:
+    """ego 不可用的具体原因（空串 = 可用）。工具选择与 --doctor 共用同一份判断。"""
+    if not resolve_cli():
+        return (f"找不到 ego 运行时：{DEFAULT_CLI} 不存在，PATH 上也没有 ego-browser"
+                "（设 BROWSER_EGO_CLI 指向 ego-linux/bin/ego-browser.mjs）")
+    if not shutil.which("node"):
+        return f"找不到 node（ego 运行时需要 Node ≥ {NODE_MIN_MAJOR}）"
+    major = node_major_version()
+    if major and major < NODE_MIN_MAJOR:
+        return f"node 版本过低（v{major}，ego 运行时需要 Node ≥ {NODE_MIN_MAJOR}）"
+    if not resolve_chrome():
+        return "找不到 Chrome/Edge（设 EGO_LINUX_CHROME 指到浏览器可执行文件）"
     return ""
 
 
 def ego_available() -> bool:
-    """ego 后端能否用：CLI + node + 浏览器三样都在。"""
-    return bool(resolve_cli() and shutil.which("node") and resolve_chrome())
+    """ego 后端能否用：运行时 + node（≥ 22）+ 浏览器三样都在。"""
+    return not ego_unavailable_reason()
 
 
 def _js(value: Any) -> str:
@@ -255,10 +319,12 @@ class EgoBrowserTool(BrowserTool):
         """执行脚本，返回 {ok, __out|error}；CLI/node 缺失或超时也走同一形状。"""
         if not self._cli:
             return {"ok": False,
-                    "error": "找不到 ego-browser CLI（设 BROWSER_EGO_CLI，或装 dsh-ego-browser）"}
+                    "error": ("找不到 ego 运行时：" + DEFAULT_CLI
+                              + " 不存在；把它放到该位置，或设 BROWSER_EGO_CLI 指向 "
+                                "ego-linux/bin/ego-browser.mjs")}
         node = shutil.which("node")
         if not node:
-            return {"ok": False, "error": "找不到 node（ego 运行时需要 Node ≥ 22）"}
+            return {"ok": False, "error": f"找不到 node（ego 运行时需要 Node ≥ {NODE_MIN_MAJOR}）"}
         env = dict(os.environ)
         if self._chrome:
             env["EGO_LINUX_CHROME"] = self._chrome

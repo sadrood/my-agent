@@ -151,6 +151,16 @@ BROWSER_EGO_HEADLESS=false              # true = 无窗口运行，完全不弹�
 > 两个进程同时驱动同一浏览器会互相抢标签页：各自用不同任务空间才互不干扰。
 > **不想被浏览器弹窗打扰**：会话隔离 + 快路径让它只在"真要换页面"时抢前台；`BROWSER_EGO_HEADLESS=true` 则完全不弹（代价是看不到页面）。
 
+> ⚠️ **`ego` 后端要单独装运行时**（它不在本仓库里，`git clone` 拿不到）：
+> 运行时是纯 JS、无需 `npm install`，但要 **Node ≥ 22**（CDP 用全局 WebSocket，18 会报
+> `WebSocket is not defined`）。把它放到下面这个位置就免配置（代码里的默认路径就指向它），
+> 或复制到任意位置并用 `BROWSER_EGO_CLI` 指过去：
+> ```
+> ~/.dsh/profiles/web/node_modules/dsh-ego-browser/runtime/     # 含 ego-linux/ 与 ego-browser/ 两部分
+> ```
+> 缺运行时不会报错，而是**静默降级到 Playwright**——所以换机器后先跑
+> `python main.py --doctor` 看「浏览器后端」那一行，它会明说是否降级、以及缺了什么。
+
 ## 🧰 工具（27 个）
 
 **常驻 16** —— 每轮都在提示词里，拿来就用：

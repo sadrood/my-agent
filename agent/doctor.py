@@ -61,19 +61,30 @@ def _check_browser() -> dict:
         tool = ToolManager().get_tool("browser")
         kind = type(tool).__name__
         if kind == "EgoBrowserTool":
-            from tools.ego_browser import ego_available, resolve_chrome, resolve_cli
-            cli = resolve_cli()
-            chrome = resolve_chrome()
+            from tools.ego_browser import ego_available, ego_unavailable_reason, resolve_chrome
             if ego_available():
                 return {"name": "浏览器后端（ego）", "ok": True,
-                        "message": f"Edge: {chrome or '已探测'}", "hint": ""}
+                        "message": f"Edge: {resolve_chrome() or '已探测'}", "hint": ""}
             return {"name": "浏览器后端（ego）", "ok": False,
-                    "message": f"不可用（CLI: {cli or '未找到'}）",
-                    "hint": "装 dsh-ego-browser，或设 BROWSER_BACKEND=playwright"}
+                    "message": ego_unavailable_reason() or "不可用",
+                    "hint": "补齐运行时/Node/浏览器，或设 BROWSER_BACKEND=playwright 改用 Playwright"}
         if "Embedded" in kind:
             return {"name": "浏览器后端（内置桥）", "ok": True,
                     "message": "桌面端内置浏览器可用", "hint": ""}
-        return _check_playwright_browser()
+        result = _check_playwright_browser()
+        # 静默降级最难查：配的是 auto、ego 却起不来时只看到 Playwright 一栏，把原因补上
+        try:
+            from config import BROWSER_CONFIG
+            from tools.ego_browser import ego_unavailable_reason
+            if (BROWSER_CONFIG.get("ego_enabled", True)
+                    and BROWSER_CONFIG.get("backend") in ("auto", "ego")):
+                why = ego_unavailable_reason()
+                if why:
+                    result = dict(result)
+                    result["message"] = f"{result.get('message', '')}｜ego 未启用：{why}"
+        except Exception:                        # noqa: BLE001
+            pass
+        return result
     except Exception as e:                       # noqa: BLE001
         return {"name": "浏览器后端", "ok": False,
                 "message": f"检查失败: {str(e)[:80]}", "hint": ""}

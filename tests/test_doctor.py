@@ -34,10 +34,10 @@ class TestBrowserBackendCheck:
         from tools import ego_browser as ego_mod
         self._stub_tool_manager(monkeypatch, EgoBrowserTool.__new__(EgoBrowserTool))
         monkeypatch.setattr(ego_mod, "ego_available", lambda: False)
-        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: "")
-        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "")
+        monkeypatch.setattr(ego_mod, "ego_unavailable_reason", lambda: "找不到 ego 运行时")
         r = doc._check_browser()
-        assert r["ok"] is False and "dsh-ego-browser" in r["hint"]
+        assert r["ok"] is False
+        assert "ego 运行时" in r["message"] and "playwright" in r["hint"]
 
     def test_reports_embedded_bridge(self, monkeypatch):
         from tools.embedded_browser import EmbeddedBrowserTool
@@ -47,9 +47,37 @@ class TestBrowserBackendCheck:
 
     def test_falls_back_to_playwright_check(self, monkeypatch):
         from tools.browser import BrowserTool
+        from tools import ego_browser as ego_mod
         self._stub_tool_manager(monkeypatch, BrowserTool.__new__(BrowserTool))
         monkeypatch.setattr(doc, "_check_playwright_browser",
                             lambda: {"name": "浏览器后端（Playwright）", "ok": True,
+                                     "message": "marker", "hint": ""})
+        monkeypatch.setattr(ego_mod, "ego_unavailable_reason", lambda: "")
+        assert doc._check_browser()["message"] == "marker"
+
+    def test_silent_downgrade_is_explained(self, monkeypatch):
+        """配的是 auto、ego 却起不来时，不能只报 Playwright 而不说为什么。"""
+        from tools.browser import BrowserTool
+        from tools import ego_browser as ego_mod
+        from config import BROWSER_CONFIG
+        self._stub_tool_manager(monkeypatch, BrowserTool.__new__(BrowserTool))
+        monkeypatch.setitem(BROWSER_CONFIG, "backend", "auto")
+        monkeypatch.setitem(BROWSER_CONFIG, "ego_enabled", True)
+        monkeypatch.setattr(doc, "_check_playwright_browser",
+                            lambda: {"name": "Playwright", "ok": True,
+                                     "message": "marker", "hint": ""})
+        monkeypatch.setattr(ego_mod, "ego_unavailable_reason", lambda: "找不到 ego 运行时")
+        r = doc._check_browser()
+        assert r["ok"] is True and "marker" in r["message"]
+        assert "ego 未启用" in r["message"] and "ego 运行时" in r["message"]
+
+    def test_explicit_playwright_backend_has_no_ego_noise(self, monkeypatch):
+        from tools.browser import BrowserTool
+        from config import BROWSER_CONFIG
+        self._stub_tool_manager(monkeypatch, BrowserTool.__new__(BrowserTool))
+        monkeypatch.setitem(BROWSER_CONFIG, "backend", "playwright")
+        monkeypatch.setattr(doc, "_check_playwright_browser",
+                            lambda: {"name": "Playwright", "ok": True,
                                      "message": "marker", "hint": ""})
         assert doc._check_browser()["message"] == "marker"
 

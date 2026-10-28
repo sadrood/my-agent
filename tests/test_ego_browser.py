@@ -229,6 +229,83 @@ class TestAvailability:
         assert ego_mod.resolve_chrome() == "D:/custom/chrome.exe"
 
 
+class TestChromeDiscovery:
+    """浏览器探测：换机器后挑错浏览器（Edge 装到用户目录 / Linux 上只有 chromium）都曾静默发生。"""
+
+    def test_per_user_edge_is_found(self, monkeypatch):
+        monkeypatch.delenv("EGO_LINUX_CHROME", raising=False)
+        monkeypatch.delenv("BROWSER_EGO_CHROME", raising=False)
+        monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\u\AppData\Local")
+        want = os.path.join(r"C:\Users\u\AppData\Local", r"Microsoft\Edge\Application\msedge.exe")
+        # 机器级路径不存在，只有用户级那份在
+        monkeypatch.setattr(ego_mod.os.path, "isfile", lambda p: p == want)
+        assert ego_mod.resolve_chrome() == want
+
+    def test_falls_back_to_path_binary(self, monkeypatch):
+        monkeypatch.delenv("EGO_LINUX_CHROME", raising=False)
+        monkeypatch.delenv("BROWSER_EGO_CHROME", raising=False)
+        monkeypatch.setattr(ego_mod.os.path, "isfile", lambda p: False)
+        monkeypatch.setattr(ego_mod.shutil, "which",
+                            lambda name: "C:/bin/chrome.exe" if name == "chrome" else None)
+        assert ego_mod.resolve_chrome() == "C:/bin/chrome.exe"
+
+    def test_posix_uses_chromium_candidates(self, monkeypatch):
+        monkeypatch.delenv("EGO_LINUX_CHROME", raising=False)
+        monkeypatch.delenv("BROWSER_EGO_CHROME", raising=False)
+        fake_os = SimpleNamespace(name="posix", getenv=os.getenv, environ=os.environ, path=os.path)
+        monkeypatch.setattr(ego_mod, "os", fake_os)
+        monkeypatch.setattr(ego_mod.shutil, "which",
+                            lambda name: "/usr/bin/chromium" if name == "chromium" else None)
+        assert ego_mod.resolve_chrome() == "/usr/bin/chromium"
+
+
+class TestNodeVersionGate:
+    """Node 18 能通过"node 存在"的检查，却会在 CDP 连接时崩在全局 WebSocket。"""
+
+    @staticmethod
+    def _patch_node(monkeypatch, major, path="C:/node.exe"):
+        monkeypatch.setattr(ego_mod, "_node_major_cache", {})
+        monkeypatch.setattr(ego_mod.shutil, "which", lambda name: path if name == "node" else None)
+        monkeypatch.setattr(ego_mod.subprocess, "run",
+                            lambda *a, **kw: SimpleNamespace(stdout=f"v{major}.1.0\n"))
+
+    def test_parses_major_version(self, monkeypatch):
+        self._patch_node(monkeypatch, 22)
+        assert ego_mod.node_major_version() == 22
+
+    def test_old_node_blocks_ego(self, monkeypatch):
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "C:/cli.mjs")
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: r"C:\Edge\msedge.exe")
+        self._patch_node(monkeypatch, 18)
+        assert ego_available() is False
+        assert "Node ≥ 22" in ego_mod.ego_unavailable_reason()
+
+    def test_new_node_allows_ego(self, monkeypatch):
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "C:/cli.mjs")
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: r"C:\Edge\msedge.exe")
+        self._patch_node(monkeypatch, 22)
+        assert ego_available() is True
+        assert ego_mod.ego_unavailable_reason() == ""
+
+    def test_unprobeable_node_is_not_fatal(self, monkeypatch):
+        """探测失败（假路径 / 沙箱限制）时按"未知"处理，别把能跑的环境判死。"""
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "C:/cli.mjs")
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: r"C:\Edge\msedge.exe")
+        monkeypatch.setattr(ego_mod, "_node_major_cache", {})
+        monkeypatch.setattr(ego_mod.shutil, "which", lambda name: "C:/node.exe")
+        monkeypatch.setattr(ego_mod.subprocess, "run",
+                            lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")))
+        assert ego_mod.node_major_version() == 0
+        assert ego_available() is True
+
+    def test_reason_names_the_missing_runtime(self, monkeypatch):
+        monkeypatch.setattr(ego_mod, "resolve_cli", lambda: "")
+        monkeypatch.setattr(ego_mod, "resolve_chrome", lambda: r"C:\Edge\msedge.exe")
+        monkeypatch.setattr(ego_mod.shutil, "which", lambda name: "C:/node.exe")
+        why = ego_mod.ego_unavailable_reason()
+        assert "ego 运行时" in why and "BROWSER_EGO_CLI" in why
+
+
 class TestBackendSelection:
     """_create_browser_tool 的后端优先级。"""
 
