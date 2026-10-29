@@ -1,5 +1,19 @@
 """pytest 全局隔离配置。
 离线时要等连接超时（1.7s/次）——几十个测试累积到分钟级。"""
+import os
+
+# CI 上没有 .env：给占位凭据，否则 LLM()/VisionModel() 构造时直接抛
+# "Missing credentials"，一百多个用例连带失败。本机有 .env 时不干预。
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if not os.path.exists(os.path.join(_ROOT, ".env")):
+    for _key in ("LLM_API_KEY", "VISION_API_KEY", "GUARDIAN_API_KEY",
+                 "SMALL_MODEL_API_KEY"):
+        os.environ.setdefault(_key, "test-key")
+    for _key in ("LLM_BASE_URL", "VISION_BASE_URL", "SMALL_MODEL_BASE_URL"):
+        os.environ.setdefault(_key, "https://example.invalid/v1")
+    for _key in ("VISION_MODEL", "GUARDIAN_MODEL"):
+        os.environ.setdefault(_key, "test-model")
+
 import asyncio
 
 import pytest

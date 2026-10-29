@@ -124,7 +124,8 @@ def test_env_check_without_key(monkeypatch):
         config.LLM_CONFIG["api_key"] = None
         r = doc._check_env()
         assert r["ok"] is False
-        assert "LLM_API_KEY" in r["message"]
+        # 没有 .env 时先报"缺少 .env"；有 .env 但没 key 时报 LLM_API_KEY
+        assert "LLM_API_KEY" in r["message"] or ".env" in r["message"]
     finally:
         config.LLM_CONFIG.clear()
         config.LLM_CONFIG.update(saved)
