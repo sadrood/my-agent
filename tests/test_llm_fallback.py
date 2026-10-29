@@ -312,3 +312,28 @@ def test_failover_to_thinking_model_recomputes_temperature(monkeypatch):
     call = llm.providers[1]["client"].completions.calls[-1]
     assert call["model"] == "kimi-k3"
     assert call["temperature"] == 1, "kimi-k3 只接受 1，沿用主模型的温度会 400"
+
+
+def test_connection_timeout_switches_immediately(monkeypatch):
+    """超时/连接失败不该在同一端点上硬等。
+
+    端点是挂住的，原地重试只是再等一遍超时——实测会把一轮 180s 预算耗光、
+    整轮任务判死，却一次端点都没切。这里要求第一次失败就切，且不必攒够 fallback_after。
+    """
+    from openai import APITimeoutError
+
+    class _TimeoutCompletions(_Completions):
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            raise APITimeoutError(request=None)
+
+    llm = _make_llm(monkeypatch, primary="不会用到", backup="备用回答", fallback_after=2)
+    client = llm.providers[0]["client"]
+    client.completions = _TimeoutCompletions("不会用到")
+    client.chat = _Chat(client.completions)
+
+    out = llm.chat([{"role": "user", "content": "hi"}])
+
+    assert out == "备用回答"
+    assert len(client.completions.calls) == 1, "超时后不该在原地重试"
+    assert llm.provider_index == 1

@@ -78,3 +78,10 @@ def test_repeated_calls_are_independent(tool):
     assert run(tool, "x = 1\nprint('set')").success
     r = run(tool, "print('x' in vars())")
     assert r.success and r.output.strip().endswith("False")
+
+
+def test_lone_surrogate_in_exception_does_not_crash(tool):
+    """孤立代理字符编不进 UTF-8：状态行写不出去，连错误报告都拿不到。"""
+    r = run(tool, "raise ValueError('x' + chr(0xdc8d))")
+    assert r.success is False
+    assert "ValueError" in (r.error or "")

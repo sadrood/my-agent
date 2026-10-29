@@ -25,6 +25,15 @@ def _openai_errors() -> tuple:
     return (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
 
 
+def _is_connection_error(e: Exception) -> bool:
+    """超时/连接失败：端点已经挂住，在同一个端点上重试只是再等一遍超时。"""
+    try:
+        from openai import APIConnectionError, APITimeoutError
+        return isinstance(e, (APITimeoutError, APIConnectionError))
+    except Exception:                            # noqa: BLE001
+        return False
+
+
 def _openai_client_class():
     """LLM 客户端类（惰性导入）。"""
     from openai import OpenAI as _OpenAI
@@ -542,6 +551,13 @@ class LLM:
                 if _is_quota_error(e) and self._probe_primary_if_throttled(e, kwargs):
                     attempt = 0                # 长窗口限流：立刻回试主端点（不占 failover 预算）
                     continue
+                # 超时/连接失败：端点已挂住，原地重试只是再等一遍超时（实测把一轮 180s
+                # 预算耗光、整轮任务判死，却一次端点都没切）。立刻切下一个端点。
+                if _is_connection_error(e) and switches < max_switches:
+                    if self._failover(kwargs, "超时/连接失败", force=True):
+                        switches += 1
+                        attempt = 0            # 换了端点：重新给满重试预算
+                        continue
                 if attempt >= self.max_retries:
                     if _is_quota_error(e):
                         self._notify_health(dict(self._active_meta(), event="quota_limited",
@@ -586,12 +602,15 @@ class LLM:
                 raise
         raise last_error
 
-    def _failover(self, kwargs: dict, reason: str) -> bool:
-        """限流连续失败达阈值时切到备用端点（True=已切换）；同时换成本次调用的模型名。"""
+    def _failover(self, kwargs: dict, reason: str, force: bool = False) -> bool:
+        """限流连续失败达阈值时切到备用端点（True=已切换）；同时换成本次调用的模型名。
+
+        force=True：端点已挂住（超时/连接失败）时不必攒够失败次数，立刻切。
+        """
         if len(self.providers) < 2:
             return False
         self.quota_strikes += 1
-        if self.quota_strikes < self.fallback_after:
+        if not force and self.quota_strikes < self.fallback_after:
             return False
         self.quota_strikes = 0
         target = min(self.provider_index + 1, len(self.providers) - 1)   # 逐级往下，不绕回主端点

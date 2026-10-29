@@ -103,6 +103,15 @@ def _safe_globals() -> dict:
     }
 
 
+def _clean(text) -> str:
+    """写回宿主前去掉孤立代理字符。
+
+    用户代码可能产出 lone surrogate（读损坏文件、surrogateescape 等），它无法编码成
+    UTF-8 —— 状态行一旦写不出去，整次执行就崩在管道上，连错误报告都拿不到。
+    """
+    return str(text).encode("utf-8", "replace").decode("utf-8")
+
+
 def main() -> int:
     out_path = sys.argv[1]
     code = sys.stdin.read()
@@ -125,6 +134,9 @@ def main() -> int:
         sys.stdout = real_stdout
         status["dropped"] = writer.dropped
         writer.close()
+    for key in ("message", "error", "traceback"):
+        if key in status:
+            status[key] = _clean(status[key])
     real_stdout.write(json.dumps(status, ensure_ascii=False))
     real_stdout.flush()
     return 0

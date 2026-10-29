@@ -17,6 +17,13 @@ def _safe_name(key: str) -> str:
     return cleaned[:80] or "default"
 
 
+def _missing_id_error(todos: list, todo_id: str) -> str:
+    """报错要给出有效 id：模型拿着旧 id 反复重试是真实发生过的。"""
+    valid = "、".join(str(t.get("id", "")) for t in todos) or "（当前没有待办）"
+    return (f"找不到待办 id: {todo_id}。现有 id: {valid}"
+            "（用 todo_write list 查看完整清单）")
+
+
 class TodoTool(BaseTool):
     """会话级待办清单（todo_write）。"""
 
@@ -132,7 +139,7 @@ class TodoTool(BaseTool):
             todo_id = str(arguments.get("id", "")).strip()
             hit = next((t for t in todos if t.get("id") == todo_id), None)
             if not hit:
-                return ToolResult(success=False, output="", error=f"找不到待办 id: {todo_id}")
+                return ToolResult(success=False, output="", error=_missing_id_error(todos, todo_id))
             hit["status"] = "done"
             self._save(todos)
             return self._render(todos)
@@ -141,7 +148,7 @@ class TodoTool(BaseTool):
             before = len(todos)
             todos = [t for t in todos if t.get("id") != todo_id]
             if len(todos) == before:
-                return ToolResult(success=False, output="", error=f"找不到待办 id: {todo_id}")
+                return ToolResult(success=False, output="", error=_missing_id_error(todos, todo_id))
             self._save(todos)
             return self._render(todos)
         if op == "update":
@@ -149,7 +156,7 @@ class TodoTool(BaseTool):
             title = str(arguments.get("title", "")).strip()
             hit = next((t for t in todos if t.get("id") == todo_id), None)
             if not hit:
-                return ToolResult(success=False, output="", error=f"找不到待办 id: {todo_id}")
+                return ToolResult(success=False, output="", error=_missing_id_error(todos, todo_id))
             if title:
                 hit["title"] = title
             self._save(todos)

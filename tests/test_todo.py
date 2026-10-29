@@ -105,3 +105,13 @@ def test_pending_lists_only_unfinished(tool):
 
 def test_pending_is_empty_without_any_list(tool):
     assert tool.pending() == []
+
+
+def test_missing_id_error_lists_valid_ids(tool):
+    """报错要给出有效 id：模型拿着旧 id 反复重试是真实发生过的。"""
+    tool.execute_json({"operation": "clear"})
+    tool.execute_json({"operation": "add", "title": "任务甲"})
+    r = tool.execute_json({"operation": "done", "id": "t-not-exist"})
+    assert not r.success
+    assert "t-not-exist" in r.error
+    assert "现有 id" in r.error, "应列出有效 id，否则模型只能瞎猜"
