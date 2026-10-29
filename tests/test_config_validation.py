@@ -33,7 +33,7 @@ def _good() -> dict:
         "VISION_CONFIG": {"timeout": 30, "fallback_timeout": 60,
                           "fallback_models": [], "fallback_presets": {}},
         "BROWSER_CONFIG": {"viewport_width": 1280, "viewport_height": 720,
-                           "download_timeout": 30},
+                           "download_timeout": 30, "screenshot_keep": 100},
         "UPGRADE_CONFIG": {"timeout_seconds": 300},
     }
 

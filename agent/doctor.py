@@ -581,13 +581,51 @@ def _check_exposure() -> dict:
     }
 
 
+def _check_disk() -> dict:
+    """输出目录体积：这两个目录不在 git 里，涨到几 GB 也不会有人提醒。"""
+    from config import PROJECT_ROOT, BROWSER_CONFIG
+    warn_mb = float(os.environ.get("DOCTOR_DISK_WARN_MB", "2000"))
+    rows, over = [], False
+    for name in ("output", "screenshots"):
+        path = os.path.join(PROJECT_ROOT, name)
+        if not os.path.isdir(path):
+            continue
+        total, seen, capped = 0, 0, False
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    continue
+                seen += 1
+                if seen >= 50000:          # 统计有上限：doctor 不该为了报数扫十分钟
+                    capped = True
+                    break
+            if capped:
+                break
+        mb = total / 1024 / 1024
+        rows.append(f"{name} {mb:.0f}MB{'+' if capped else ''}")
+        if mb >= warn_mb:
+            over = True
+    if not rows:
+        return {"name": "磁盘占用", "ok": True, "message": "无输出目录", "hint": ""}
+    return {
+        "name": "磁盘占用",
+        "ok": not over,
+        "message": " · ".join(rows),
+        "hint": (f"输出目录超过 {warn_mb:.0f}MB：确认无用后手动清理"
+                 f"（screenshots 自动只留最近 {BROWSER_CONFIG.get('screenshot_keep', 100)} 张）")
+                if over else "",
+    }
+
+
 def run_doctor(include_llm: bool = True) -> List[dict]:
     """执行全部自检，返回结果列表。"""
     checks: List[Callable[[], dict]] = [
         _check_python, _check_deps, _check_browser,
         _check_git, _check_env, _check_env_sync, _check_tools, _check_ws_support,
         _check_policy, _check_hooks, _check_exec_policy, _check_skills, _check_sandbox,
-        _check_exposure,
+        _check_exposure, _check_disk,
     ]
     if include_llm:
         checks.insert(5, _check_llm)

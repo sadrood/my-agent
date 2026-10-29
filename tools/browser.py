@@ -1106,6 +1106,20 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
     # 截图
     # ================================================================
 
+    def _prune_screenshots(self) -> None:
+        """只留最近 N 张截图（默认 100）：截图是给模型看的中间产物，攒着只占盘。"""
+        try:
+            keep = int(BROWSER_CONFIG.get("screenshot_keep", 100))
+        except Exception:                        # noqa: BLE001
+            keep = 100
+        if keep <= 0:
+            return
+        try:
+            from agent.retention import prune_oldest
+            prune_oldest(self._screenshot_dir, keep, suffix=".png")
+        except Exception:                        # noqa: BLE001 — 清理失败不影响截图
+            pass
+
     def _screenshot(self, full_base64: bool = False) -> ToolResult:
         """截取当前页面截图。"""
         ensure = self._ensure_page()
@@ -1130,6 +1144,8 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             url = self._page.url
 
             head = f"截图已保存: {filepath}\n" if save_to_disk else ""
+            if save_to_disk:
+                self._prune_screenshots()
             info = (f"页面: {title}\n"
                     f"URL: {url}\n"
                     f"大小: {len(screenshot_bytes)} 字节")

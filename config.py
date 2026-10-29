@@ -262,6 +262,8 @@ BROWSER_CONFIG = {    "headless": os.getenv("BROWSER_HEADLESS", "false").lower()
     # browser 的 download 命令：文件落盘目录 + 等待"开始下载"的上限（秒）
     "download_dir": resolve_under_root(os.getenv("BROWSER_DOWNLOAD_DIR", "./downloads")),
     "download_timeout": float(os.getenv("BROWSER_DOWNLOAD_TIMEOUT", "30")),
+    # 截图保留数量：截图是给模型看的中间产物，只留最近 N 张（0 = 永不清理）
+    "screenshot_keep": int(os.getenv("BROWSER_SCREENSHOT_KEEP", "100")),
     # dashboard 实时画面的最小抓帧间隔（毫秒；越小越流畅，也越费 CPU）
     "live_min_gap_ms": int(os.getenv("BROWSER_LIVE_MIN_GAP_MS", "1000")),
     # 内嵌浏览器桥地址（仅桌面端模式由 Electron 主进程注入，如 http://127.0.0.1:8091/browser）。
@@ -1175,6 +1177,7 @@ def validate_config() -> list:
         ("BROWSER_CONFIG.viewport_width", BROWSER_CONFIG.get("viewport_width"), 1, None, False, False),
         ("BROWSER_CONFIG.viewport_height", BROWSER_CONFIG.get("viewport_height"), 1, None, False, False),
         ("BROWSER_CONFIG.download_timeout", BROWSER_CONFIG.get("download_timeout"), 0, None, True, False),
+        ("BROWSER_CONFIG.screenshot_keep", BROWSER_CONFIG.get("screenshot_keep"), 0, None, False, False),
         ("UPGRADE_CONFIG.timeout_seconds", UPGRADE_CONFIG.get("timeout_seconds"), 0, None, True, False),
     )
     for label, value, low, high, low_ex, high_ex in checks:

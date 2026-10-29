@@ -606,6 +606,7 @@ class EgoBrowserTool(BrowserTool):
 
         毫秒精度：只到秒的话同一秒内两次截图会互相覆盖，而两次调用都返回 success。
         """
+        self._prune_screenshots()      # 与 Playwright 共用保留策略：只留最近 N 张
         stamp = time.strftime("%Y%m%d_%H%M%S") + "_" + f"{int(time.time() * 1000) % 1000:03d}"
         return os.path.join(self._screenshot_dir, f"ego_{stamp}.png")
 
