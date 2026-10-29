@@ -1,5 +1,4 @@
 """Dashboard Web 服务器。"""
-import json
 import threading
 import time
 import asyncio

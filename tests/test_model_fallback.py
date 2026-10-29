@@ -46,7 +46,6 @@ def vision_cfg(monkeypatch):
 class TestVisionFallback:
     def _model(self, monkeypatch, primary_fail=True, backup_fail=False):
         """主端点 + 备用端点都用假客户端。"""
-        import openai
 
         clients = []
 

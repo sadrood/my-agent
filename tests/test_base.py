@@ -1,7 +1,6 @@
 """
 工具基类测试：截断、ToolResult、Schema 生成。
 """
-import pytest
 
 from tools.base import BaseTool, ToolResult, truncate_output
 

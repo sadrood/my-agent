@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.executor import Executor
-from agent.supervisor import Supervisor, SupervisorVerdict, build_supervisor_llm
+from agent.supervisor import Supervisor, build_supervisor_llm
 from models.llm import LLMToolResponse, ToolCall
 from tools.tool_manager import ToolManager
 
@@ -78,7 +78,6 @@ class TestSupervisorParsing:
         assert v.verdict == "done" and "监管者不可用" in v.error
 
     def test_timeout_fails_open(self, monkeypatch):
-        import agent.supervisor as sup
         s = Supervisor(llm=FakeJudge(_v("continue", "x", "y")),
                        config={"enabled": True, "timeout": 0.01, "model": ""})
 

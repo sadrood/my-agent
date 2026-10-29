@@ -1,5 +1,4 @@
 """delegate 工具测试：外部引擎委托（custom 真跑/不可用报错/嵌套上限）。"""
-import pytest
 
 from tools.delegate import DelegateTool
 

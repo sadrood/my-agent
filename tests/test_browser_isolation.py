@@ -2,7 +2,6 @@
 import threading
 import time
 
-import pytest
 
 from tools.browser import BrowserTool
 

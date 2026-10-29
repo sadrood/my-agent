@@ -1,7 +1,6 @@
 """
 流式输出测试：LLM 流式事件解析 + Executor 流式循环。
 """
-import json
 
 from agent.executor import Executor
 from agent.approval import ApprovalPolicy
@@ -268,7 +267,6 @@ class TestExecutorStreamLoop:
 
     def test_llm_seconds_excludes_retry_backoff(self):
         """连接重试的退避等待是空等，不该算进模型耗时（t0 在循环内重置）。"""
-        import time
 
         from agent.metrics import RunMetrics
 

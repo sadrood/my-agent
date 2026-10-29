@@ -167,7 +167,7 @@ class TestPreambleAndCommands:
         monkeypatch.setattr(tool, "_run", fake_run)
         out = tool.execute("usespace own")
         assert out.success
-        assert f'"my-agent-conv-abc"' in calls["body"], "own 要解析成本会话自己的空间名"
+        assert '"my-agent-conv-abc"' in calls["body"], "own 要解析成本会话自己的空间名"
         data = json.load(open(tool._state_path(), encoding="utf-8"))
         assert data["active"] == "my-agent-conv-abc"
 

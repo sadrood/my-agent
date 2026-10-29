@@ -1,8 +1,6 @@
 """人机验证识别：命中就交给人，别让 agent 硬试验证码空转。"""
-import pytest
 
 from tools import human_check
-from tools.base import ToolResult
 from tools.browser import BrowserTool
 
 

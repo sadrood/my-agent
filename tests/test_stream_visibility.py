@@ -1,7 +1,5 @@
 """实时输出（terminal 逐行 / delegate 子 agent 片段）与事件渲染：CLI 与面板都要看得见。"""
-import os
 
-import pytest
 
 from agent.executor import STREAM_TOOLS, Executor, stream_label
 from tools.base import BaseTool, ToolResult

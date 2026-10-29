@@ -222,7 +222,6 @@ class MCPClient:
     def connect_sse(self, server_name: str, url: str, headers: dict = None) -> bool:
         """通过 SSE 连接 MCP 服务器（实验性）。"""
         try:
-            import urllib.request
 
             self._servers[server_name] = {
                 "type": "sse",
@@ -235,7 +234,7 @@ class MCPClient:
             }
             
             print(f"[MCP] 已连接 SSE 服务器 '{server_name}': {url}")
-            print(f"[MCP] SSE 模式为实验性功能，工具发现和调用可能有限。")
+            print("[MCP] SSE 模式为实验性功能，工具发现和调用可能有限。")
             return True
             
         except Exception as e:

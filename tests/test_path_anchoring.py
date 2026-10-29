@@ -75,7 +75,6 @@ class TestConfigPathsAreAnchored:
         """browser.py 曾有一份自己的实现，现在必须是同一个函数（一处真相）。"""
         from tools import browser as browser_mod
         assert browser_mod._resolve_under_root("./x") == resolve_under_root("./x")
-        assert browser_mod.PROJECT_ROOT == REPO
 
 
 class TestDriftedLaunchInSubprocess:

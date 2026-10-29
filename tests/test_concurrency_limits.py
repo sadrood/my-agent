@@ -2,7 +2,6 @@
 import threading
 import time
 
-import pytest
 
 from agent.approval import ApprovalPolicy
 from agent.executor import Executor

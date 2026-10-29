@@ -1,7 +1,6 @@
 """
 环境自检（--doctor）测试。
 """
-import pytest
 
 import agent.doctor as doc
 

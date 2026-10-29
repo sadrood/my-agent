@@ -2,7 +2,6 @@
 import base64
 import os
 
-import pytest
 
 from tools.base import ToolResult, hoist_inline_payload, truncate_output
 from tools.tool_manager import ToolManager

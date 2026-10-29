@@ -10,7 +10,7 @@ import threading
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 from config import OCR_CONFIG, resolve_under_root
 

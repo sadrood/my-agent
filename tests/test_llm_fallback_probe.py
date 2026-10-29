@@ -5,7 +5,6 @@
 """
 import time
 
-import pytest
 
 import models.llm as llm_mod
 

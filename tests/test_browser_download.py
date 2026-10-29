@@ -1,7 +1,6 @@
 """browser 的 download 命令：点击触发下载、落盘、同名不覆盖、失败可读。"""
 import os
 
-import pytest
 
 from config import BROWSER_CONFIG
 from tools.base import ToolResult

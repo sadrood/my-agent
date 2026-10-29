@@ -4,7 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 #: 人类表达"放行"的措辞（命中任一即可，但需先过否定词检查）
 _ALLOW_PHRASES = (

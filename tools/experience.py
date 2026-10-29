@@ -47,7 +47,7 @@ def _clear_stale_lock(repo_dir: str) -> None:
     """清掉**残留**的 `.git/index.lock`（只清超过 5 分钟的，新鲜的留着）。"""
     lock = os.path.join(repo_dir, ".git", "index.lock")
     try:
-        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > 300:
+        if os.path.exists(lock) and _time.time() - os.path.getmtime(lock) > 300:
             os.remove(lock)
     except OSError:
         pass
@@ -83,7 +83,7 @@ def _git(args: List[str], cwd: str, check: bool = True) -> Tuple[int, str]:
         last_rc, last_out = r.returncode, out.strip()
         if attempt == 2:
             _clear_stale_lock(cwd)          # 可能是超时被杀留下的残留锁
-        time.sleep(0.4 * (attempt + 1))
+        _time.sleep(0.4 * (attempt + 1))
     if check:
         raise RuntimeError(
             f"{last_out[:400]}\n（重试多次仍被 git index.lock 挡住：可能有另一个 "

@@ -13,7 +13,7 @@ from models.prompts import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_PROMPT_TEMPLATE
 from tools.tool_manager import ToolManager
 from tools.intent_detector import get_intent_detector
 from config import (
-    VISION_CONFIG, MCP_CONFIG, APPROVAL_CONFIG,
+    MCP_CONFIG, APPROVAL_CONFIG,
     GUARDIAN_CONFIG, ROLLOUT_CONFIG, INSTRUCTIONS_CONFIG,
     SNAPSHOT_CONFIG, TEST_CONFIG, CHECKPOINT_CONFIG, REPOMAP_CONFIG,
     SESSION_CONFIG, SKILLS_CONFIG, RUN_LOG_CONFIG,
@@ -806,7 +806,6 @@ class Agent:
         print_stage("执行计划", use_rich=self.config.verbose)
         replan_count = 0
         step_retry_count = 0
-        page_screenshot_b64 = ""
         vision_feedback = ""
         tool_usage = {}          # 工具使用统计（用于经验记录）
         errors_collected = []    # 收集所有错误（用于失败模式学习）
@@ -895,7 +894,7 @@ class Agent:
 
                     # 如果是 see 操作，保存截图 base64 和分析结果供下一轮使用
                     if result.get("action") == "see":
-                        page_screenshot_b64 = result.get("screenshot_base64", "")
+                        result.get("screenshot_base64", "")
                         vision_feedback = result.get("vision_analysis", "")
                         print_info(f"视觉分析: {vision_feedback[:200]}", style="info", use_rich=self.config.verbose)
 
@@ -935,7 +934,6 @@ class Agent:
             # 成功 → 下一步
             if step_success:
                 step_retry_count = 0
-                page_screenshot_b64 = ""
                 vision_feedback = ""
                 self.state.current_step += 1
                 continue
@@ -976,7 +974,7 @@ class Agent:
         # ================================================================
         # 自我进化：保存经验 + 更新策略库
         # ================================================================
-        failed_steps = [s for s in self.memory.step_history if s.get("status") == "failed"]
+        [s for s in self.memory.step_history if s.get("status") == "failed"]
         task_success = len(self.memory.get_failed_steps()) == 0
 
         # 写入侧质量门槛：一句话问答（"你能做什么""列出前 3 个文件"）不值得沉淀——这类占了库里的 37%，召回时只会挤掉真正有用的经验。判断在 Memory 里，失败的一律照记（失败模式靠它）。
@@ -1056,7 +1054,7 @@ class Agent:
         # 追踪工具使用
         tool_used = result.get("tool", "")
         if tool_used:
-            tool_usage_key = f"_act_tool_{tool_used}"  # dummy，实际在调用处统计
+            pass  # dummy，实际在调用处统计
         return result
 
     def _observe(self, result: dict, step_idx: int):

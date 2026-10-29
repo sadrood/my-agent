@@ -1476,6 +1476,7 @@ def _run_agent_worker(goal: str, kwargs: dict = None, side_of: str = ""):
         if is_side:
             try:
                 from agent.session import SessionStore
+                store = SessionStore()
                 summary = (result_text or "")[:500]
                 # 用 append_messages：读→追加→写在 session 层**同一把锁**里完成，不再由调用方分两步做（中间会被主 Agent 的全量重写切进去）。
                 store.append_messages(main_id, [{

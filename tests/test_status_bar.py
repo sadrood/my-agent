@@ -1,8 +1,6 @@
 """
 TUI 常驻状态栏测试：渲染内容 + turn_start 事件接线（FakeLLM，无网络）。
 """
-import sys
-from io import StringIO
 
 import pytest
 

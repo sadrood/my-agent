@@ -312,7 +312,6 @@ def run_appcontainer(command: str, workspace: str,
 
     ctypes = api["ctypes"]
     wintypes = api["wintypes"]
-    userenv = api["userenv"]
     kernel32 = api["kernel32"]
 
     out_path = os.path.join(workspace, _STDOUT_FILE)
@@ -437,7 +436,6 @@ def _open_inherit_handle(api, path: str, write: bool):
     """打开文件作为容器内进程的 std 流，返回 (可继承句柄, fd)。
     句柄必须设置 HANDLE_FLAG_INHERIT，否则子进程拿到无效 std 句柄。"""
     import msvcrt
-    ctypes = api["ctypes"]
     kernel32 = api["kernel32"]
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC if write else os.O_RDONLY
     fd = os.open(path, flags, 0o600)

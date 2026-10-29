@@ -4,7 +4,6 @@
 问题挡在提交前。也顺手挡掉不可见字符/编码损坏。"""
 import os
 
-import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", "output", "memory",

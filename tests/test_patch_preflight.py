@@ -4,7 +4,6 @@
 import os
 import subprocess
 
-import pytest
 
 from tools.patch import EditTool
 

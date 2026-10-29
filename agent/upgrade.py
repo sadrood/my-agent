@@ -14,7 +14,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from config import UPGRADE_CONFIG, resolve_under_root
 

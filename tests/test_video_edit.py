@@ -2,7 +2,6 @@
 重点覆盖：命令构造正确性、运镜参数、concat 回退、配音补齐逻辑。"""
 import json
 import os
-import subprocess
 
 import pytest
 
@@ -539,7 +538,6 @@ class TestKenburnsBatchCleanup:
 
     def test_partial_outputs_are_cleaned(self, tmp_path, monkeypatch, fake_ffmpeg):
         from tools.video_edit import VideoEditTool as _T
-        import models.video_edit as ve
 
         imgs = [touch(tmp_path / f"{i}.png") for i in range(3)]
         made = []

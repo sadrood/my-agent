@@ -1,7 +1,6 @@
 """MCP Server 模块（借鉴同类实现的 mcp-server 模式）。"""
 from typing import List
 
-from config import MCP_CONFIG
 
 
 # : `run_agent` 允许宿主请求的最高沙箱等级。:: 为什么必须在**服务端**夹取：`danger-full-access` 是唯一能解锁硬黑名单的取值 ——: `agent/approval.py` 的 `decide()` 在。

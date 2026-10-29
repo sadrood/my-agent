@@ -1,6 +1,5 @@
 """浏览器工具的探活与点击兜底回归（用假对象，不启动真浏览器）。
 直接抛到外层 except，**role 兜底永远执行不到**（图标按钮就该走那条）。"""
-import pytest
 
 from tools.browser import BrowserTool
 

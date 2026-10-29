@@ -1,5 +1,4 @@
 """桌面坐标口径：屏幕绝对坐标（逻辑像素）+ physical=true 时的 DPI 换算。"""
-import pytest
 
 import tools.computer_use as cu
 from tools.computer_use import DesktopTool

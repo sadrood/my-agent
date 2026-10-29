@@ -1,5 +1,4 @@
 """批次1 修复的回归测试：安全网失效与静默错误。"""
-import pytest
 
 from tools.base import ToolResult
 from tools.mcp_client import MCPTool

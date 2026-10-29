@@ -274,7 +274,7 @@ def _cap_markdown(pieces: List[str], limit: int = MAX_REPLIES_PER_MESSAGE) -> Li
     limit = max(1, int(limit))
     if len(pieces) <= limit:
         return pieces
-    dropped_chars = sum(len(p) for p in pieces[limit:])
+    sum(len(p) for p in pieces[limit:])
     kept = pieces[:limit]
     kept[-1] = f"{kept[-1]}{_MD_TRUNCATED}"
     return kept
@@ -1163,7 +1163,6 @@ class QQBotBridge:
                     return ""
 
             path = await asyncio.to_thread(_synth)
-            raw = ""
             if not path or not os.path.exists(path):
                 return False
         try:

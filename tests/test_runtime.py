@@ -2,9 +2,7 @@
 外部 Agent Runtime 测试：custom 命令桥接事件、停止、错误处理。
 """
 import os
-import sys
 
-import pytest
 
 from agent.runtime import run_external, detect_available, _build_argv
 

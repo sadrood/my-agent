@@ -4,13 +4,13 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from config import APPROVAL_CONFIG, resolve_under_root
 from agent.execpolicy import ExecPolicy
 from agent.permission_rules import PermissionRules
-from tools.base import SANDBOX_LEVELS, RISK_LEVELS, ApprovalRequest
+from tools.base import SANDBOX_LEVELS, ApprovalRequest
 
 # ============================================================
 # 安全关键文件（自我修改防线）

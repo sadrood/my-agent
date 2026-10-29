@@ -7,7 +7,6 @@ import asyncio
 import html
 import re
 
-import pytest
 
 from agent.tui import AgentTUI, _compact_args
 

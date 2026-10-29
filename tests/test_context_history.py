@@ -1,6 +1,5 @@
 """回归测试：会话历史不能丢最后一条（否则模型会回去答上一题）。
 本轮 goal"。该假设只在**计划模式**成立（run() 开头就 add_message(goal)）；"""
-import pytest
 
 from agent.agent import Agent, AgentConfig
 from agent.memory import Memory

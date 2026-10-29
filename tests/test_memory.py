@@ -6,8 +6,7 @@ import tempfile
 import pytest
 
 from agent.memory import (
-    Memory, MemoryEntry, ExperienceEntry,
-    FailurePattern, StrategyEntry,
+    Memory, ExperienceEntry,
 )
 
 

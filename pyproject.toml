@@ -1,0 +1,23 @@
+# 工具配置（依赖仍以 requirements.txt 为准；本文件不做打包声明）
+# 只启用"一定是 bug"的静态检查，不做风格改造。
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+exclude = [
+  ".venv", "node_modules", "desktop", "packaging/build", "packaging/dist",
+  "tools/local", "skills", "xianyu_smart_reply",
+  "output", "memory", "rollouts", "screenshots", "downloads",
+  "generated_audio", "generated_images", "generated_videos",
+]
+
+[tool.ruff.lint]
+# F = Pyflakes：未使用导入、未定义名、重复定义、未使用变量、f-string 无占位符
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里常有"为了让脚本能跑"的中间赋值
+"tests/*" = ["F841"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

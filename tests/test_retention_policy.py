@@ -5,7 +5,6 @@
 """
 import os
 
-import pytest
 
 from agent.retention import list_by_mtime, prune_oldest
 from tools.browser import BrowserTool

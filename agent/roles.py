@@ -1,6 +1,6 @@
 """Agent 角色定义模块。"""
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 
 @dataclass

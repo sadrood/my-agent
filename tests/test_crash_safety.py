@@ -1,6 +1,5 @@
 """被强杀也不丢：运行日志、关窗兜底、会话增量落盘、从 rollout 恢复。"""
 import json
-import os
 import sys
 from types import SimpleNamespace
 

@@ -1,8 +1,6 @@
 """
 EditTool（精确编辑）与 Git 快照测试。
 """
-import os
-import shutil
 
 import pytest
 

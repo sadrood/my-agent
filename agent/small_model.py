@@ -2,7 +2,7 @@
 （例如会话标题退回"第一条用户消息截断"）。小模型坏了绝不能挡住主流程。"""
 import re
 import threading
-from typing import List, Optional
+from typing import List
 
 from config import SMALL_MODEL_CONFIG
 

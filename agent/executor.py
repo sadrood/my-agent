@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import time
-import base64
 import itertools
 import threading
 from typing import Callable, Optional
@@ -28,7 +27,7 @@ from models.prompts import (
 )
 from tools.base import ToolResult
 from tools.tool_manager import ToolManager
-from config import VISION_CONFIG, TOOL_CONFIG, APPROVAL_CONFIG, COMPACT_CONFIG, TEST_CONFIG
+from config import VISION_CONFIG, TOOL_CONFIG, COMPACT_CONFIG, TEST_CONFIG
 
 logger = logging.getLogger(__name__)
 

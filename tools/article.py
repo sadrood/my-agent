@@ -1,6 +1,6 @@
 """文章工坊工具（article）：多模型互审写文章。"""
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
 

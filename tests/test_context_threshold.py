@@ -13,7 +13,6 @@ def _make_llm():
 
 def test_fetch_context_window_from_gateway(monkeypatch):
     """从网关 /models 读取 context_length，并按 (base, model) 缓存。"""
-    from models.llm import LLM
     llm = _make_llm()
     calls = []
 
@@ -45,7 +44,6 @@ def test_fetch_context_window_from_gateway(monkeypatch):
 
 def test_compact_threshold_ratio_and_explicit(monkeypatch):
     """阈值：显式 COMPACT_TOKEN_THRESHOLD >0 优先；否则窗口×window_ratio。"""
-    from models.llm import LLM
     llm = _make_llm()
 
     monkeypatch.setitem(COMPACT_CONFIG, "token_threshold", 0)
@@ -59,7 +57,6 @@ def test_compact_threshold_ratio_and_explicit(monkeypatch):
 
 def test_compact_threshold_fallback_when_window_unknown(monkeypatch):
     """窗口查询失败时回退保守兜底（不回到过早压缩的小数字）。"""
-    from models.llm import LLM
     from models import model_catalog
     llm = _make_llm()
     monkeypatch.setitem(COMPACT_CONFIG, "token_threshold", 0)
@@ -70,7 +67,6 @@ def test_compact_threshold_fallback_when_window_unknown(monkeypatch):
 
 def test_compact_threshold_uses_catalog_when_gateway_silent(monkeypatch):
     """网关不报窗口时用能力目录（实测覆盖/目录），不再直接吃 240K 兜底。"""
-    from models.llm import LLM
     from models import model_catalog
     llm = _make_llm()
     monkeypatch.setitem(COMPACT_CONFIG, "token_threshold", 0)

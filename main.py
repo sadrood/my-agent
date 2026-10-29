@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Optional
 from agent import Agent, AgentConfig, Team
 from tools import ToolManager
 from agent.memory import Memory
-from config import LOG_CONFIG
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -775,7 +774,6 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             continue
         if cmd == "upgrade":
             # 自我升级：只有人在提示符里能触发（模型没有提权/改动代码的工具）
-            from agent.upgrade import UpgradeError
             from agent.upgrade import main as upgrade_main
             c.print()
             if cmd_args.strip() in ("check", "--check"):
@@ -986,7 +984,6 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
 
 def list_tools():
     """列出全部工具（含 JSON Schema 摘要）。"""
-    import json
     tm = ToolManager()
     print(f"已注册 {len(tm.list_tools())} 个工具:\n")
     for schema in tm.list_openai_schemas():

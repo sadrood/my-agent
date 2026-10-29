@@ -1,7 +1,6 @@
 """插件安装器测试（InstallerTool：技能包 / MCP 插件）。
 全部不依赖网络。"""
 import json
-import os
 
 import pytest
 

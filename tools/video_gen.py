@@ -32,7 +32,7 @@ class VideoGenTool(BaseTool):
     def description(self) -> str:
         from config import VIDEO_GEN_CONFIG
         max_wait = int(float(VIDEO_GEN_CONFIG.get("max_wait", 240)))
-        default_sec = VIDEO_GEN_CONFIG.get("seconds", "5")
+        VIDEO_GEN_CONFIG.get("seconds", "5")
         return (
             "文生视频工具（异步任务）。根据文字描述生成短视频（mp4），完成后"
             "自动下载到本地并返回文件路径。\n"

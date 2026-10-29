@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
 # 延迟导入 SDK（关键性能优化）： SDK 的 __init__ 会级联导入大量类型定义（types.beta / graders / eval 等），实测耗时 ~1.7s，占 CLI 启动总耗时的 84%。
 if TYPE_CHECKING:   # 仅类型检查期提供名字，运行时不导入
-    from openai import OpenAI
+    pass
 
 from config import LLM_CONFIG
 

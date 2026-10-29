@@ -1,6 +1,5 @@
 """Guardian 安全审校模块（借鉴同类实现的 guardian / guardian-v2 设计）。"""
 from dataclasses import dataclass
-from typing import Optional
 
 from config import GUARDIAN_CONFIG
 from tools.base import ApprovalRequest, RISK_LEVELS

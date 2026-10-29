@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Guardian 人工放行（授权）测试。"""
-import time
 
 import pytest
 

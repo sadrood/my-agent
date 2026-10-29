@@ -638,7 +638,7 @@ class EgoBrowserTool(BrowserTool):
 
     def _status(self) -> ToolResult:
         """后端自检：CLI/node/浏览器路径 + 浏览器连接状态。"""
-        lines = [f"后端: ego（Edge 内核，共享浏览器）",
+        lines = ["后端: ego（Edge 内核，共享浏览器）",
                  f"CLI: {self._cli or '（未找到）'}",
                  f"浏览器: {self._chrome or '（未找到）'}",
                  f"任务空间: {self._active_space()}"

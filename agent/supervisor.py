@@ -4,7 +4,6 @@ import json
 import re
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 from config import SUPERVISOR_CONFIG
 

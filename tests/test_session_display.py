@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """会话历史显示测试。"""
-import pytest
 
 from main import _print_transcript
 

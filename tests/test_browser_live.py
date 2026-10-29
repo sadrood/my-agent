@@ -1,7 +1,6 @@
 """浏览器实时画面：限帧/只留最新帧的逻辑、工具侧抓帧器、dashboard 的 SSE 端点。"""
 import json
 import threading
-import time
 
 import pytest
 

@@ -2,7 +2,6 @@
 内置工具 v2 接口测试：schema、execute_json、审批元数据。
 """
 import os
-import json
 
 from tools.terminal import TerminalTool
 from tools.file import FileTool
@@ -87,31 +86,33 @@ class TestBrowserTool:
     def test_profile_dir_anchored_to_project_root_not_cwd(self, monkeypatch, tmp_path):
         """回归：换个 cwd 启动不能得到一份全新的空 profile。"""
         from tools import browser as browser_mod
+        from config import PROJECT_ROOT
 
         monkeypatch.setitem(browser_mod.BROWSER_CONFIG, "profile_dir",
                             "./memory/browser_profile")
         monkeypatch.chdir(tmp_path)                  # 模拟从别的目录启动
         b = browser_mod.BrowserTool()
-        assert b._profile_dir == os.path.join(browser_mod.PROJECT_ROOT,
+        assert b._profile_dir == os.path.join(PROJECT_ROOT,
                                              "memory", "browser_profile")
         assert str(tmp_path) not in b._profile_dir, "不该跟着 cwd 漂移"
 
     def test_absolute_profile_dir_is_respected(self, monkeypatch, tmp_path):
         """显式配置绝对路径时原样使用（自定义部署依赖这点）。"""
         from tools import browser as browser_mod
+        from config import PROJECT_ROOT
 
         target = str(tmp_path / "custom_profile")
         monkeypatch.setitem(browser_mod.BROWSER_CONFIG, "profile_dir", target)
-        monkeypatch.chdir(browser_mod.PROJECT_ROOT)
+        monkeypatch.chdir(PROJECT_ROOT)
         assert browser_mod.BrowserTool()._profile_dir == target
 
     def test_relative_screenshot_dir_anchored_to_root(self, monkeypatch, tmp_path):
         """截图目录同样锚定项目根（否则截图会散落到启动目录）。"""
-        from tools import browser as browser_mod
+        from config import PROJECT_ROOT
 
         monkeypatch.chdir(tmp_path)
         b = BrowserTool(screenshot_dir="./shots")
-        assert b._screenshot_dir == os.path.join(browser_mod.PROJECT_ROOT, "shots")
+        assert b._screenshot_dir == os.path.join(PROJECT_ROOT, "shots")
 
     def test_absolute_screenshot_dir_is_respected(self, tmp_path):
         assert BrowserTool(screenshot_dir=str(tmp_path))._screenshot_dir == str(tmp_path)
@@ -242,7 +243,6 @@ class TestTerminalBackground:
         return m.group(0)
 
     def test_background_start_list_kill(self):
-        import time
         t = TerminalTool()
         job_id = self._start_job(t)
         try:

@@ -4,7 +4,6 @@
 import os
 import platform
 
-import pytest
 
 from tools.terminal_session import TerminalSession, TerminalSessionManager
 

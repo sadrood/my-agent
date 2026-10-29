@@ -279,7 +279,7 @@ class DeepResearcher:
                 {"role": "user", "content": (
                     f"研究主题: {topic}\n\n"
                     f"收集的资料:\n{sources_text[:6000]}\n\n"
-                    + (f"关键事实:\n" + "\n".join(f"- {af['fact']}" for af in all_facts[:30]) + "\n\n"
+                    + ("关键事实:\n" + "\n".join(f"- {af['fact']}" for af in all_facts[:30]) + "\n\n"
                        if all_facts else "")
                     + "请撰写结构化研究报告。"
                 )},

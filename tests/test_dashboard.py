@@ -177,7 +177,6 @@ def test_api_sessions_routes_exist():
 
 def test_api_session_create(tmp_path, monkeypatch):
     """POST /api/sessions：后端生成 conv-YYYYMMDD-hex 会话 id 并落盘。"""
-    import json
     from fastapi.testclient import TestClient
     import dashboard.server as srv
 
@@ -185,7 +184,6 @@ def test_api_session_create(tmp_path, monkeypatch):
         "agent.session.SESSION_CONFIG",
         {"dir": str(tmp_path / "sessions"), "max_sessions": 50},
     )
-    from agent.session import SessionStore
 
     client = TestClient(srv.app)
     r = client.post("/api/sessions", content="{}",
@@ -401,7 +399,6 @@ def test_api_rollback_route_and_flow(monkeypatch, tmp_path):
     """/api/rollback：合法 checkpoint 回滚成功；缺 commit / 坏 commit 拒绝。"""
     import json
     import subprocess
-    import pytest
     from fastapi.testclient import TestClient
     import dashboard.server as srv
 
@@ -450,9 +447,7 @@ def test_api_rollback_route_and_flow(monkeypatch, tmp_path):
 
 def test_api_diff_git_fallback(monkeypatch, tmp_path):
     """/api/diff：change_tracker 无记录（python/terminal 改的文件）时回退 git diff。"""
-    import json
     import subprocess
-    import pytest
     from fastapi.testclient import TestClient
     import dashboard.server as srv
 
@@ -546,7 +541,6 @@ def test_api_config_vision_get_and_set(monkeypatch):
 
 def test_api_config_test_vision(monkeypatch):
     """test-vision：成功回模型名+答案；失败回错误信息。"""
-    import json
     from fastapi.testclient import TestClient
     import dashboard.server as srv
 

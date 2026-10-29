@@ -145,7 +145,6 @@ class TestExecutionTimeout:
 
     def test_description_states_real_timeout(self):
         """description 承诺的超时秒数必须与实际配置一致（避免误导模型）。"""
-        from config import TOOL_CONFIG
         from tools.python import _timeout_seconds
         desc = make_tool().description
         assert str(int(_timeout_seconds())) in desc

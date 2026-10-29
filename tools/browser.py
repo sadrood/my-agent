@@ -16,7 +16,7 @@ from tools.browser_worker import BrowserWorkerMixin
 from tools.computer_use import ComputerUseMixin
 from tools import human_check
 from tools.intent_detector import get_intent_detector
-from config import BROWSER_CONFIG, PROJECT_ROOT, resolve_under_root
+from config import BROWSER_CONFIG, resolve_under_root
 
 # 持久 profile 里**纯遥测/缓存**的子目录：删掉不影响登录态（cookies/localStorage 在 Default/ 下），但会随每次浏览器启动各长几 MB。
 
@@ -43,7 +43,6 @@ def _prune_profile_dir(profile_dir: str, max_age_days: float = None,
                        max_total_mb: float = None) -> int:
     """清理持久 profile 里的遥测/缓存垃圾，返回释放的字节数。"""
     import shutil
-    from datetime import datetime
 
     max_age_days = float(BROWSER_CONFIG.get("profile_max_age_days", 7)
                          if max_age_days is None else max_age_days)

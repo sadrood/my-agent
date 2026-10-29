@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """小快模型（杂活专用）测试 —— 跑腿的活不占用主模型。
 小模型超时/报错/输出没法用时，一律退回原来的规则实现（第一条用户消息截断）。"""
-import json
-import os
 import shutil
 import tempfile
 

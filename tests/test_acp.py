@@ -1,8 +1,6 @@
 """
 ACP 客户端测试：用 fake ACP agent 脚本（模拟 session/update 帧）验证事件桥接。
 """
-import json
-import os
 import sys
 
 from agent.acp import ACPClient, run_acp_session

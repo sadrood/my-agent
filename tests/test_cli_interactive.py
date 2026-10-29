@@ -88,7 +88,6 @@ def test_sessions_before_goal_still_works(drive):
 
 def test_decode_error_does_not_kill_the_loop(drive):
     """Linux 粘贴撞上 UnicodeDecodeError：只作废本次输入，主循环必须继续（而不是进程退出）。"""
-    import codecs
     bad = UnicodeDecodeError("utf-8", b"\xe6", 0, 1, "invalid continuation byte")
     made = drive([bad, "/goal 解码失败之后还能用", "exit"])
     assert made.get("goal") == "解码失败之后还能用", "异常之后必须回到提示符继续工作"

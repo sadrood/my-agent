@@ -26,7 +26,6 @@ if sys.platform == "win32":
 
 from rich.console import Console
 from rich.theme import Theme
-from rich.style import Style
 from rich.text import Text
 from rich.markdown import Markdown
 from typing import Optional
@@ -108,11 +107,11 @@ def build_theme(colors: dict) -> Theme:
         "dim":         f"dim {colors['muted']}",
         "highlight":   f"bold {colors['highlight']}",
         "accent":      f"bold {colors['accent']}",
-        "title":       f"bold white",
+        "title":       "bold white",
         "subtitle":    f"bold {colors['accent']}",
         "step_num":    f"bold {colors['primary']}",
-        "step_name":   f"bold white",
-        "tool_name":   f"bold white",
+        "step_name":   "bold white",
+        "tool_name":   "bold white",
         "result_ok":   colors['success'],
         "result_fail": colors['error'],
         "progress":    f"bold {colors['accent']}",
@@ -255,11 +254,11 @@ def print_step_result(status: str, output: str = "", error: str = "", use_rich: 
     c = get_console(use_rich)
     if use_rich:
         if status == "completed":
-            c.print(f"  [success]✓ 完成[/success]")
+            c.print("  [success]✓ 完成[/success]")
         elif status == "failed":
-            c.print(f"  [error]✗ 失败[/error]")
+            c.print("  [error]✗ 失败[/error]")
         elif status == "continue":
-            c.print(f"  [accent]→ 继续[/accent]")
+            c.print("  [accent]→ 继续[/accent]")
         else:
             c.print(f"  [?] {status}")
 
@@ -763,7 +762,7 @@ def print_welcome(use_rich: bool = True, info: dict = None):
 
     rule = "[dim]" + "─" * 26 + "[/dim]"
     status_line = (
-        f"[bold white]Status:[/bold white] [success]Ready[/success]"
+        "[bold white]Status:[/bold white] [success]Ready[/success]"
         + ("[dim]（已恢复该对话记录）[/dim]" if restored else "")
     )
     body = "\n".join([
@@ -793,7 +792,7 @@ def print_goodbye(use_rich: bool = True):
     """打印退出信息。"""
     c = get_console(use_rich)
     if use_rich:
-        c.print(f"\n[muted]👋 再见，有需要随时找我～[/muted]\n")
+        c.print("\n[muted]👋 再见，有需要随时找我～[/muted]\n")
     else:
         c.print("\n再见！")
 

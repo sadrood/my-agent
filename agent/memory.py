@@ -5,7 +5,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 from agent.atomic_io import atomic_write_json
 from config import LEARN_CONFIG
@@ -944,7 +944,7 @@ class Memory:
         if not self.failure_patterns:
             return ""
 
-        task_kw = self._extract_keywords(goal)
+        self._extract_keywords(goal)
         relevant = []
         for fp in self.failure_patterns:
             # 匹配任务关键词

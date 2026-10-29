@@ -213,7 +213,7 @@ class SkillManager:
         if not skills:
             return ""
         matched = self.match(goal)
-        matched_names = {s.name for s in matched}
+        {s.name for s in matched}
 
         parts = ["## 可用技能（Skills）"]
         index_lines = []
@@ -520,7 +520,7 @@ class SkillPackManager:
         blocked: List[str] = []
 
         for root, dirs, fnames in os.walk(src, followlinks=False):
-            rel_root = os.path.relpath(root, src)
+            os.path.relpath(root, src)
             for d in dirs:
                 abs_d = os.path.join(root, d)
                 if os.path.islink(abs_d):

@@ -8,8 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 import tools.ego_browser as ego_mod
-from tools.base import ToolResult
-from tools.browser import BrowserTool
 from tools.ego_browser import SENTINEL, EgoBrowserTool, ego_available
 
 

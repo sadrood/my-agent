@@ -2,13 +2,11 @@
 import json
 import threading
 import time
-import queue
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from dataclasses import dataclass, field
 
 from agent.roles import (
-    AgentRole, ALL_ROLES, GENERALIST, REVIEWER,
-    MANAGER_ROLE_SELECTION_PROMPT,
+    AgentRole, ALL_ROLES, MANAGER_ROLE_SELECTION_PROMPT,
 )
 from config import TEAM_CONFIG
 from models.llm import LLM
@@ -450,7 +448,7 @@ class Team:
         def _run(st: SubTask):
             try:
                 results[st.id] = self._execute_subtask(st, context)
-            except BaseException as e:   # noqa: BLE001
+            except BaseException:   # noqa: BLE001
                 results[st.id] = ""
 
         timeout = TEAM_CONFIG.get("worker_timeout", 900)

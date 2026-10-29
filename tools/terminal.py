@@ -12,13 +12,12 @@ v2 变化：
 import os
 import subprocess
 import platform
-import tempfile
 import threading
 import time
 from typing import Any, Dict
 
 from tools.base import BaseTool, StreamPreview, ToolResult
-from tools.proc_util import kill_process_tree, new_process_group_kwargs
+from tools.proc_util import new_process_group_kwargs
 from tools.terminal_jobs import TerminalJobsMixin
 from tools.terminal_session import TerminalSessionManager
 

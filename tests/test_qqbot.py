@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from agent.qqbot import (ALLOWED_PRESETS, APPROVE_TIMEOUT, CHUNK_CHARS,
+from agent.qqbot import (ALLOWED_PRESETS, CHUNK_CHARS,
                          MAX_REPLIES_PER_MESSAGE, PASSIVE_REPLY_WINDOW_C2C,
-                         PASSIVE_REPLY_WINDOW_GROUP, QQBotBridge, QQBotConfig,
+                         QQBotBridge, QQBotConfig,
                          TASK_TIMEOUT, UserSession, _chunk, _chunks_capped,
                          _chunks_markdown)
 
