@@ -179,7 +179,13 @@ class TestSnapshot:
         assert hash2 and hash2 not in (hash1, head0)
 
         # 关键：checkpoint 不再推进 HEAD，也不出现在分支历史里
-        assert head() == head0
+        head_after = head()
+        assert head_after == head0, (
+            "checkpoint 推进了 HEAD：%s -> %s\n%s" % (
+                head0, head_after,
+                subprocess.run(["git", "log", "--all", "--oneline", "--decorate"],
+                               cwd=str(tmp_path), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace").stdout))
         log = subprocess.run(
             ["git", "log", "--oneline"], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", errors="replace",

@@ -478,7 +478,8 @@ class LLM:
         switches = 0
         max_switches = max(0, len(self.providers) - 1)
         while attempt <= self.max_retries:
-            t0 = time.time()
+            # 计时用 perf_counter：Windows 上 time.time() 精度只有 ~15ms，毫秒级响应会记成 0
+            t0 = time.perf_counter()
             try:
                 resp = self.client.chat.completions.create(**kwargs)
                 # "200 + 空 choices"本质是限流：必须在循环内拦下，才走得到等待与切端点
@@ -487,7 +488,7 @@ class LLM:
                 self.success_labels.add(self._active_meta()["label"])
                 self.auth_retry_left = self.auth_retry_max
                 self._notify_health(dict(self._active_meta(), event="call_ok",
-                                         seconds=round(time.time() - t0, 3)))
+                                         seconds=round(time.perf_counter() - t0, 3)))
                 return resp
             except _EmptyChoicesError as e:
                 # 网关把限流包成 200：按限流处理（等下一分钟窗口 → 备用端点），
@@ -767,9 +768,9 @@ class LLM:
 
         self._sanitize_kwargs(kwargs)  # 按已知参数限制清洗（400 自动降级）
 
-        t0 = time.time()
+        t0 = time.perf_counter()
         response = self._create_with_retry(kwargs)
-        self._record_usage(getattr(response, "usage", None), time.time() - t0)
+        self._record_usage(getattr(response, "usage", None), time.perf_counter() - t0)
         _choice, message = _first_choice_message(response)
         content = message.content
         return content if content is not None else ""
@@ -785,7 +786,7 @@ class LLM:
         tool_choice: str = "auto",
     ) -> LLMToolResponse:
         """原生 function calling 调用；tools 传 BaseTool.to_openai_schema() 的结果。"""
-        t0 = time.time()
+        t0 = time.perf_counter()
         payload = {
             "model": model or self.default_model,
             "messages": messages,
@@ -798,7 +799,7 @@ class LLM:
             payload["top_p"] = top_p
         self._sanitize_kwargs(payload)  # 按已知参数限制清洗（400 自动降级）
         response = self._create_with_retry(payload)
-        self._record_usage(getattr(response, "usage", None), time.time() - t0)
+        self._record_usage(getattr(response, "usage", None), time.perf_counter() - t0)
 
         choice, message = _first_choice_message(response)
 
@@ -878,12 +879,12 @@ class LLM:
         while attempt <= self.max_retries:
             try:
                 # 计时必须从**发起请求前**开始。之前 t0 取在 create() 返回之后。
-                t0 = time.time()
+                t0 = time.perf_counter()
                 stream = self.client.chat.completions.create(**kwargs)
                 self.success_labels.add(self._active_meta()["label"])
                 self.auth_retry_left = self.auth_retry_max
                 self._notify_health(dict(self._active_meta(), event="call_ok",
-                                         seconds=round(time.time() - t0, 3)))
+                                         seconds=round(time.perf_counter() - t0, 3)))
                 break
             except _openai_errors() as e:
                 last_error = e
@@ -990,7 +991,7 @@ class LLM:
             content = getattr(delta, "content", None)
             if content:
                 if first_token_ts is None:
-                    first_token_ts = time.time()
+                    first_token_ts = time.perf_counter()
                 yield StreamEvent(type="text_delta", text=content)
 
             # 推理增量（思考模式 / o 系列）。关键：字段存在即产出事件（text 可为空），thinking 服务要求下一轮请求回传该字段（空串也要带上），否则 400。
@@ -1000,7 +1001,7 @@ class LLM:
                 text = rc if rc is not None else r2
                 if text:
                     if first_token_ts is None:
-                        first_token_ts = time.time()
+                        first_token_ts = time.perf_counter()
                 yield StreamEvent(
                     type="reasoning_delta",
                     text=text or "",
@@ -1010,7 +1011,7 @@ class LLM:
             # 工具调用增量
             if delta.tool_calls:
                 if first_token_ts is None:
-                    first_token_ts = time.time()
+                    first_token_ts = time.perf_counter()
                 for tc in delta.tool_calls:
                     if tc.index is None:
                         continue
@@ -1026,7 +1027,7 @@ class LLM:
             if finish:
                 yield StreamEvent(type="done", finish_reason=finish)
 
-        elapsed = time.time() - t0
+        elapsed = time.perf_counter() - t0
         self._record_usage(
             final_usage,
             elapsed,

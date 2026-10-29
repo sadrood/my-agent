@@ -388,6 +388,22 @@ def _has_cjk_font():
                (r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\simhei.ttf"))
 
 
+def _ocr_has_chinese() -> bool:
+    """当前 OCR 后端能不能识别中文。
+
+    Windows OCR 的识别语言取决于系统装了哪些语言包：CI 只有 en-US，
+    图片里的中文会被整行丢掉——那不是代码坏了。
+    """
+    try:
+        engine = OcrEngine()
+        if engine.resolve_backend() != "windows":
+            return True                     # 其它后端按配置的语言包走
+        return any(str(l).lower().startswith("zh")
+                   for l in engine.languages_available())
+    except Exception:                       # noqa: BLE001
+        return False
+
+
 @pytest.mark.skipif(not ocr_available(), reason="本机没有可用的本地 OCR 后端")
 @pytest.mark.skipif(not _has_cjk_font(), reason="没有中文字体可用于造测试图")
 class TestRealOcr:
@@ -411,8 +427,10 @@ class TestRealOcr:
         res = OcrEngine().recognize(self._make(tmp_path))
         flat = res.text.replace(" ", "")
         assert "connectionrefused" in flat.lower(), res.text
-        assert "3次" in flat or "状态码" in flat, res.text
         assert res.engine and res.seconds >= 0
+        if not _ocr_has_chinese():
+            pytest.skip("OCR 引擎没有中文语言包：中文断言跳过（英文已识别）")
+        assert "3次" in flat or "状态码" in flat, res.text
 
     def test_tool_end_to_end(self, tmp_path):
         out = OcrTool().execute_json({"operation": "read", "path": self._make(tmp_path)})
