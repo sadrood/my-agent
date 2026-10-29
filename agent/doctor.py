@@ -225,11 +225,22 @@ def _check_llm(llm=None, timeout: int = 20) -> dict:
             "hint": "",
         }
     except Exception as e:
+        text = str(e)
+        low = text.lower()
+        if "429" in low or "quota" in low or "rate limit" in low or "tpm" in low or "rpm" in low:
+            hint = ("配额/限流，不是配置问题：等一会儿重试，或在 .env 配 LLM_FALLBACK_MODELS "
+                    "指向别的端点；免费档通常按分钟窗口恢复")
+        elif "401" in low or "invalid api key" in low or "unauthorized" in low:
+            hint = "key 无效：核对 .env 的 LLM_API_KEY 与 LLM_BASE_URL 是否配对（A 家的 key 打 B 家端点必然 401）"
+        elif "timeout" in low or "connect" in low or "resolve" in low:
+            hint = "连不上端点：确认网络可达；内网模型需在该内网内"
+        else:
+            hint = "检查 LLM_BASE_URL/LLM_API_KEY；不确定就先换一个已知可用的端点验证"
         return {
             "name": "主模型连通",
             "ok": False,
-            "message": f"调用失败: {str(e)[:120]}",
-            "hint": "检查 LLM_BASE_URL/LLM_API_KEY/网络可达性；内网模型需在该网络内",
+            "message": f"调用失败: {text[:120]}",
+            "hint": hint,
         }
 
 

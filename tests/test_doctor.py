@@ -2,6 +2,8 @@
 环境自检（--doctor）测试。
 """
 
+import pytest
+
 import agent.doctor as doc
 
 
@@ -452,3 +454,19 @@ class TestVisionFallbackReconciliation:
         expected = [i["model"] for i in doc._subsystem_endpoints()]
         r = doc._check_subsystem_models(fetch=lambda base, key, timeout=8.0: expected)
         assert r["ok"] is True
+
+
+@pytest.mark.parametrize("exc_text,expect", [
+    ("Error code: 429 - inference exceeds tpm/rpm limit", "配额"),
+    ("Error code: 401 - invalid api key", "key 无效"),
+    ("ConnectTimeout: connection timed out", "连不上"),
+])
+def test_llm_failure_hint_matches_cause(exc_text, expect):
+    """报错提示要指向真实原因：429 让人去查网络/key 只会浪费时间。"""
+    class BadLLM:
+        def chat(self, messages, **kwargs):
+            raise RuntimeError(exc_text)
+
+    r = doc._check_llm(llm=BadLLM())
+    assert r["ok"] is False
+    assert expect in r["hint"]
