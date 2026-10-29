@@ -34,6 +34,14 @@ class TestOriginAllowlist:
         assert acao != "*", "不得对任意来源放行"
         assert acao != "https://evil.example.com", "恶意来源必须被拒"
 
+    def test_file_origin_allowed_for_packaged_desktop(self, client):
+        """Electron 从 file:// 页面发 WebSocket 时 Origin 是 file://（不是 null）。"""
+        r = client.options("/api/state", headers={
+            "Origin": "file://",
+            "Access-Control-Request-Method": "GET",
+        })
+        assert r.headers.get("access-control-allow-origin") in ("file://", "*")
+
     def test_null_origin_allowed_for_packaged_desktop(self, client):
         """打包桌面端走 file://，Origin 是 null，必须保留可用。"""
         r = client.options("/api/state", headers={
@@ -60,7 +68,8 @@ class TestWebSocketOriginAllowlist:
     @pytest.mark.parametrize("origin", [
         "http://localhost:5173",        # Vite dev
         "http://127.0.0.1:8080",        # 浏览器版面板
-        "null",                         # 打包桌面端 file://
+        "null",                         # 打包桌面端（部分请求）
+        "file://",                      # Electron file:// 页面发 WS 时的 Origin
     ])
     def test_allowed_origin_accepted(self, client, origin):
         with client.websocket_connect("/ws", headers={"Origin": origin}):

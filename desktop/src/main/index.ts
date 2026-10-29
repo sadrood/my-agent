@@ -13,7 +13,8 @@ import * as fs from 'fs';
 import * as http from 'http';
 import type { WebContents } from 'electron';
 
-const BACKEND_PORT = 8090;
+// 端口可外部指定：同时跑两个实例或端口冲突时不必改代码
+const BACKEND_PORT = Number(process.env.MY_AGENT_BACKEND_PORT || '') || 8090;
 const BACKEND_BASE = `http://127.0.0.1:${BACKEND_PORT}`;
 /** 内嵌浏览器桥端口：Python Agent 经此控制侧栏 <webview>（仅监听 127.0.0.1） */
 const BROWSER_BRIDGE_PORT = 8091;
