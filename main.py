@@ -684,9 +684,19 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
             # 支持 /model name、/model name@base_url、/model name@base_url#api_key
             # （换端点必须能同时换 key：沿用主 key 打别家端点只会 401）
             model_name, base_url, api_key = parse_model_spec(cmd_args)
+            # 切换前的有效配置：探测失败时原样回滚
+            snap = (agent.llm.default_model, str(agent.llm.client.base_url),
+                    agent.llm.client.api_key)
             try:
                 info = agent.switch_model(model=model_name or None, base_url=base_url,
                                           api_key=api_key)
+                # 换端点最常见的失败是 key / 模型名不对：当场探一次，别等下一轮对话才炸
+                probe_err = agent.llm.probe()
+                if probe_err:
+                    agent.switch_model(model=snap[0], base_url=snap[1], api_key=snap[2])
+                    print_warning(f"模型不可用，已回滚到 {snap[0]}：{probe_err}",
+                                  use_rich=True)
+                    continue
                 # 持久化绑定：该对话从此记住这个模型（恢复时自动切回）
                 try:
                     msgs = [

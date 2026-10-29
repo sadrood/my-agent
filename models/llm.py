@@ -723,6 +723,24 @@ class LLM:
         except Exception:      # noqa: BLE001 — 提示失败不能影响重试
             pass
 
+    def probe(self, timeout: float = 15.0) -> str:
+        """对**当前端点**做一次最小请求：返回空串=可用，否则错误描述。
+
+        只打这一个端点，不走重试/备用链——切换临时模型时，我们要知道的是
+        "这个 key + 这个模型名 + 这个地址"行不行，而不是"备用链里有没有能用的"。
+        """
+        client = self.client.with_options(timeout=timeout)
+        try:
+            resp = client.chat.completions.create(
+                model=self.default_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=16,        # 不带 temperature：thinking 模型常只接受 1
+            )
+            _require_choices(resp)
+            return ""
+        except Exception as e:       # noqa: BLE001
+            return f"{type(e).__name__}: {e}"[:200]
+
     def chat(
         self,
         messages: list[dict],
