@@ -1,5 +1,5 @@
 # 按系统分开跑：静态检查在任何系统上都一样；测试要以 Windows 为准（桌面操控 /
-# AppContainer / Edge 路径都是 Windows 专属），Linux 先只报告不阻塞。
+# AppContainer / Edge 路径都是 Windows 专属）。
 name: ci
 
 on:
@@ -7,6 +7,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -21,7 +25,7 @@ jobs:
 
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,11 +38,26 @@ jobs:
       - name: 安装浏览器内核
         run: python -m playwright install chromium
       - name: 全量测试
-        run: python -m pytest tests -q
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests -q --tb=line -rf 2>&1 | tee pytest.log
+      # GitHub 的作业日志要登录才能看；失败用例名写成 annotation 才能被外部读到
+      - name: 失败摘要
+        if: failure()
+        shell: bash
+        run: |
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -gt 10 ] && break
+            echo "::error::${line//'%'/'%25'}"
+          done < <(grep -E '^(FAILED|ERROR) ' pytest.log || true)
 
   test-linux:
-    # 已知有一批 Windows 专属用例（桌面操控 / 沙箱 / Edge 路径）在 Linux 上会失败，
-    # 先用"只报告"收集差异；等清干净了去掉 continue-on-error 变成硬门禁。
+    # 一批 Windows 专属用例（桌面操控 / 沙箱 / Edge 路径）在 Linux 上会挂住，
+    # 跑到 30 分钟被取消、把整次 CI 标成失败。Linux 支持还没做，先只在手动触发时跑。
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 30
@@ -55,4 +74,17 @@ jobs:
         run: |
           python -m playwright install --with-deps chromium
       - name: 全量测试
-        run: python -m pytest tests -q
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest tests -q --tb=line -rf 2>&1 | tee pytest.log
+      - name: 失败摘要
+        if: failure()
+        shell: bash
+        run: |
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -gt 10 ] && break
+            echo "::error::${line//'%'/'%25'}"
+          done < <(grep -E '^(FAILED|ERROR) ' pytest.log || true)

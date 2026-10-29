@@ -114,7 +114,8 @@ def _clean(text) -> str:
 
 def main() -> int:
     out_path = sys.argv[1]
-    code = sys.stdin.read()
+    # 按字节读、按 UTF-8 解：环境里的代码页（cp936 / cp1252）不该决定代码文本怎么解
+    code = sys.stdin.buffer.read().decode("utf-8", "replace")
     writer = _CappedWriter(out_path, _CAPTURE_LIMIT)
     real_stdout = sys.stdout
     sys.stdout = writer
@@ -137,8 +138,9 @@ def main() -> int:
     for key in ("message", "error", "traceback"):
         if key in status:
             status[key] = _clean(status[key])
-    real_stdout.write(json.dumps(status, ensure_ascii=False))
-    real_stdout.flush()
+    # 状态行走 ASCII 字节：父进程按 UTF-8 读，任何代码页下都不会编不出去
+    real_stdout.buffer.write(json.dumps(status, ensure_ascii=True).encode("ascii"))
+    real_stdout.buffer.flush()
     return 0
 
 

@@ -289,13 +289,17 @@ class PythonTool(BaseTool):
     _RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_runner.py")
 
     def _runner_argv(self, out_path: str):
-        """起执行器的命令行；起不来时返回 None（打包版没有解释器可用）。"""
+        """起执行器的命令行；起不来时返回 None（打包版没有解释器可用）。
+
+        `-X utf8`：子进程 stdio 默认走系统代码页（中文 Windows 是 cp936、CI 是
+        cp1252），UTF-8 的代码文本和中文输出会被解成乱码甚至编不出去。
+        """
         if not getattr(sys, "frozen", False):
-            return [sys.executable, self._RUNNER, out_path]
+            return [sys.executable, "-X", "utf8", self._RUNNER, out_path]
         # PyInstaller 打包后 sys.executable 是应用自身：再拉一次会跑成后端进程
         exe = shutil.which("python") or shutil.which("python3")
         if exe and os.path.isfile(self._RUNNER):
-            return [exe, self._RUNNER, out_path]
+            return [exe, "-X", "utf8", self._RUNNER, out_path]
         return None
 
     def execute(self, input_str: str) -> ToolResult:

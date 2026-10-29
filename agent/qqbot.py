@@ -164,7 +164,9 @@ def _find_image_paths(text: str) -> List[str]:
     for m in re.finditer(r"[A-Za-z]:[\\/][^\s'\"<>|]+?\.(?:%s)" % "|".join(exts),
                          text, flags=re.I):
         _add(m.group(0))
-    for m in re.finditer(r"(?<![\w.])/[^\s'\"<>|]+?\.(?:%s)" % "|".join(exts),
+    # 盘符路径（D:/x.png）上一轮已收走；这里的 /x.png 只是它的尾巴。
+    # 只靠下面的 normpath 去重不够——是否重合取决于当前项目在哪个盘。
+    for m in re.finditer(r"(?<![\w.:])/[^\s'\"<>|]+?\.(?:%s)" % "|".join(exts),
                          text, flags=re.I):
         _add(m.group(0))
     # 纯文件名 / 相对路径：必须真的带分隔目录才算"路径"，

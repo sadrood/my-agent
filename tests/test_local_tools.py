@@ -142,6 +142,7 @@ class TestLocalToolsAreNotTracked:
 
         # 真机校验：该目录下的文件被 git 忽略（仓库存在时才检查）
         probe = os.path.join(root, "tools", "local", "_ignore_probe.py")
+        os.makedirs(os.path.dirname(probe), exist_ok=True)   # 新克隆里这个目录还不存在
         try:
             open(probe, "w", encoding="utf-8").write("# probe\n")
             r = subprocess.run(["git", "check-ignore", "-q", probe], cwd=root)
