@@ -180,12 +180,7 @@ class TestSnapshot:
 
         # 关键：checkpoint 不再推进 HEAD，也不出现在分支历史里
         head_after = head()
-        assert head_after == head0, (
-            "checkpoint 推进了 HEAD：%s -> %s\n%s" % (
-                head0, head_after,
-                subprocess.run(["git", "log", "--all", "--oneline", "--decorate"],
-                               cwd=str(tmp_path), capture_output=True, text=True,
-                               encoding="utf-8", errors="replace").stdout))
+        assert head_after == head0, f"checkpoint 推进了 HEAD：{head0} -> {head_after}"
         log = subprocess.run(
             ["git", "log", "--oneline"], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -201,8 +196,12 @@ class TestSnapshot:
 
         # 工作区仍有未提交改动（快照不推进 HEAD）→ 先清干净再验"无改动"语义
         subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "user commit"], cwd=str(tmp_path),
-                       capture_output=True)
+        # CI 上通常没有全局 git 身份：不显式给 -c user.*，这句提交会静默失败
+        commit = subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-m", "user commit"],
+            cwd=str(tmp_path), capture_output=True)
+        assert commit.returncode == 0, commit.stderr
         head1 = head()
         assert checkpoint(str(tmp_path), "noop") == head1     # 无改动 → 返回 HEAD
         assert len(list_snapshots(str(tmp_path))) == 2        # 且不新增快照
