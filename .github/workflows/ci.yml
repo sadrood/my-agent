@@ -1,0 +1,58 @@
+# 按系统分开跑：静态检查在任何系统上都一样；测试要以 Windows 为准（桌面操控 /
+# AppContainer / Edge 路径都是 Windows 专属），Linux 先只报告不阻塞。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: 安装浏览器内核
+        run: python -m playwright install chromium
+      - name: 全量测试
+        run: python -m pytest tests -q
+
+  test-linux:
+    # 已知有一批 Windows 专属用例（桌面操控 / 沙箱 / Edge 路径）在 Linux 上会失败，
+    # 先用"只报告"收集差异；等清干净了去掉 continue-on-error 变成硬门禁。
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: 安装浏览器内核与系统依赖
+        run: |
+          python -m playwright install --with-deps chromium
+      - name: 全量测试
+        run: python -m pytest tests -q

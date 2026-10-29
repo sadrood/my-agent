@@ -1681,6 +1681,12 @@ class Agent:
             # POSIX 上报真实登录 shell（terminal 工具用的就是它），别写死 "sh"
             shell="cmd.exe" if _system == "Windows" else os.environ.get("SHELL", "sh"),
         )
+        # 本机能力：模型不该把 Windows 专属能力当通用能力去试
+        try:
+            from agent.capabilities import describe as _describe_caps
+            system_prompt += "\n\n## 本机能力\n" + _describe_caps(self.tool_manager)
+        except Exception:                        # noqa: BLE001 — 探测失败不影响启动
+            pass
         # 注册了桌面操控工具时，附带使用指南（先感知再操作，避免盲点坐标）
         if self.tool_manager.get_tool("computer") is not None:
             from models.prompts import COMPUTER_USE_PROMPT_GUIDE
