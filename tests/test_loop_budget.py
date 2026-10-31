@@ -8,7 +8,7 @@ from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
 
 class TestTurnOutcome:
     def test_successful_new_call_is_progress(self):
-        assert TurnOutcome(tool_calls=1, succeeded=1).productive is True
+        assert TurnOutcome(tool_calls=1, succeeded=1, new_calls=1).productive is True
 
     def test_file_change_is_progress(self):
         assert TurnOutcome(files_changed=2).productive is True
@@ -52,15 +52,15 @@ class TestExtension:
     def test_progress_extends_the_budget(self):
         b = LoopBudget(base=3, extend=2, stall_limit=9, hard_cap=50)
         assert b.limit == 3
-        b.observe(TurnOutcome(succeeded=1))
+        b.observe(TurnOutcome(succeeded=1, new_calls=1))
         assert b.limit == 5 and b.extensions == 1
-        b.observe(TurnOutcome(succeeded=1))
+        b.observe(TurnOutcome(succeeded=1, new_calls=1))
         assert b.limit == 7 and b.extensions == 2
 
     def test_extension_respects_hard_cap(self):
         b = LoopBudget(base=3, extend=10, stall_limit=9, hard_cap=5)
         for _ in range(5):
-            b.observe(TurnOutcome(succeeded=1))
+            b.observe(TurnOutcome(succeeded=1, new_calls=1))
         assert b.limit == 5, "安全网不能被续期突破"
 
     def test_failed_new_attempts_do_not_extend(self):
@@ -72,7 +72,7 @@ class TestExtension:
     def test_hard_cap_zero_means_no_ceiling(self):
         b = LoopBudget(base=2, extend=3, stall_limit=9, hard_cap=0)
         for _ in range(10):
-            b.observe(TurnOutcome(succeeded=1))
+            b.observe(TurnOutcome(succeeded=1, new_calls=1))
         assert b.limit == 2 + 30, "0 = 不设上限，只由进展/停止条件决定"
 
     def test_infinite_mode_never_exhausts(self):
@@ -117,7 +117,7 @@ class TestStallDetection:
         b.observe(TurnOutcome(repeated=True))
         b.observe(TurnOutcome(repeated=True))
         assert b.spinning_turns == 2
-        b.observe(TurnOutcome(succeeded=1))          # 又往前走了
+        b.observe(TurnOutcome(succeeded=1, new_calls=1))   # 又往前走了
         assert b.spinning_turns == 0
         assert b.allow_next() is True
 
@@ -201,7 +201,7 @@ class TestStagnationWarning:
                        stagnation_limit=3)
         b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
         b.observe(TurnOutcome(tool_calls=1, failed=1, repeated=False))
-        b.observe(TurnOutcome(succeeded=1))          # 谷歌一次成功 → 清零
+        b.observe(TurnOutcome(succeeded=1, new_calls=1))   # 换了个新调用成功 → 清零
         assert b.stagnation_turns == 0
         assert b.stagnation_alarm() is False
 

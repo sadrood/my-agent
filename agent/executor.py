@@ -12,7 +12,7 @@ from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
 # 落盘文本的截断统一走 rollout 的 clip_*（上限可配：追踪文件是事后诊断依据）
 from agent.rollout import clip_result, clip_text
 # 动态轮数预算（有进展就续期、连续无进展提前停）——见模块 docstring
-from agent.loop_budget import LoopBudget, TurnOutcome, tool_signature
+from agent.loop_budget import LoopBudget, StallWatch, TurnOutcome, tool_signature
 from agent.compactor import Compactor
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
@@ -373,11 +373,7 @@ class Executor:
                 if not result.success and not blocked_reason:
                     errors.append(result.error)
 
-                result_text = result.output
-                if not result.success:
-                    result_text = f"执行失败: {result.error}" if result.error else "执行失败（无错误信息）"
-                if blocked_reason:
-                    result_text = f"被拦截: {blocked_reason}"
+                result_text = self._tool_message_text(result, blocked_reason)
 
                 messages.append({
                     "role": "tool",
@@ -497,6 +493,8 @@ class Executor:
         warned_at_extension = -1
         pending = TurnOutcome()          # 本轮产出摘要，下一轮开头结算
         prev_signature: tuple = ()       # 上一轮的调用签名，用于识别"原样重复"
+        seen_calls: set = set()          # 已跑过的"工具+参数"签名（重复调用不构成进展）
+        stall_watch = StallWatch()       # 打转/连续失败时先提醒模型，再让预算停
         # 完成度闸门配置（"让 agent 做完任务再结束"）：见下方最终答案分支
         completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
         completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
@@ -899,6 +897,21 @@ class Executor:
                 for i, tc in enumerate(batch)
             }
 
+            # 批内去重：模型并发探索时偶尔把同一个只读调用发两遍。同 (工具, 参数) 只真跑一次，
+            # 其余复用首个结果；写操作不在其列（is_parallel_safe 已排除）。
+            first_by_key: dict = {}
+            dedup_from: dict = {}            # 重复调用 id → 首个同参调用
+            unique = []
+            for tc in dispatch:
+                key = self._read_key(tc)
+                if key is not None and key in first_by_key:
+                    dedup_from[id(tc)] = first_by_key[key]
+                    continue
+                if key is not None:
+                    first_by_key[key] = tc
+                unique.append(tc)
+            dispatch = unique
+
             if dispatch and self._batch_parallelizable(dispatch):
                 # 并行：执行期间没有流式输出，先逐条告知在跑什么；配对靠 id，不依赖顺序
                 for tc in dispatch:
@@ -925,23 +938,25 @@ class Executor:
                                                  display_ids[id(tc)])
                     executed.append(self._execute_one_tool_call(
                         tc, goal, display_id=display_ids[id(tc)]))
-            # 把参数解析失败的调用按原顺序插回 executed，保证 zip 一一对应
-            if bad:
-                merged = []
-                for tc in batch:
-                    if id(tc) in bad:
-                        merged.append((ToolResult(success=False, output="",
-                                                  error=bad[id(tc)]), bad[id(tc)], 0.0))
-                    else:
-                        merged.append(executed.pop(0))
-                executed = merged
+            # 参数解析失败 / 同批去重的调用按原顺序并回结果，保证与 batch 一一对应
+            by_id = {id(tc): res for tc, res in zip(dispatch, executed)}
+            merged = []
+            for tc in batch:
+                if id(tc) in bad:
+                    merged.append((ToolResult(success=False, output="",
+                                              error=bad[id(tc)]), bad[id(tc)], 0.0))
+                elif id(tc) in dedup_from:
+                    merged.append(self._reused_result(by_id[id(dedup_from[id(tc)])]))
+                else:
+                    merged.append(by_id[id(tc)])
+            executed = merged
 
             for batch_i, (tc, (result, blocked_reason, seconds)) in enumerate(
                     zip(batch, executed), 1):
                 # 门控工具本轮被用到 → 续命（用到一次不会立刻被空闲回收）
                 self.tool_manager.note_tool_used(tc.name)
-                if id(tc) in bad:
-                    # 参数解析失败、未执行：header 在这里补，紧贴它自己的失败结果
+                if id(tc) in bad or id(tc) in dedup_from:
+                    # 参数解析失败 / 同批去重：派发阶段没打过 header，这里补，紧贴它自己的结果
                     self._emit_tool_call_display(event_sink, tc.name, tc.arguments,
                                                  display_ids[id(tc)])
                 # 进展信号（预算判定依赖它，所以不能只在 metrics 开启时才算）：文件被改动是最硬的"有进展"证据。
@@ -950,6 +965,12 @@ class Executor:
                     pending.files_changed += 1
                     if self._is_code_path(changed):
                         changed_code_paths.add(changed)
+                # 进展：首次出现的**成功**调用才算新信息（交替重复两个调用不会续期）
+                if result.success:
+                    call_sig = tool_signature([tc])[0]
+                    if call_sig and call_sig not in seen_calls:
+                        seen_calls.add(call_sig)
+                        pending.new_calls += 1
                 if result.success:
                     pending.succeeded += 1
                 elif not blocked_reason:
@@ -978,11 +999,7 @@ class Executor:
                 elif result.success:
                     last_success_idx = idx
 
-                result_text = result.output
-                if not result.success:
-                    result_text = f"执行失败: {result.error}" if result.error else "执行失败（无错误信息）"
-                if blocked_reason:
-                    result_text = f"被拦截: {blocked_reason}"
+                result_text = self._tool_message_text(result, blocked_reason)
 
                 if event_sink is not None:
                     try:
@@ -1010,6 +1027,18 @@ class Executor:
                     "tool_call_id": call_id,
                     "content": self._fold_result(result_text),
                 })
+                self._persist_messages(messages)
+
+            # 打转提醒：预算只负责"停"，模型看不到自己在重复——先告诉它，再谈停不停
+            nudge = stall_watch.observe(
+                pending.repeated,
+                tuple(tool_signature([tc for tc, (res, blocked, _s) in zip(batch, executed)
+                                      if not res.success and not blocked])),
+                errors[-1] if errors else "",
+            )
+            if nudge:
+                messages.append({"role": "user", "content": "[系统提示] " + nudge})
+                self._emit("stall_nudge", {"message": nudge})
                 self._persist_messages(messages)
 
         # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），"无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
@@ -1234,6 +1263,45 @@ class Executor:
         return (
             f"参数格式错误：工具 '{tc.name}' 的 arguments 不是合法 JSON，"
             f"无法解析（开头: {raw[:60]!r}）。请检查参数为合法 JSON 对象后重试。"
+        )
+
+    @staticmethod
+    def _tool_message_text(result, blocked_reason: str = "") -> str:
+        """回喂给模型的工具结果文本。
+
+        失败时**保留已产生的输出**：python 的半截 stdout、terminal 跑了一半的日志、
+        浏览器已加载的页面状态，都是模型下一步判断的依据；只回 error 等于逼它盲猜重试。
+        """
+        if blocked_reason:
+            return f"被拦截: {blocked_reason}"
+        output = str(getattr(result, "output", "") or "")
+        if result.success:
+            return output
+        error = str(getattr(result, "error", "") or "") or "未知错误"
+        head = f"执行失败: {error}"
+        return f"{head}\n{output}" if output.strip() else head
+
+    def _read_key(self, tc):
+        """只读调用的身份键（同批去重、判断"本轮是否读到新东西"）；非只读返回 None。"""
+        try:
+            if not self.tool_manager.is_parallel_safe(tc.name, tc.arguments):
+                return None
+            return tc.name + "|" + repr(sorted((tc.arguments or {}).items()))
+        except Exception:                            # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _reused_result(triple):
+        """同批重复调用的结果：复用首个结果，并说明来源（模型不会以为跑了两遍）。"""
+        result, blocked_reason, _seconds = triple
+        note = "（同一批里重复的调用，已复用首次结果）"
+        output = (str(result.output or "") + "\n" + note).strip() if result.output else note
+        return (
+            ToolResult(success=result.success, output=output, error=result.error,
+                       truncated=result.truncated, original_length=result.original_length,
+                       metadata=dict(getattr(result, "metadata", None) or {})),
+            blocked_reason,
+            0.0,
         )
 
     @staticmethod

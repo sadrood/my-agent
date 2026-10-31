@@ -12,15 +12,27 @@ class TurnOutcome:
     succeeded: int = 0
     failed: int = 0
     files_changed: int = 0
+    new_calls: int = 0              # 本轮首次出现的**成功**调用数（同签名此前跑过就不算）
     repeated: bool = False          # 本轮调用（名称+参数）与上一轮完全一致
     empty_response: bool = False    # 模型既没给答案也没调工具（上游偶发只回 reasoning）
 
     @property
     def productive(self) -> bool:
-        """能否续期：必须真的往前走了。"""
+        """有没有产出（用于展示）。续期判定用 meaningful，不认"成功但没新信息"。"""
         if self.repeated:
             return False
         return self.files_changed > 0 or self.succeeded > 0
+
+    @property
+    def meaningful(self) -> bool:
+        """真进展：改了文件，或出现了此前没跑过的成功调用。
+
+        "成功"本身太宽：交替重复两个读/查操作每轮都成功，预算就会一路续到硬上限。
+        同一签名只算一次——重复调用拿不到新信息。
+        """
+        if self.repeated:
+            return False
+        return self.files_changed > 0 or self.new_calls > 0
 
     @property
     def spinning(self) -> bool:
@@ -36,10 +48,12 @@ class TurnOutcome:
             bits.append("成功 %d" % self.succeeded)
         if self.failed:
             bits.append("失败 %d" % self.failed)
-        if self.productive:
+        if self.meaningful:
             bits.append("有进展")
         elif self.spinning:
             bits.append("打转")
+        elif self.succeeded:
+            bits.append("无新信息")
         return "、".join(bits) or "无操作"
 
 
@@ -136,9 +150,9 @@ class LoopBudget:
         return True
 
     def observe(self, outcome: TurnOutcome) -> None:
-        """结算一轮：有进展就续期并清零打转/停滞计数；否则累计。"""
+        """结算一轮：有真进展就续期并清零打转/停滞计数；否则累计。"""
         self.used += 1
-        if outcome.productive:
+        if outcome.meaningful:
             self.productive_turns += 1
             self.spinning_turns = 0
             self.stagnation_turns = 0
@@ -147,11 +161,11 @@ class LoopBudget:
                 self.limit = grew
                 self.extensions += 1
         else:
-            # 无进展（打转也算"无进展"的一种）→ 两个计数器都累计。 stagnation 与 spinning 的区别：spinning 只统计"原样重复/空回复"（真实空转）
+            # 无新进展（重读同一处 / 打转 / 换了做法但失败）→ 累计停滞；
+            # 只有原样重复与空回复才算"打转"，失败的新尝试仍给机会，只是不续期。
             self.stagnation_turns += 1
             if outcome.spinning:
                 self.spinning_turns += 1
-        # 其它情况（换了新做法但失败 / 被审批拦截）：既不续期也不计打转——给新尝试留机会，但预算不会因此变宽。
 
     # ------------------------------------------------------------
 
@@ -212,3 +226,44 @@ class LoopBudget:
             % (self.limit, self.extensions,
                self.hard_cap if self.hard_cap > 0 else "无")
         )
+
+
+@dataclass
+class StallWatch:
+    """打转提醒：预算负责"停"，这里负责先告诉模型一句。
+
+    模型看不到自己的重复——不提醒就只会把轮数耗完、然后被停掉。
+    `observe()` 返回空串表示这轮不用提醒；阈值处各触发一次，持续打转就按周期重复提醒。
+    """
+
+    repeat_after: int = 2           # 连续几轮原样重复后提醒
+    fail_after: int = 3             # 同一调用连续失败几轮后提醒
+    repeat_streak: int = 0
+    fail_streak: int = 0
+    last_fail_sig: Tuple[str, ...] = ()
+
+    def observe(self, repeated: bool, fail_sig: Sequence[str] = (),
+                error: str = "") -> str:
+        self.repeat_streak = self.repeat_streak + 1 if repeated else 0
+
+        sig = tuple(fail_sig or ())
+        if sig and sig == self.last_fail_sig:
+            self.fail_streak += 1
+        else:
+            self.fail_streak = 1 if sig else 0
+        self.last_fail_sig = sig
+
+        if (sig and self.fail_after > 0 and self.fail_streak >= self.fail_after
+                and self.fail_streak % self.fail_after == 0):
+            detail = f"（最后一次错误：{str(error)[:300]}）" if error else ""
+            return (
+                f"同一个工具调用已连续失败 {self.fail_streak} 次{detail}。"
+                "原样重试不会成功：先按错误信息修正参数，或换一种做法。"
+            )
+        if (self.repeat_after > 0 and self.repeat_streak
+                and self.repeat_streak % self.repeat_after == 0):
+            return (
+                f"你已经连续 {self.repeat_streak} 轮发出了完全相同的工具调用，结果也一样。"
+                "先说明当前卡在哪里，再换一种做法（换工具 / 换参数 / 先读错误信息），不要原样重试。"
+            )
+        return ""
