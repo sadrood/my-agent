@@ -48,6 +48,21 @@ def _sandbox_denied(outcome) -> bool:
     return any(marker in combined for marker in _SANDBOX_DENIED_MARKERS)
 
 
+#: 文本文件被按代码页解码的典型残渣（"锟斤拷" / U+FFFD）
+_MOJIBAKE_MARKERS = ("锟", "\ufffd", "ï¿½")
+
+
+def _encoding_hint(text: str) -> str:
+    """输出疑似乱码时补一句可行动提示：读文本文件该用 file 工具。"""
+    if not text:
+        return ""
+    if sum(text.count(m) for m in _MOJIBAKE_MARKERS) < 3:
+        return ""
+    return ("\n[提示] 输出疑似乱码：这多半是文本文件被按系统代码页解码了。"
+            "读文件内容请改用 file 工具的 read 操作；"
+            "terminal 适合执行命令，不适合直接打印 UTF-8 文件。")
+
+
 def _decode_console(data):
     """控制台输出解码：UTF-8 优先，失败回退 GBK（Windows cmd 中文）。"""
     try:
@@ -426,6 +441,7 @@ class TerminalTool(TerminalJobsMixin, BaseTool):
         output = outcome.stdout
         if outcome.stderr:
             output += "\n[stderr]\n" + outcome.stderr
+        output += _encoding_hint(output)
         success = outcome.returncode == 0 and not outcome.error
         if success:
             return ToolResult(success=True, output=output.strip() or "(无输出)", error="")
@@ -556,9 +572,10 @@ class TerminalTool(TerminalJobsMixin, BaseTool):
                 if any(p in combined for p in harmless_patterns):
                     success = True
 
+            output = (output.strip() or "(无输出)") + _encoding_hint(output)
             return ToolResult(
                 success=success,
-                output=output.strip() or "(无输出)",
+                output=output,
                 error="" if success else f"命令返回码: {result.returncode}",
             )
         except subprocess.TimeoutExpired:

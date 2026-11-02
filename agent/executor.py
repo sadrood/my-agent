@@ -12,7 +12,7 @@ from models.llm import LLM, LLMToolResponse, ToolCall, unwrap_raw_arguments
 # 落盘文本的截断统一走 rollout 的 clip_*（上限可配：追踪文件是事后诊断依据）
 from agent.rollout import clip_result, clip_text
 # 动态轮数预算（有进展就续期、连续无进展提前停）——见模块 docstring
-from agent.loop_budget import LoopBudget, StallWatch, TurnOutcome, tool_signature
+from agent.loop_budget import AnswerWatch, LoopBudget, StallWatch, TurnOutcome, tool_signature
 from agent.compactor import Compactor
 from models.prompts import (
     EXECUTOR_SYSTEM_PROMPT,
@@ -495,6 +495,8 @@ class Executor:
         prev_signature: tuple = ()       # 上一轮的调用签名，用于识别"原样重复"
         seen_calls: set = set()          # 已跑过的"工具+参数"签名（重复调用不构成进展）
         stall_watch = StallWatch()       # 打转/连续失败时先提醒模型，再让预算停
+        answer_watch = AnswerWatch()     # 问答类目标：信息够了就提醒收尾
+        question_goal = self._is_question_goal(goal)
         # 完成度闸门配置（"让 agent 做完任务再结束"）：见下方最终答案分支
         completion_gate = bool(TOOL_CONFIG.get("loop_completion_gate", True))
         completion_nudge_max = max(0, int(TOOL_CONFIG.get("loop_completion_nudges", 2)))
@@ -951,6 +953,7 @@ class Executor:
                     merged.append(by_id[id(tc)])
             executed = merged
 
+            read_chars = 0
             for batch_i, (tc, (result, blocked_reason, seconds)) in enumerate(
                     zip(batch, executed), 1):
                 # 门控工具本轮被用到 → 续命（用到一次不会立刻被空闲回收）
@@ -965,12 +968,15 @@ class Executor:
                     pending.files_changed += 1
                     if self._is_code_path(changed):
                         changed_code_paths.add(changed)
-                # 进展：首次出现的**成功**调用才算新信息（交替重复两个调用不会续期）
+                # 进展：首次出现的**成功**调用才算新信息（交替重复两个调用不会续期）；
+                # 同时累计只读输出量，供"已有足够信息"的收尾提醒判断。
                 if result.success:
                     call_sig = tool_signature([tc])[0]
                     if call_sig and call_sig not in seen_calls:
                         seen_calls.add(call_sig)
                         pending.new_calls += 1
+                    if self._read_key(tc) is not None:
+                        read_chars += len(str(result.output or ""))
                 if result.success:
                     pending.succeeded += 1
                 elif not blocked_reason:
@@ -1029,16 +1035,23 @@ class Executor:
                 })
                 self._persist_messages(messages)
 
-            # 打转提醒：预算只负责"停"，模型看不到自己在重复——先告诉它，再谈停不停
-            nudge = stall_watch.observe(
+            # 两类提醒：① 已有能回答的内容 → 别为衍生动作拖住收尾；② 打转/连败 → 换做法。
+            # 预算只负责"停"，这些是给模型的最后一句话；合并成一条消息，避免连续两条系统提示。
+            answer_nudge = answer_watch.observe(turn, question_goal, read_chars)
+            stall_nudge = stall_watch.observe(
                 pending.repeated,
                 tuple(tool_signature([tc for tc, (res, blocked, _s) in zip(batch, executed)
                                       if not res.success and not blocked])),
                 errors[-1] if errors else "",
             )
-            if nudge:
-                messages.append({"role": "user", "content": "[系统提示] " + nudge})
-                self._emit("stall_nudge", {"message": nudge})
+            notes = [n for n in (answer_nudge, stall_nudge) if n]
+            if notes:
+                messages.append({"role": "user",
+                                 "content": "\n".join("[系统提示] " + n for n in notes)})
+                if answer_nudge:
+                    self._emit("answer_nudge", {"message": answer_nudge})
+                if stall_nudge:
+                    self._emit("stall_nudge", {"message": stall_nudge})
                 self._persist_messages(messages)
 
         # 循环结束但没拿到最终答案：预算用尽，或连续无进展被判定空转。两者的区分很重要——"轮数耗尽"意味着任务可能只是太大（可提高上限后继续），"无进展"意味着再给轮数也是原地打转（该换做法或拆分目标）。
@@ -1264,6 +1277,17 @@ class Executor:
             f"参数格式错误：工具 '{tc.name}' 的 arguments 不是合法 JSON，"
             f"无法解析（开头: {raw[:60]!r}）。请检查参数为合法 JSON 对象后重试。"
         )
+
+    @staticmethod
+    def _is_question_goal(goal: str) -> bool:
+        """目标是不是"问一句"的类型（这类目标拿到信息就该收尾，不该为衍生动作续轮）。"""
+        text = str(goal or "").strip().lower()
+        if not text:
+            return False
+        if text.endswith("?") or text.endswith("？"):
+            return True
+        return any(k in text for k in ("吗", "什么", "是否", "能不能", "能否",
+                                       "多少", "哪些", "怎么", "为什么", "如何"))
 
     @staticmethod
     def _tool_message_text(result, blocked_reason: str = "") -> str:

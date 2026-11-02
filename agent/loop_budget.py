@@ -267,3 +267,30 @@ class StallWatch:
                 "先说明当前卡在哪里，再换一种做法（换工具 / 换参数 / 先读错误信息），不要原样重试。"
             )
         return ""
+
+
+@dataclass
+class AnswerWatch:
+    """问答类目标的收尾提醒：能答了就别再为衍生动作续轮。
+
+    真实形态：问"这个链接里有什么"，浏览器已经返回页面正文，模型却转去登录/装技能，
+    又跑了十几分钟直到上游断掉。这里只做一件事——在信息已足够时提醒一次。
+    """
+
+    min_chars: int = 200        # 只读工具本轮返回多少字才算"拿到实质内容"
+    max_nudges: int = 2         # 最多提醒几次（模型不听就交给预算）
+    gap_turns: int = 3          # 两次提醒至少隔几轮
+    fired: int = 0
+    last_turn: int = -99
+
+    def observe(self, turn: int, question_goal: bool, read_chars: int) -> str:
+        if not question_goal or read_chars < self.min_chars:
+            return ""
+        if self.fired >= self.max_nudges or turn - self.last_turn < self.gap_turns:
+            return ""
+        self.fired += 1
+        self.last_turn = turn
+        return (
+            "工具已经返回了能回答用户问题的内容。如果这些信息已经足够，就**现在直接给出答案并结束**；"
+            "登录、转存、翻页、安装或调试某个工具都属于可选增益，不要为了它们拖住回答。"
+        )

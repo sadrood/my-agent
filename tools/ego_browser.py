@@ -157,15 +157,16 @@ class EgoBrowserTool(BrowserTool):
     """命令协议同 BrowserTool，执行体换成 ego-lite。"""
 
     _EGO_COMMANDS = {
-        "status", "goto", "url", "title", "text", "snapshot",
+        "status", "goto", "url", "title", "text", "html", "snapshot",
         "screenshot", "screenshot_base64", "click", "type", "fill",
         "press", "scroll", "js", "wait", "humancheck", "live",
         "tabs", "newtab", "switchtab", "spaces", "usespace", "upload",
+        "launch",
     }
 
     #: 未知命令要给模型看得懂的支持清单
-    _READONLY = {"status", "url", "title", "text", "snapshot",
-                 "screenshot", "screenshot_base64", "tabs", "spaces"}
+    _READONLY = {"status", "url", "title", "text", "html", "snapshot",
+                 "screenshot", "screenshot_base64", "tabs", "spaces", "launch"}
 
     @property
     def description(self) -> str:
@@ -385,6 +386,14 @@ class EgoBrowserTool(BrowserTool):
     def _dispatch(self, command: str, args: str) -> ToolResult:
         if command == "status":
             return self._status()
+        if command == "launch":
+            # ego 用共享浏览器，没有"启动"这一步；给成功而不是报错，免得模型反复换命令
+            return ToolResult(success=True,
+                              output="ego 使用共享浏览器，已在运行，无需 launch；直接 goto/text 即可。")
+        if command == "html":
+            body = ('  __out = { html: await page.evaluate('
+                    '"document.documentElement.outerHTML") }\n')
+            return self._finish(self._run(body))
         if command == "usespace":
             target = (args or "").strip()
             if not target:
@@ -582,6 +591,8 @@ class EgoBrowserTool(BrowserTool):
             return self._snapshot_result(str(data.get("snapshot") or ""), str(data.get("url") or ""))
         if "text" in data:
             return ToolResult(success=True, output=str(data["text"]))
+        if "html" in data:
+            return ToolResult(success=True, output=str(data["html"])[:12000])
         if "path" in data:
             path = str(data["path"])
             size = os.path.getsize(path) if os.path.exists(path) else 0

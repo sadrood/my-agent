@@ -201,3 +201,51 @@ class TestProgressSemantics:
         for _ in range(10):
             b.observe(TurnOutcome(succeeded=1))                 # 之后全是重复成功
         assert b.limit == 5, "重复轮不应再续期"
+
+
+class TestAnswerWatch:
+    def test_question_goal_with_substantive_read_fires_once(self):
+        from agent.loop_budget import AnswerWatch
+        w = AnswerWatch()
+        msg = w.observe(turn=0, question_goal=True, read_chars=300)
+        assert "直接给出答案" in msg
+        assert w.observe(turn=1, question_goal=True, read_chars=300) == "", "刚提醒过不连发"
+
+    def test_non_question_or_short_read_is_ignored(self):
+        from agent.loop_budget import AnswerWatch
+        w = AnswerWatch()
+        assert w.observe(0, question_goal=False, read_chars=300) == ""
+        assert w.observe(0, question_goal=True, read_chars=50) == ""
+
+    def test_fires_again_after_gap_up_to_limit(self):
+        from agent.loop_budget import AnswerWatch
+        w = AnswerWatch(gap_turns=2)
+        assert w.observe(0, True, 300)
+        assert w.observe(2, True, 300), "隔了 gap 轮还没收尾，再提醒一次"
+        assert w.observe(4, True, 300) == "", "最多两次，之后交给预算"
+
+
+class TestAnswerNudgeInLoop:
+    def test_question_goal_gets_told_to_answer(self):
+        llm = FakeLLM([
+            LLMToolResponse(content="", tool_calls=[_call("a", "1")]),
+            LLMToolResponse(content="", tool_calls=[_call("b", "2")]),
+            LLMToolResponse(content="完成"),
+        ])
+        ex = _executor(llm, ProbeTool(ToolResult(success=True, output="页面内容" * 80)))
+        ex.execute_goal_loop(goal="你能看到这个链接里的内容吗", system_prompt="s")
+        notes = [m["content"] for snapshot in llm.calls for m in snapshot
+                 if m.get("role") == "user" and "[系统提示]" in str(m.get("content"))]
+        assert any("直接给出答案" in text for text in notes), "拿到内容后应提醒收尾"
+
+    def test_task_goal_does_not_get_answer_nudge(self):
+        llm = FakeLLM([
+            LLMToolResponse(content="", tool_calls=[_call("a", "1")]),
+            LLMToolResponse(content="", tool_calls=[_call("b", "2")]),
+            LLMToolResponse(content="完成"),
+        ])
+        ex = _executor(llm, ProbeTool(ToolResult(success=True, output="内容" * 200)))
+        ex.execute_goal_loop(goal="把资料整理成一份清单", system_prompt="s")
+        notes = [m["content"] for snapshot in llm.calls for m in snapshot
+                 if m.get("role") == "user" and "[系统提示]" in str(m.get("content"))]
+        assert not any("直接给出答案" in text for text in notes), "任务型目标不该被劝收尾"

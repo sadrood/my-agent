@@ -358,3 +358,16 @@ class TestFileUpload:
         for bad in ("upload", "upload #f"):
             assert _tool(monkeypatch).execute(bad).success is False
         assert captured["scripts"] == [], "参数不全不该真的跑脚本"
+
+
+class TestBaseCommandAliases:
+    """基类命令在 ego 上要么有等价物，要么明确说无需该步（别让模型猜命令）。"""
+
+    def test_html_and_launch_are_supported(self):
+        assert {"html", "launch"} <= EgoBrowserTool._EGO_COMMANDS
+        assert "html" in EgoBrowserTool._READONLY
+
+    def test_finish_renders_html_raw(self):
+        tool = EgoBrowserTool.__new__(EgoBrowserTool)      # 不构造：构造要拉起 node
+        result = tool._finish({"ok": True, "__out": {"html": "<html>x</html>"}})
+        assert result.success and result.output == "<html>x</html>"

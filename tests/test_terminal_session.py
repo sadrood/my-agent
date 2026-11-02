@@ -109,3 +109,14 @@ class TestSessionCleanupAtExit:
         gc.collect()
         # 别的临时管理器也可能在这期间被回收，所以只断言"变少了"而不是"回到某个数"
         assert len(ts._LIVE_MANAGERS) < n_with_mgr, "WeakSet 把管理器钉住了（强引用泄漏）"
+
+
+class TestMojibakeHint:
+    def test_mojibake_gets_actionable_hint(self):
+        from tools.terminal import _encoding_hint
+        assert "file 工具" in _encoding_hint("鎺堟潈涓庤处鍙风" + "锟斤拷" * 3)
+
+    def test_normal_output_has_no_hint(self):
+        from tools.terminal import _encoding_hint
+        assert _encoding_hint("正常输出：命令返回码 0") == ""
+        assert _encoding_hint("") == ""
