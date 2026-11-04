@@ -3,6 +3,7 @@
 import base64
 import mimetypes
 import os
+import threading
 from datetime import datetime
 
 from config import TTS_CONFIG, resolve_under_root
@@ -55,9 +56,18 @@ def resolve_voice(name: str) -> str:
     return str(name).strip()
 
 
+_NAME_LOCK = threading.Lock()
+_NAME_SEQ = 0
+
+
 def _timestamp() -> str:
-    """毫秒精度时间戳。"""
-    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:21]
+    """合成文件名后缀：Windows 上 datetime.now() 粒度约 15ms，纯时间戳会在
+    连续合成时重名（实测 CI 上两秒内两次调用同名）→ 加 pid + 进程内序号。"""
+    global _NAME_SEQ
+    with _NAME_LOCK:
+        _NAME_SEQ += 1
+        seq = _NAME_SEQ
+    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{seq:04d}"
 
 
 def _data_uri(path: str) -> str:
