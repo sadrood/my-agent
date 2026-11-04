@@ -25,7 +25,8 @@ class EmbeddedTerminalTool(TerminalTool):
         req = _urlreq.Request(
             self._bridge_url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "X-Agent-Bridge-Token": os.getenv("MY_AGENT_BRIDGE_TOKEN", "")},
             method="POST",
         )
         try:

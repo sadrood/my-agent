@@ -23,13 +23,39 @@ SECURITY_CRITICAL_PATHS = (
     "agent/guardian.py",
     "agent/execpolicy.py",
     "agent/consent.py",
+    "agent/executor.py",
+    "agent/permission_rules.py",
+    "tools/python.py",
+    "tools/py_runner.py",
+    "tools/tool_manager.py",
+    "dashboard/server.py",
     "config.py",
     ".env",
+    ".env.example",
+    "memory/ipc.json",
+    "memory/llm_health.json",
 )
 
 #: 拿不到真实路径（如 python 代码文本）时的退化判断依据
 SECURITY_CRITICAL_NAME_HINTS = tuple(
     os.path.basename(p) for p in SECURITY_CRITICAL_PATHS)
+
+_SENSITIVE_NAMES = frozenset({".env", "memory/ipc.json", "memory/llm_health.json"})
+
+
+def is_sensitive_path(path) -> bool:
+    """模型与 dashboard 不得直接读取凭据文件（绝对路径/符号链接也算）。"""
+    raw = os.fsdecode(path).strip() if isinstance(path, (str, bytes, os.PathLike)) else ""
+    if not raw:
+        return False
+    target = os.path.normcase(os.path.realpath(resolve_under_root(raw)))
+    if any(target == os.path.normcase(os.path.realpath(resolve_under_root(item)))
+           for item in _SENSITIVE_NAMES):
+        return True
+    name = os.path.basename(target).lower()
+    return (name == ".env" or (name.startswith(".env.") and name != ".env.example")
+            or name in {"id_rsa", "id_ed25519", "credentials.json", "credentials",
+                        "authorized_keys", "ipc.json", "llm_health.json"})
 
 
 def is_security_critical_path(path) -> bool:

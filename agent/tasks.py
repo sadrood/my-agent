@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict
 
 from tools.base import BaseTool, ToolResult
+from agent.atomic_io import atomic_write_json
 
 _MEM_DIR = "memory"
 # 任务清单落盘路径必须锚定项目根：这是**硬编码的相对路径**，open() 会按 cwd 解析——换个目录启动就会读到另一份（看起来"任务清单凭空清空"），而完成任务判定依赖它。
@@ -23,14 +24,14 @@ def _load(path: str, default: list) -> list:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, list) else default
-    except Exception:
+    except FileNotFoundError:
         return default
+    except (OSError, ValueError, TypeError) as e:
+        raise RuntimeError(f"任务文件损坏或不可读: {path}") from e
 
 
 def _save(path: str, data: list) -> None:
-    os.makedirs(_MEM_DIR, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, data, compact=False)
 
 
 def load_tasks() -> list:

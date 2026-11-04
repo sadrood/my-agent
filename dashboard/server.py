@@ -174,14 +174,14 @@ class ApprovalBroker:
         ev = threading.Event()
         with self._lock:
             self._pending[req_id] = ev
-        hub.emit("approval", {
-            "id": req_id,
-            "tool": getattr(request, "tool_name", "") or "",
-            "command": (getattr(request, "command", "") or "")[:400],
-            "risk_level": getattr(request, "risk_level", "") or "medium",
-            "reason": getattr(request, "reason", "") or "",
-        })
         try:
+            hub.emit("approval", {
+                "id": req_id,
+                "tool": getattr(request, "tool_name", "") or "",
+                "command": (getattr(request, "command", "") or "")[:400],
+                "risk_level": getattr(request, "risk_level", "") or "medium",
+                "reason": getattr(request, "reason", "") or "",
+            })
             deadline = time.time() + self.timeout
             while time.time() < deadline:
                 # 卡等待中用户把该会话切走 ask → auto/block：立即按新模式裁决
@@ -660,6 +660,9 @@ if HAS_FASTAPI:
         abs_path = _safe_resolve(path)
         if abs_path is None:
             return {"ok": False, "error": "路径越界：仅允许访问工作目录内文件"}
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(abs_path):
+            return {"ok": False, "error": "凭据文件不支持预览"}
         if not os.path.isfile(abs_path):
             return {"ok": False, "error": "文件不存在"}
         try:

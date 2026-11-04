@@ -349,6 +349,10 @@ class TestSecurityCriticalPath:
         assert is_security_critical_path(".env")
         assert is_security_critical_path(os.path.join(PROJECT_ROOT, "config.py"))
         assert is_security_critical_path(os.path.join(PROJECT_ROOT, "agent", "sandbox.py"))
+        for path in ("agent/executor.py", "agent/permission_rules.py",
+                     "tools/python.py", "tools/py_runner.py", "tools/tool_manager.py",
+                     "dashboard/server.py"):
+            assert is_security_critical_path(path), path
 
     def test_normalizes_dots_case_and_separators(self):
         assert is_security_critical_path("./agent/approval.py")
@@ -366,6 +370,15 @@ class TestSecurityCriticalApprovalFlow:
         from tools.patch import EditTool
         return EditTool().build_approval_request(
             {"file_path": path, "old_string": "x", "new_string": "y"})
+
+    def test_sensitive_file_read_denied_even_in_never_mode(self):
+        from tools.file import FileTool
+        p = ApprovalPolicy(mode="never", sandbox_mode="workspace-write", interactive=False)
+        for path in (".env", "C:/Users/test/.ssh/id_rsa", "memory/ipc.json"):
+            request = FileTool().build_approval_request({"operation": "read", "path": path})
+            assert not p.decide(request).allowed
+            result = FileTool().execute_json({"operation": "read", "path": path})
+            assert not result.success and "安全限制" in result.error
 
     def test_interactive_policy_really_asks(self):
         asked = []
@@ -434,6 +447,13 @@ class TestDenyReasonNamesTheTrigger:
         assert req.approval == "on-request" and ".env" in req.reason
         d = self._never().decide(req)
         assert d.allowed is False and ".env" in d.reason and "file 工具" in d.reason
+
+    def test_python_code_touching_guard_names_it(self):
+        from tools.python import PythonTool
+        req = PythonTool().build_approval_request({
+            "code": "open('tools/py_runner.py', 'w').write('x')"})
+        assert req.approval == "on-request"
+        assert not self._never().decide(req).allowed
 
     def test_edit_critical_file_names_it(self):
         req = self._edit("agent/approval.py")

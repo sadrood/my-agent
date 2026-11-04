@@ -56,7 +56,7 @@ def _run_agent(
     goal: str,
     mode: str = "single",
     max_steps: int = 20,
-    approval_policy: str = "never",
+    approval_policy: str = "on-failure",
     sandbox_mode: str = "workspace-write",
     guardian: bool = True,
     max_step_ops: int = 12,
@@ -66,7 +66,9 @@ def _run_agent(
     from agent.team import Team
     from tools import ToolManager
 
-    # 安全参数由服务端定，不接受调用方指定（见 _MAX_SANDBOX_MODE 的说明）
+    # 无人值守不能用 never：workspace-write 是审批等级，不是 OS 隔离。
+    if approval_policy == "never":
+        approval_policy = "on-failure"
     sandbox_mode = _clamp_sandbox_mode(sandbox_mode)
 
     if mode == "team":

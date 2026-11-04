@@ -48,6 +48,30 @@ def test_escape_actions_blocked(tool, name, code):
     assert r.success is False, f"{name}不该成功"
 
 
+def test_child_does_not_inherit_credentials(tool, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_PROBE_API_KEY", "do-not-leak")
+    monkeypatch.setenv("MY_AGENT_PROBE_PASSWORD", "do-not-leak")
+    r = run(tool, "import os\nprint(os.environ.get('MY_AGENT_PROBE_API_KEY'))\n"
+                  "print(os.environ.get('MY_AGENT_PROBE_PASSWORD'))")
+    assert r.success
+    assert r.output.splitlines() == ["None", "None"]
+
+
+def test_sensitive_file_read_and_guard_write_blocked(tool, tmp_path):
+    from config import PROJECT_ROOT
+    from pathlib import Path
+    secret = str(Path(PROJECT_ROOT) / ".env")
+    for code in (f"print(open({secret!r}).read())",
+                 "from pathlib import Path\nprint(Path('.env').read_text())",
+                 "open('tools/py_runner.py', 'w').write('x')",
+                 "import os\nos.remove('agent/approval.py')"):
+        r = run(tool, code)
+        assert not r.success and "安全限制" in (r.output or r.error)
+    ordinary = tmp_path / "normal.txt"
+    r = run(tool, f"from pathlib import Path\nPath({str(ordinary)!r}).write_text('ok')")
+    assert r.success and ordinary.read_text() == "ok"
+
+
 def test_normal_work_unaffected(tool, tmp_path):
     p = str(tmp_path / "f.txt").replace("\\", "/")
     assert run(tool, f"open({p!r}, 'w', encoding='utf-8').write('hi')").success

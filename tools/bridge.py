@@ -4,6 +4,7 @@
 这类连接错误值得重试，命令本身的错误立刻回给模型。
 """
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -55,6 +56,11 @@ class BridgeClient:
     def health_url(self) -> str:
         return self.url.rsplit("/", 1)[0] + "/health"
 
+    @staticmethod
+    def _auth_headers() -> dict:
+        token = os.getenv("MY_AGENT_BRIDGE_TOKEN", "")
+        return {"X-Agent-Bridge-Token": token} if token else {}
+
     def probe(self, use_cache: bool = True) -> bool:
         """桥是否在线（健康检查）。缓存 TTL 很短：桥刚挂时不能继续被判成在线。"""
         now = time.time()
@@ -63,7 +69,8 @@ class BridgeClient:
                 return self._probe_ok
         ok = False
         try:
-            with urllib.request.urlopen(self.health_url, timeout=self.probe_timeout) as resp:
+            req = urllib.request.Request(self.health_url, headers=self._auth_headers())
+            with urllib.request.urlopen(req, timeout=self.probe_timeout) as resp:
                 ok = bool(json.loads(resp.read().decode("utf-8")).get("ok"))
         except Exception:                       # noqa: BLE001
             ok = False
@@ -83,7 +90,7 @@ class BridgeClient:
             for attempt in range(self.retries):
                 req = urllib.request.Request(
                     self.url, data=payload,
-                    headers={"Content-Type": "application/json"}, method="POST")
+                    headers={"Content-Type": "application/json", **self._auth_headers()}, method="POST")
                 try:
                     with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                         data = json.loads(resp.read().decode("utf-8"))

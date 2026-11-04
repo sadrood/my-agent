@@ -106,6 +106,36 @@ def test_approval_broker_allow_and_timeout():
     assert time.time() - t0 < 2
 
 
+def test_approval_emit_failure_does_not_leave_pending(monkeypatch):
+    import dashboard.server as srv
+
+    class _Req:
+        tool_name = "terminal"
+        command = "test"
+        risk_level = "high"
+        reason = "test"
+
+    broker = srv.ApprovalBroker(timeout=0.1)
+    def _fail(*args, **kwargs):
+        raise RuntimeError("hub down")
+    monkeypatch.setattr(srv.hub, "emit", _fail)
+    with pytest.raises(RuntimeError, match="hub down"):
+        broker.approver(_Req())
+    assert broker.pending_count() == 0
+
+
+def test_hub_pairs_same_name_calls_by_id():
+    from dashboard.hub import DashboardHub
+    hub = DashboardHub()
+    hub.emit("tool_call", {"tool": "terminal", "call_id": "first"})
+    hub.emit("tool_call", {"tool": "terminal", "call_id": "second"})
+    hub.emit("tool_result", {"tool": "terminal", "call_id": "first", "output": "one"})
+    hub.emit("tool_result", {"tool": "terminal", "call_id": "second", "output": "two"})
+    calls = hub.get_current_state()["tool_calls"]
+    assert calls[0]["result"]["output"] == "one"
+    assert calls[1]["result"]["output"] == "two"
+
+
 def test_api_approve_endpoint():
     """POST /api/approve：匹配未知 id → matched=False；缺 id → 报错。"""
     import json
@@ -152,6 +182,14 @@ def test_api_file_read_and_traversal(tmp_path):
     r = client.get("/api/file", params={"path": "dashboard/server.py"})
     assert r.json()["ok"] is True
     assert "FastAPI" in r.json()["content"]
+
+    # 文件树隐藏 dotfile，单文件端点也不能漏出凭据（包括绝对路径）。
+    from config import PROJECT_ROOT
+    import os
+    for secret in (".env", os.path.join(PROJECT_ROOT, ".env"), "memory/ipc.json"):
+        denied = client.get("/api/file", params={"path": secret})
+        assert denied.json()["ok"] is False
+        assert "凭据" in denied.json()["error"]
 
     # 路径越界
     r2 = client.get("/api/file", params={"path": "../outside.txt"})

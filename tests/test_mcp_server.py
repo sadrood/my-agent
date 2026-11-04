@@ -60,6 +60,22 @@ class TestSandboxModeClamp:
         monkeypatch.setattr(agent_pkg, "Agent", _FakeAgent)
         assert mcp_server._run_agent("写个文件", sandbox_mode="danger-full-access") == "ok"
         assert captured["config"].sandbox_mode == "workspace-write"
+        assert captured["config"].approval_policy == "on-failure"
+
+    def test_never_is_not_allowed_for_unattended_mcp(self, monkeypatch):
+        captured = {}
+
+        class _FakeAgent:
+            def __init__(self, tool_manager=None, config=None):
+                captured["config"] = config
+
+            def run(self, goal):
+                return "ok"
+
+        import agent as agent_pkg
+        monkeypatch.setattr(agent_pkg, "Agent", _FakeAgent)
+        assert mcp_server._run_agent("读文件", approval_policy="never") == "ok"
+        assert captured["config"].approval_policy == "on-failure"
 
 
 def test_run_agent_mcp_config_built():

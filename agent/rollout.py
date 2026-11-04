@@ -1,6 +1,7 @@
 """Rollout 事件追踪模块（借鉴同类实现的 rollout-trace 设计）。"""
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -70,6 +71,7 @@ class Rollout:
         self._max_memory_events = max(0, int(self.config.get("max_memory_events", 2000)))
         self._log_file = None
         self._log_path = ""
+        self._lock = threading.RLock()
 
         if self.enabled:
             self._open_log()
@@ -83,23 +85,25 @@ class Rollout:
         if not self.enabled:
             return
         event = RolloutEvent(ts=time.time(), event_type=event_type, data=data or {})
-        self.events.append(event)
-        if self._max_memory_events and len(self.events) > self._max_memory_events:
-            del self.events[:len(self.events) - self._max_memory_events]
-        if self._log_file:
-            try:
-                self._log_file.write(event.to_line() + "\n")
-                self._log_file.flush()
-            except Exception:
-                pass
+        with self._lock:
+            self.events.append(event)
+            if self._max_memory_events and len(self.events) > self._max_memory_events:
+                del self.events[:len(self.events) - self._max_memory_events]
+            if self._log_file:
+                try:
+                    self._log_file.write(event.to_line() + "\n")
+                    self._log_file.flush()
+                except Exception:
+                    pass
 
     def close(self):
-        if self._log_file:
-            try:
-                self._log_file.close()
-            except Exception:
-                pass
-            self._log_file = None
+        with self._lock:
+            if self._log_file:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+                self._log_file = None
 
     def _open_log(self):
         try:
@@ -120,8 +124,10 @@ class Rollout:
 
     def get_transcript(self, max_events: int = 200) -> str:
         """把事件流渲染为可读文本（用于压缩 / 调试）。"""
+        with self._lock:
+            events = self.events[-max_events:]
         lines = []
-        for e in self.events[-max_events:]:
+        for e in events:
             lines.append(f"[{e.event_type}] {json.dumps(e.data, ensure_ascii=False)[:500]}")
         return "\n".join(lines)
 

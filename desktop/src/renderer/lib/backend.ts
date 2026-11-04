@@ -89,6 +89,7 @@ function getWsUrl(base: string): string {
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
 /** 当前正在流式构建的回答消息 id（用于 stream_delta 追加） */
 let streamingMessageId: string | null = null;
 
@@ -408,6 +409,7 @@ export async function connectBackend(): Promise<void> {
     const base = await getApiBase();
     ws = new WebSocket(getWsUrl(base));
     ws.onopen = () => {
+    reconnectAttempts = 0;
     useBackendStore.getState().setConnected(true);
     ws?.send(JSON.stringify({ type: 'get_state' }));
     // 后端重启会丢运行时设置（视觉模型覆盖），连上后自动重新下发
@@ -624,7 +626,8 @@ export async function connectBackend(): Promise<void> {
 
 function scheduleReconnect(): void {
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectBackend, 2000);
+  const delay = Math.min(2000 * 2 ** Math.min(reconnectAttempts++, 5), 60000);
+  reconnectTimer = setTimeout(connectBackend, delay);
 }
 
 /** 清空流式节流缓冲 */

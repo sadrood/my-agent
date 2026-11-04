@@ -11,7 +11,9 @@ def _drop_empty_env_values() -> None:
 
 
 # 加载 .env 文件中的环境变量
-load_dotenv()
+# 用户代码子进程不能重新读取 .env，把父进程剥离的密钥再载入。
+if os.getenv("MY_AGENT_PY_RUNNER") != "1":
+    load_dotenv()
 # 留空的项当"未设置"：否则 int()/float() 解析会抛 ValueError，整个配置导入即崩
 _drop_empty_env_values()
 

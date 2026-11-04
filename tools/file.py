@@ -80,6 +80,10 @@ class FileTool(BaseTool):
         path = str(arguments.get("path", "")).strip()
         content = str(arguments.get("content", ""))
 
+        from agent.approval import is_sensitive_path
+        if operation in ("read", "copy", "move") and is_sensitive_path(path):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具读取或搬运。")
+
         if operation == "write":
             return self._do_write(path, content)
         if operation == "append":
@@ -99,7 +103,8 @@ class FileTool(BaseTool):
         )
 
     def build_approval_request(self, arguments: Dict[str, Any]):
-        from agent.approval import ApprovalRequest, escalate_critical, is_security_critical_path
+        from agent.approval import (ApprovalRequest, escalate_critical,
+                                    is_security_critical_path, is_sensitive_path)
 
         operation = str(arguments.get("operation", "")).lower()
         path = str(arguments.get("path", "")).strip()
@@ -115,6 +120,11 @@ class FileTool(BaseTool):
         targets = [path] if (is_write or is_delete) else []
         if operation in ("copy", "move"):
             targets.append(destination)
+        if operation == "read" and is_sensitive_path(path):
+            return ApprovalRequest(tool_name=self.name, arguments=arguments,
+                                   command=f"file read {path}", risk_level="blocked",
+                                   reason="凭据文件不可读取", approval="on-request",
+                                   min_sandbox_mode="read-only")
         hit = next((t for t in targets if t and is_security_critical_path(t)), "")
         risk, approval, reason = escalate_critical(risk, [hit] if hit else [])
         return ApprovalRequest(
@@ -159,6 +169,9 @@ class FileTool(BaseTool):
 
     def _read_file(self, path: str) -> ToolResult:
         path = path.strip()
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(path):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具读取。")
         if not os.path.exists(path):
             return ToolResult(success=False, output="", error=f"文件不存在: {path}")
         if os.path.isdir(path):
@@ -184,6 +197,9 @@ class FileTool(BaseTool):
         return self._do_write(parts[0].strip(), parts[1])
 
     def _do_write(self, path: str, content: str) -> ToolResult:
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(path):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具改写。")
         # diff 追踪：写入前留旧内容快照（新建文件为 None）
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
@@ -209,6 +225,9 @@ class FileTool(BaseTool):
         return self._do_append(parts[0].strip(), parts[1])
 
     def _do_append(self, path: str, content: str) -> ToolResult:
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(path):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具改写。")
         # diff 追踪：追加前留旧内容快照，便于展示增量 diff
         from tools.change_tracker import get_change_tracker
         tracker = get_change_tracker()
@@ -313,6 +332,9 @@ class FileTool(BaseTool):
             return ToolResult(success=False, output="", error=f"删除失败: {e}")
 
     def _do_copy(self, src: str, dst: str) -> ToolResult:
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(src) or is_sensitive_path(dst):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具复制。")
         if not src or not dst:
             return ToolResult(
                 success=False, output="", error="复制操作需要: copy <源路径> <目标路径>"
@@ -350,6 +372,9 @@ class FileTool(BaseTool):
         return self._do_move(parts[0].strip(), parts[1].strip())
 
     def _do_move(self, src: str, dst: str) -> ToolResult:
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(src) or is_sensitive_path(dst):
+            return ToolResult(success=False, output="", error="安全限制：凭据文件不可由 file 工具移动。")
         if not src or not dst:
             return ToolResult(
                 success=False, output="", error="移动操作需要: move <源路径> <目标路径>"

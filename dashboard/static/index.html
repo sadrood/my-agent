@@ -558,11 +558,11 @@ function handleEvent(evt) {
     hideThinking();
     const tname = data.tool || data.name || '';
     addFlow('tool', '⏺', wtag + '<span class="f-tool">' + esc(tname) + '</span>(<span class="f-args">' + esc(shortArgs(data.input || data.arguments || data.args || '')) + '</span>)');
-    const rec = { tool: tname, worker: data.worker || '',
+    const rec = { tool: tname, callId: data.call_id || '', worker: data.worker || '',
                   input: data.input || data.arguments || data.args || '',
                   fullInput: data.input || data.arguments || data.args || '',
                   success: null, resultText: '', errorText: '', ts: evt.timestamp || nowTs() };
-    state.toolsMap[tname] = rec;
+    state.toolsMap[data.call_id || tname] = rec;
     state.tools.push(rec);
     updateCounts();
   } else if (type === 'tool_output') {
@@ -570,17 +570,20 @@ function handleEvent(evt) {
     const text = String(data.text || '');
     if (!text) return;
     const label = data.label || data.tool || '';
+    const key = data.call_id || label;
     state.live = state.live || {}; state.liveStarted = state.liveStarted || {};
-    state.live[label] = (state.live[label] || '') + text;
-    const rec = state.toolsMap[data.tool] || state.tools[state.tools.length - 1];
-    if (rec) { rec.resultText = state.live[label].slice(-220); rec.live = true; }
-    if (!state.liveStarted[label]) {          // 只在开头提示一次，避免刷屏
-      state.liveStarted[label] = true;
+    state.live[key] = (state.live[key] || '') + text;
+    const rec = state.toolsMap[data.call_id || data.tool] ||
+      (data.call_id ? null : state.tools.findLast(r => r.tool === data.tool && r.success === null));
+    if (rec) { rec.resultText = state.live[key].slice(-220); rec.live = true; }
+    if (!state.liveStarted[key]) {
+      state.liveStarted[key] = true;
       addFlow('tool', '⋯', wtag + '<span class="f-live">' + esc(label ? label + ' 开始输出…' : '开始输出…') + '</span>');
     }
     renderWorkbench();
   } else if (type === 'tool_result') {
-    const rec = state.toolsMap[data.tool || data.name] || state.tools[state.tools.length - 1];
+    const rec = state.toolsMap[data.call_id || data.tool || data.name] ||
+      (data.call_id ? null : state.tools.findLast(r => r.tool === (data.tool || data.name) && r.success === null));
     if (rec) {
       rec.success = !!data.success;
       rec.resultText = (data.output || '').slice(0, 220);

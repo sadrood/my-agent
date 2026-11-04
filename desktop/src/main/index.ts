@@ -11,6 +11,7 @@ import { spawn, exec, execSync, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import type { WebContents } from 'electron';
 
 // 端口可外部指定：同时跑两个实例或端口冲突时不必改代码
@@ -18,6 +19,7 @@ const BACKEND_PORT = Number(process.env.MY_AGENT_BACKEND_PORT || '') || 8090;
 const BACKEND_BASE = `http://127.0.0.1:${BACKEND_PORT}`;
 /** 内嵌浏览器桥端口：Python Agent 经此控制侧栏 <webview>（仅监听 127.0.0.1） */
 const BROWSER_BRIDGE_PORT = 8091;
+const bridgeToken = randomBytes(32).toString('hex');
 
 let mainWindow: BrowserWindow | null = null;
 /** 桌面宠物浮窗（透明无边框，独立 pet.html） */
@@ -152,6 +154,7 @@ async function startBackend(): Promise<void> {
     SANDBOX_MODE: 'danger-full-access',
     // 内置终端桥：Agent 的 terminal 命令经此执行并回显到内置终端面板
     MY_AGENT_EMBEDDED_TERMINAL_URL: `http://127.0.0.1:${BROWSER_BRIDGE_PORT}/terminal`,
+    MY_AGENT_BRIDGE_TOKEN: bridgeToken,
   };
   let cmd: string;
   let args: string[];
@@ -172,17 +175,19 @@ async function startBackend(): Promise<void> {
     envBase.MY_AGENT_BACKEND_PORT = String(BACKEND_PORT);
     envBase.MY_AGENT_QUIET = '1';
   }
-  backendProc = spawn(cmd, args, { cwd, stdio: 'pipe', env: envBase });
+  const proc = spawn(cmd, args, { cwd, stdio: 'pipe', env: envBase });
+  backendProc = proc;
   const logPath = path.join(app.getPath('userData'), 'backend.log');
   const toLog = (d: Buffer | string) => {
     const line = d.toString();
     console.log(`[backend] ${line}`.trimEnd());
     try { fs.appendFileSync(logPath, line, 'utf-8'); } catch { /* 日志写入失败不影响运行 */ }
   };
-  backendProc.stdout?.on('data', toLog);
-  backendProc.stderr?.on('data', toLog);
-  backendProc.on('exit', (code) => {
+  proc.stdout?.on('data', toLog);
+  proc.stderr?.on('data', toLog);
+  proc.on('exit', (code) => {
     console.log(`[main] 后端退出 code=${code}`);
+    if (backendProc !== proc) return;
     backendProc = null;
     // 意外崩溃（窗口还开着、非主动停止）→ 指数退避自动拉起，窗口关闭时才放弃
     if (!backendManualStop && mainWindow && backendCrashRetries < 5) {
@@ -217,6 +222,8 @@ function stopBackend(): void {
     backendProc = null;
   }
 }
+
+app.on('before-quit', stopBackend);
 
 // ---------------- 内嵌浏览器桥（Python Agent ⇄ 侧栏 <webview>） ----------------
 // Python 端 EmbeddedBrowserTool 把 browser 命令 POST 到这里，
@@ -632,13 +639,33 @@ function runTermCommand(command: string, from: 'user' | 'agent'): Promise<TermEn
 
 function startBrowserBridge(): void {
   const server = http.createServer((req, res) => {
-    if (req.method === 'GET' && (req.url || '').startsWith('/health')) {
+    const pathname = (req.url || '').split('?', 1)[0];
+    if (!((req.method === 'GET' && pathname === '/health') ||
+          (req.method === 'POST' && (pathname === '/terminal' || pathname === '/browser')))) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'not found' }));
+      return;
+    }
+    const supplied = req.headers['x-agent-bridge-token'];
+    const provided = typeof supplied === 'string' ? Buffer.from(supplied) : Buffer.alloc(0);
+    const expected = Buffer.from(bridgeToken);
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'bridge access denied' }));
+      return;
+    }
+    if (pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, bridge: 'embedded-browser' }));
       return;
     }
-    // 内置终端桥：{action:'run', command} → 执行并回显到面板
-    if (req.method === 'POST' && (req.url || '').startsWith('/terminal')) {
+    const contentType = req.headers['content-type'] || '';
+    if (typeof contentType !== 'string' || !/^application\/json(?:\s*;|$)/i.test(contentType)) {
+      res.writeHead(415, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'application/json required' }));
+      return;
+    }
+    if (pathname === '/terminal') {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
@@ -655,11 +682,6 @@ function startBrowserBridge(): void {
           res.end(JSON.stringify({ ok: e.ok, output: e.output }));
         });
       });
-      return;
-    }
-    if (req.method !== 'POST' || !(req.url || '').startsWith('/browser')) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'not found' }));
       return;
     }
     const chunks: Buffer[] = [];
@@ -759,6 +781,7 @@ ipcMain.handle('app:update-now', async () => {
     // 去掉 dev server 指向，重启后加载刚编译的 dist 资源
     setTimeout(() => {
       process.env.VITE_DEV_SERVER_URL = '';
+      stopBackend();
       app.relaunch();
       app.exit(0);
     }, 800);

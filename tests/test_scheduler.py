@@ -14,6 +14,15 @@ def isolate(tmp_path, monkeypatch):
     yield
 
 
+def test_corrupt_schedule_is_not_overwritten(isolate):
+    from pathlib import Path
+    path = Path(mod._SCHED_FILE)
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="损坏"):
+        mod.add_task("不能清空原任务")
+    assert path.read_text(encoding="utf-8") == "{broken"
+
+
 def test_add_and_list(isolate):
     t = mod.add_task("定时任务A", 5, "myagent")
     assert t["interval_minutes"] == 5

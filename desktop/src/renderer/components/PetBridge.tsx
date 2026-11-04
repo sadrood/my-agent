@@ -27,7 +27,7 @@ export function PetBridge() {
     [sessions, activeSessionId],
   );
 
-  const lastLen = useRef(0);
+  const lastEvent = useRef<(typeof events)[number] | null>(null);
   const lastState = useRef('');
 
   const push = (p: PushState) => {
@@ -58,8 +58,10 @@ export function PetBridge() {
   useEffect(() => {
     const api = window.desktopApi;
     if (!api?.petPush) return;
-    const slice = events.slice(lastLen.current);
-    lastLen.current = events.length;
+    const previous = lastEvent.current;
+    const index = previous ? events.lastIndexOf(previous) : -1;
+    const slice = index >= 0 ? events.slice(index + 1) : events;
+    lastEvent.current = events[events.length - 1] ?? null;
     for (const e of slice) {
       const d = (e.data || {}) as Record<string, unknown>;
       if (e.type === 'turn_start') {

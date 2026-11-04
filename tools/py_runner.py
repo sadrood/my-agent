@@ -20,6 +20,7 @@ from tools.python import (      # noqa: E402
     BLOCKED_IMPORTS, _CAPTURE_LIMIT, BlockedImportError,
     _restricted_os, blocked_import_message, build_safe_builtins, format_user_traceback,
 )
+from agent.approval import is_security_critical_path, is_sensitive_path  # noqa: E402
 
 #: 审计钩子拦下的事件：这些能力一律该走 terminal / 浏览器工具（受审批门管理）。
 #: 钩子装上就撤不掉，比"导入黑名单"更难绕过——内省拿到 subprocess 也会在这里被挡。
@@ -78,6 +79,19 @@ def _install_audit_hook() -> None:
             raise PermissionError(
                 f"安全限制：禁止 {event}（执行系统命令请用 terminal 工具，"
                 "网络请用对应的 web/浏览器工具）")
+        if event == "open" and args:
+            path = args[0]
+            mode = str(args[1] or "") if len(args) > 1 else ""
+            flags = args[2] if len(args) > 2 else 0
+            writing = any(ch in mode for ch in "wax+") or (isinstance(flags, int) and bool(
+                flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)))
+            if isinstance(path, (str, bytes, os.PathLike)):
+                if is_sensitive_path(path) or (writing and is_security_critical_path(path)):
+                    raise PermissionError("安全限制：python 工具不可读取凭据或改写安全关键文件，请用审批工具。")
+        if event in ("os.remove", "os.unlink", "os.rename", "os.replace", "os.rmdir") and args:
+            for path in args[:2] if event in ("os.rename", "os.replace") else args[:1]:
+                if isinstance(path, (str, bytes, os.PathLike)) and is_security_critical_path(path):
+                    raise PermissionError("安全限制：python 工具不可删除或移动安全关键文件。")
         if event == "import" and args:
             name = str(args[0])
             root = name.split(".")[0]

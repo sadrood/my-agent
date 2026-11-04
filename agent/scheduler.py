@@ -7,6 +7,7 @@ import threading
 import time
 
 from config import resolve_under_root
+from agent.atomic_io import atomic_write_json
 
 # 锚定项目根：裸相对路径按 **cwd** 解析，从别的目录启动时定时任务会写到启动目录，用户看到的是"定时任务凭空消失"。
 _SCHED_FILE = resolve_under_root(os.path.join("memory", "scheduled_tasks.json"))
@@ -21,14 +22,14 @@ def _load() -> list:
         with open(_SCHED_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
-    except Exception:
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError, TypeError) as e:
+        raise RuntimeError(f"定时任务文件损坏或不可读: {_SCHED_FILE}") from e
 
 
 def _save(tasks: list) -> None:
-    os.makedirs(os.path.dirname(_SCHED_FILE), exist_ok=True)
-    with open(_SCHED_FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
+    atomic_write_json(_SCHED_FILE, tasks, compact=False)
 
 
 def list_tasks() -> list:

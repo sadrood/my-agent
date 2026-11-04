@@ -19,6 +19,15 @@ def _mk(isolate):
     return t, events
 
 
+def test_corrupt_task_file_is_not_overwritten(isolate):
+    from pathlib import Path
+    path = Path(mod._TASKS_FILE)
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="损坏"):
+        mod.TaskTool().execute_json({"operation": "create", "title": "不能清空原任务"})
+    assert path.read_text(encoding="utf-8") == "{broken"
+
+
 def test_create_and_complete(isolate):
     t, events = _mk(isolate)
     r = t.execute_json({"operation": "create", "title": "调研项目"})

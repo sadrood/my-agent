@@ -68,17 +68,19 @@ class DashboardHub:
             elif event_type == "tool_call":
                 self._tool_calls.append(data)
             elif event_type == "tool_result":
+                call_id = data.get("call_id")
                 for tc in reversed(self._tool_calls):
-                    if tc.get("tool") == data.get("tool"):
+                    if ((call_id and tc.get("call_id") == call_id)
+                            or (not call_id and tc.get("tool") == data.get("tool")
+                                and "result" not in tc)):
                         tc["result"] = data
                         break
+            subscribers = [(queue, self._subscribe_loops.get(cid))
+                           for cid, queue in self._subscribers.items()]
 
         # 推送给订阅者
         event_dict = event.to_dict()
-        for cid, queue in list(self._subscribers.items()):
-            # asyncio.Queue **不是线程安全的**：worker 线程直接 put_nowait，只有在事件循环恰好被别的东西唤醒时才会被处理（uvicorn 有 0.1s 定时器兜底才没炸，换宿主/自建循环就不保证了）。
-
-            loop = self._subscribe_loops.get(cid)
+        for queue, loop in subscribers:
             try:
                 if loop is not None and loop.is_running():
                     loop.call_soon_threadsafe(self._safe_put, queue, event_dict)
@@ -98,25 +100,25 @@ class DashboardHub:
     def subscribe(self, client_id: str) -> asyncio.Queue:
         """订阅事件流。"""
         queue = asyncio.Queue(maxsize=200)
-        self._subscribers[client_id] = queue
         try:
-            self._subscribe_loops[client_id] = asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._subscribe_loops[client_id] = None
-
-        # 发送历史事件
-        for event in self._history[-50:]:
-            try:
-                queue.put_nowait(event.to_dict())
-            except asyncio.QueueFull:
-                break
-
+            loop = None
+        with self._lock:
+            self._subscribers[client_id] = queue
+            self._subscribe_loops[client_id] = loop
+            for event in self._history[-50:]:
+                try:
+                    queue.put_nowait(event.to_dict())
+                except asyncio.QueueFull:
+                    break
         return queue
 
     def unsubscribe(self, client_id: str):
         """取消订阅。"""
-        self._subscribers.pop(client_id, None)
-        self._subscribe_loops.pop(client_id, None)
+        with self._lock:
+            self._subscribers.pop(client_id, None)
+            self._subscribe_loops.pop(client_id, None)
 
     def get_current_state(self) -> dict:
         """获取当前运行状态。"""

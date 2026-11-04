@@ -318,10 +318,14 @@ class PythonTool(BaseTool):
                     error=("python 工具需要独立的 Python 解释器：当前是打包版且 PATH 上没有 python。"
                            "请改用 terminal 工具，或用源码方式运行（.venv 里的 python）。"),
                 )
+            child_env = {key: value for key, value in os.environ.items()
+                         if not any(marker in key.upper() for marker in
+                                    ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+            child_env["MY_AGENT_PY_RUNNER"] = "1"
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
+                text=True, encoding="utf-8", errors="replace", env=child_env,
             )
             try:
                 stdout, stderr = proc.communicate(code, timeout=timeout)
