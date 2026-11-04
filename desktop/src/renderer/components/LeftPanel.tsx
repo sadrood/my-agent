@@ -5,7 +5,7 @@
  * - 添加项目：原生目录选择器选择路径。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MessageSquare, Plus, Pin, Trash2, Settings, FolderOpen, ChevronDown, FolderPlus, X, Search } from 'lucide-react';
+import { MessageSquare, Plus, Pin, Trash2, Settings, FolderOpen, ChevronDown, FolderPlus, X } from 'lucide-react';
 import { useSessionStore, useUIStore, getCurrentWorkspace } from '../store';
 import { useProjectStore } from '../store/project';
 import { deleteBackendSession, createNewSession, switchProject } from '../lib/backend';
@@ -193,19 +193,7 @@ export function LeftPanel() {
         )}
       </div>
 
-      <div className="sidebar-section-title">
-        会话
-        <button className="collapse-btn" style={{ marginLeft: 'auto' }} title="搜索会话历史与文件（Ctrl+K）" onClick={() => window.dispatchEvent(new CustomEvent('open-search'))}>
-          <Search size={13} />
-        </button>
-      </div>
       <div className="left-session-actions">
-        <input
-          className="search-input"
-          placeholder="搜索会话…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
         <button
           className="btn left-new-btn"
           title="新对话"
@@ -213,6 +201,12 @@ export function LeftPanel() {
         >
           <Plus size={14} /> 新对话
         </button>
+        <input
+          className="search-input"
+          placeholder="搜索会话…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
       </div>
       <div className="session-list">
         {grouped.map(([label, arr]) => (
