@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { useBackendStore, useSessionStore, useUIStore } from '../store';
 import { sendGoal } from '../lib/backend';
+import { resolveTheme } from '../lib/theme';
 
 interface PushState {
   kind: 'state' | 'user' | 'answer' | 'status' | 'done' | 'error';
@@ -90,7 +91,7 @@ export function PetBridge() {
   // 会话/运行态/主题变化 → 定时推送 state（面板切换会话/显示头部/跟随主题）
   useEffect(() => {
     const t = window.setTimeout(() => {
-      push({ kind: 'state', sessionId: activeSessionId ?? undefined, session: activeTitle, running, theme });
+      push({ kind: 'state', sessionId: activeSessionId ?? undefined, session: activeTitle, running, theme: resolveTheme(theme) });
     }, 300);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps

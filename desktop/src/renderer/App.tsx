@@ -139,24 +139,26 @@ export default function App() {
     })();
   }, []);
 
-  // 主题变化 → 同步 Windows 原生标题栏悬浮层颜色（设置弹窗/状态栏/系统跟随都走这里）
+  // 主题：support "跟随系统" —— system 时监听系统深浅色变化，并统一驱动
+  // <html data-theme> 与 Windows 原生标题栏悬浮层颜色。
+  const [systemDark, setSystemDark] = useState(() => {
+    try { return window.matchMedia('(prefers-color-scheme: dark)').matches; } catch { return true; }
+  });
   useEffect(() => {
-    void window.desktopApi?.setTitleBarOverlay?.(theme).catch(() => {});
-  }, [theme]);
-
-  // 首次使用（无主题偏好记录）时跟随系统深浅色
-  useEffect(() => {
-    if (!localStorage.getItem('my-agent-ui')) {
-      const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-      useUIStore.getState().setTheme(prefersLight ? 'light' : 'dark');
+    try {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+      mq.addEventListener('change', onChange);
+      return () => mq.removeEventListener('change', onChange);
+    } catch {
+      return undefined;
     }
   }, []);
-
-  // 主题切换同步到 <html>：body/html 必须吃到主题级联，否则窗口两侧露出
-  // :root 的深色底（浅色主题下两侧发黑的根因——仅靠内层 div 的 data-theme 不够）
+  const effectiveTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+    document.documentElement.dataset.theme = effectiveTheme;
+    void window.desktopApi?.setTitleBarOverlay?.(effectiveTheme).catch(() => {});
+  }, [effectiveTheme]);
 
   // 左侧「设置」按钮 → 重新打开配置引导（模型 / API Key）
   useEffect(() => {

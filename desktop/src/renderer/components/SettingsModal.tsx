@@ -458,6 +458,13 @@ function GeneralTab() {
           <span className="theme-dot" style={{ background: 'linear-gradient(135deg,#0d0d0d 60%,#f5f5f5 60%)' }} />
           深色（黑）
         </button>
+        <button
+          className={`theme-opt ${theme === 'system' ? 'active' : ''}`}
+          onClick={() => setTheme('system')}
+        >
+          <span className="theme-dot" style={{ background: 'linear-gradient(135deg,#ffffff 50%,#0d0d0d 50%)' }} />
+          跟随系统
+        </button>
       </div>
       <h3 style={{ marginTop: 20 }}>Agent 名字</h3>
       <div className="form-field">

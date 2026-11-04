@@ -9,6 +9,7 @@
  * - backend: 后端连接状态与事件流
  */
 import { create } from 'zustand';
+import { resolveTheme, type ThemeChoice } from '../lib/theme';
 import { persist } from 'zustand/middleware';
 import type { AgentEvent, ChatMessage, ModelParams, PermissionMode, Session } from '../lib/types';
 import { loadConfig } from '../lib/appConfig';
@@ -46,7 +47,7 @@ export function clampWidthToWindow(): void {
 interface UIState {
   agentName: string;
   setAgentName: (name: string) => void;
-  theme: 'light' | 'dark';
+  theme: ThemeChoice;
   rightPanelOpen: boolean;
   leftPanelOpen: boolean;
   /** 右侧 Dock 当前标签：'files'（文件树）/ 'side'（辅助对话）/ 'file:<path>'（打开的文件） */
@@ -67,7 +68,7 @@ interface UIState {
   setEmbeddedNav: (nav: { seq: number; url: string } | null) => void;
   addTab: (id: string) => void;
   removeTab: (id: string) => void;
-  setTheme: (t: 'light' | 'dark') => void;
+  setTheme: (t: ThemeChoice) => void;
   toggleRightPanel: () => void;
   toggleLeftPanel: () => void;
   setRightTab: (t: string) => void;
@@ -78,7 +79,7 @@ interface UIState {
 export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
-      theme: 'light',
+      theme: 'system',
       // Agent 显示名：界面壳动态跟随（设置里改名字后全局生效；空=默认「小悟」）
       agentName: '',
       setAgentName: (name) => set({ agentName: name }),
@@ -271,55 +272,104 @@ export const useSessionStore = create<SessionState>()(
   ),
 );
 
-// ---- 消息历史的节流持久化 ----
-const MESSAGES_KEY = 'my-agent-messages';
+// ---- 消息历史的分片持久化 ----
+// 每个会话一片 my-agent-messages:<id>：流式时只重写变化的那个会话，
+// 不再每 2 秒 JSON.stringify 全部历史（长会话的主线程卡顿来源）。
+const MESSAGES_KEY = 'my-agent-messages';            // 旧版整包，迁移后删除
+const MESSAGES_INDEX_KEY = 'my-agent-messages-index';
+const shardKey = (sessionId: string) => `my-agent-messages:${sessionId}`;
 
-function saveMessagesNow(): void {
+function readShardIndex(): string[] {
   try {
-    localStorage.setItem(MESSAGES_KEY, JSON.stringify(useSessionStore.getState().messages));
-  } catch { /* 配额满等场景静默跳过 */ }
+    const raw = JSON.parse(localStorage.getItem(MESSAGES_INDEX_KEY) || '[]');
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
+function writeShards(ids: Iterable<string>): void {
+  const index = new Set(readShardIndex());
+  const messages = useSessionStore.getState().messages;
+  for (const id of ids) {
+    try {
+      const list = messages[id];
+      if (!list || list.length === 0) {
+        localStorage.removeItem(shardKey(id));
+        index.delete(id);
+      } else {
+        localStorage.setItem(shardKey(id), JSON.stringify(list));
+        index.add(id);
+      }
+    } catch { /* 单片配额满：跳过这一片，别拖垮其它会话 */ }
+  }
+  try { localStorage.setItem(MESSAGES_INDEX_KEY, JSON.stringify([...index])); } catch { /* ignore */ }
+}
+
+const dirtySessions = new Set<string>();
 let messagesSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushMessages(): void {
+  if (messagesSaveTimer) { clearTimeout(messagesSaveTimer); messagesSaveTimer = null; }
+  if (!dirtySessions.size) return;
+  const ids = [...dirtySessions];
+  dirtySessions.clear();
+  writeShards(ids);
+}
+
 useSessionStore.subscribe((st, prev) => {
   if (st.messages === prev.messages) return;
-  if (document.hidden) { saveMessagesNow(); return; }
+  for (const id of Object.keys(st.messages)) {
+    if (st.messages[id] !== prev.messages[id]) dirtySessions.add(id);
+  }
+  for (const id of Object.keys(prev.messages || {})) {
+    if (!(id in st.messages)) dirtySessions.add(id);
+  }
+  if (!dirtySessions.size) return;
+  if (document.hidden) { flushMessages(); return; }
   if (messagesSaveTimer) return;
-  messagesSaveTimer = setTimeout(() => { messagesSaveTimer = null; saveMessagesNow(); }, 2000);
+  messagesSaveTimer = setTimeout(flushMessages, 2000);
 });
 
-window.addEventListener('pagehide', () => {
-  if (messagesSaveTimer) { clearTimeout(messagesSaveTimer); messagesSaveTimer = null; }
-  saveMessagesNow();
-});
+window.addEventListener('pagehide', flushMessages);
 
 // 主题即时级联到 <html>：任何入口（顶栏按钮 / 设置弹窗）切换主题时，
 // body/html 背景与滚动条立刻跟随，无需刷新（启动时的初始同步在 main.tsx）
 useUIStore.subscribe((st) => {
-  document.documentElement.dataset.theme = st.theme;
+  document.documentElement.dataset.theme = resolveTheme(st.theme);
 });
 
-// 启动时恢复消息历史；旧版把消息存在 my-agent-sessions 里，做一次性迁移
+// 启动恢复：优先分片；把旧版整包 / my-agent-sessions 里的一次性迁移过来
 (function hydrateMessages() {
-  let restored: Record<string, ChatMessage[]> | null = null;
+  const restored: Record<string, ChatMessage[]> = {};
+  let migrated = false;
+  const adopt = (bundle: unknown) => {
+    if (!bundle || typeof bundle !== 'object') return false;
+    let any = false;
+    for (const [id, list] of Object.entries(bundle as Record<string, unknown>)) {
+      if (Array.isArray(list)) { restored[id] = list as ChatMessage[]; any = true; }
+    }
+    return any;
+  };
+  try { migrated = adopt(JSON.parse(localStorage.getItem(MESSAGES_KEY) || 'null')) || migrated; } catch { /* ignore */ }
   try {
-    const raw = localStorage.getItem(MESSAGES_KEY);
-    if (raw) restored = JSON.parse(raw);
+    const legacy = JSON.parse(localStorage.getItem('my-agent-sessions') || 'null') as
+      { state?: { messages?: Record<string, ChatMessage[]> } } | null;
+    migrated = adopt(legacy?.state?.messages) || migrated;
   } catch { /* ignore */ }
-  if (!restored) {
+  // 分片优先（比旧整包新）
+  for (const id of readShardIndex()) {
     try {
-      const legacy = localStorage.getItem('my-agent-sessions');
-      if (legacy) {
-        const parsed = JSON.parse(legacy) as { state?: { messages?: Record<string, ChatMessage[]> } };
-        if (parsed.state?.messages && Object.keys(parsed.state.messages).length > 0) {
-          restored = parsed.state.messages;
-          try { localStorage.setItem(MESSAGES_KEY, JSON.stringify(restored)); } catch { /* ignore */ }
-        }
-      }
+      const list = JSON.parse(localStorage.getItem(shardKey(id)) || 'null');
+      if (Array.isArray(list)) restored[id] = list as ChatMessage[];
     } catch { /* ignore */ }
   }
-  if (restored && Object.keys(restored).length > 0) {
+  if (Object.keys(restored).length) {
     useSessionStore.setState({ messages: { ...useSessionStore.getState().messages, ...restored } });
+    if (migrated) {
+      writeShards(Object.keys(restored));
+      try { localStorage.removeItem(MESSAGES_KEY); } catch { /* ignore */ }
+    }
   }
 })();
 

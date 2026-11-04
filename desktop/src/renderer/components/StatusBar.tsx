@@ -9,6 +9,7 @@ import { useUIStore, useBackendStore, setCurrentWorkspace } from '../store';
 import { displayAgentName } from '../lib/appConfig';
 import { stopRun } from '../lib/backend';
 import type { PermissionMode } from '../lib/types';
+import { resolveTheme } from '../lib/theme';
 
 /** 权限模式的展示元数据（状态栏与 composer 共用） */
 export const MODE_META: Record<PermissionMode, { label: string; dot: string; icon: React.ReactNode }> = {
@@ -59,16 +60,10 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
     }).catch(() => {});
   }, []);
 
-  // 启动时按持久化主题同步标题栏 overlay 颜色：否则浅色主题下
-  // Windows 原生按钮区仍是 createWindow 时的深色条（颜色"怪"的元凶之一）
-  useEffect(() => {
-    void window.desktopApi?.setTitleBarOverlay?.(theme).catch(() => {});
-    // 仅挂载时同步一次，之后由 toggleTheme 负责
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
+  const effectiveTheme = resolveTheme(theme);
   const toggleTheme = () => {
-    setTheme(theme === 'dark' ? 'light' : 'dark');  // 悬浮层同步由 App 统一 effect 处理
+    // 三态循环：浅色 → 深色 → 跟随系统
+    setTheme(theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light');
   };
 
   const brandTitle = [
@@ -98,7 +93,7 @@ export function StatusBar({ sessionId }: { sessionId: string | null }) {
       <button className="collapse-btn" onClick={toggleLeftPanel} title="折叠/展开左侧栏"><PanelLeft size={14} /></button>
       <button className="collapse-btn" onClick={toggleRightPanel} title="折叠/展开右侧栏"><PanelRight size={14} /></button>
       <button className="collapse-btn" title="切换亮/暗主题" onClick={toggleTheme}>
-        {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+        {effectiveTheme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
       </button>
     </div>
   );

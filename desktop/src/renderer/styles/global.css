@@ -721,12 +721,12 @@ body.panel-resizing {
 .cmd-cmd { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-secondary); }
 
 /* 工具调用行（紧凑单行） */
-.tool-row { margin: 2px 0 10px; }
+.tool-row { margin: 0 0 6px; }
 .tool-row-head {
   display: flex; align-items: center; gap: 8px;
   width: 100%; text-align: left;
   background: transparent; border: none; cursor: pointer;
-  padding: 5px 10px; border-radius: var(--radius-sm);
+  padding: 4px 8px; border-radius: var(--radius-sm);
   color: var(--text-secondary); font-size: 12.5px;
   font-family: var(--font-sans);
   transition: background 0.13s;
@@ -736,7 +736,7 @@ body.panel-resizing {
 .tool-glyph.success { color: var(--color-success); }
 .tool-glyph.failed { color: var(--color-error); }
 .tool-glyph.running { color: var(--accent); animation: running-pulse 1.4s ease-in-out infinite; }
-.tool-name { font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
+.tool-name { font-weight: 500; color: var(--text-primary); flex-shrink: 0; }
 .tool-state { color: var(--accent); font-weight: 500; }
 .tool-arg {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -833,7 +833,12 @@ body.panel-resizing {
 .step-dot.todo { background: var(--bg-hover); color: var(--text-muted); }
 
 /* 权限确认卡片 */
-.approval-card { border-left: 3px solid var(--color-warning); }
+.approval-card {
+  border-left: 3px solid var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--bg-card));
+  border-radius: 10px;
+  overflow: hidden;
+}
 .approval-actions { display: flex; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4); }
 
 /* 待办清单卡（模型用 todo_write 维护的会话级任务列表） */
@@ -1782,7 +1787,7 @@ body.panel-resizing {
 .key-ok { display: inline-flex; align-items: center; gap: 3px; color: var(--color-success); font-size: 10.5px; margin-left: 6px; }
 
 /* 通用：主题选择 */
-.theme-row { display: flex; gap: 10px; }
+.theme-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .theme-opt {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 9px 14px; font-size: 12.5px; color: var(--text-secondary);
