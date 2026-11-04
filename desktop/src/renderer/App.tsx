@@ -1,7 +1,7 @@
 /**
  * 主应用：三栏布局装配 + 后端连接 + 首次引导 + 键盘快捷键。
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { StatusBar } from './components/StatusBar';
 import { LeftPanel } from './components/LeftPanel';
 import { ChatFlow } from './components/ChatFlow';
@@ -47,6 +47,23 @@ export default function App() {
   // 连接后端
   useEffect(() => {
     connectBackend();
+  }, []);
+
+  // 启动时若右栏停在"没有页面的浏览器"，收起它——空工作台白占三分之一宽度。
+  // 只在首个 browser-tabs 事件时判断一次：之后用户手动打开的保留。
+  const startupPanelChecked = useRef(false);
+  useEffect(() => {
+    const onTabs = (e: Event) => {
+      if (startupPanelChecked.current) return;
+      startupPanelChecked.current = true;
+      const count = Number((e as CustomEvent).detail);
+      const ui = useUIStore.getState();
+      if (count === 0 && ui.rightPanelOpen && ui.rightTab === 'browser') {
+        ui.toggleRightPanel();
+      }
+    };
+    window.addEventListener('browser-tabs', onTabs);
+    return () => window.removeEventListener('browser-tabs', onTabs);
   }, []);
 
   // 桌面宠物：按持久化开关恢复 + 运行状态推送（气泡随任务变化）

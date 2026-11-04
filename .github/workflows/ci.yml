@@ -23,6 +23,29 @@ jobs:
       - run: pip install ruff
       - run: ruff check .
 
+  desktop:
+    # 桌面端与主进程的编译/单测放这里：纯 Python 的作业看不到 TS/CSS 回归
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: 安装依赖
+        working-directory: desktop
+        run: npm ci
+      - name: 单元测试
+        working-directory: desktop
+        run: npx vitest run
+      - name: 构建
+        working-directory: desktop
+        run: npm run build
+
   test-windows:
     runs-on: windows-latest
     timeout-minutes: 40

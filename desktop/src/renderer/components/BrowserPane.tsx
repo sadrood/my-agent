@@ -275,6 +275,15 @@ export function BrowserPane() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs.length, activeTabId, perTab]);
 
+  // 让主窗口知道当前有没有真实页面：右栏停在空的浏览器标签时启动可自动收起。
+  // 延迟到父组件的 effect 注册之后再发：子组件 effect 先于父组件执行，直接发会丢事件。
+  useEffect(() => {
+    const t = setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('browser-tabs', { detail: tabs.length }));
+    }, 0);
+    return () => clearTimeout(t);
+  }, [tabs.length]);
+
   // 暴露给上层（App 打开浏览器面板）的 Agent 导航请求：embeddedNav 里带新 URL → 新标签
   useEffect(() => {
     if (!embeddedNav || embeddedNav.seq === appliedSeq.current) return;

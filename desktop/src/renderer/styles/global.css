@@ -2743,3 +2743,9 @@ body {
 /* 更新提示 chip */
 .update-chip { color: var(--color-warning); border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent); }
 .update-chip:hover { background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+
+/* 键盘可达性：统一焦点环（低特异性，组件可覆盖） */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}

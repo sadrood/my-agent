@@ -244,10 +244,10 @@ export function InputArea({ onSend, disabled }: Props) {
           </div>
         )}
         <div className="input-toolbar">
-          <button className="collapse-btn" title="附加文件" onClick={() => fileInputRef.current?.click()}>
+          <button className="collapse-btn" title="附加文件" aria-label="附加文件" onClick={() => fileInputRef.current?.click()}>
             <Paperclip size={16} />
           </button>
-          <button className="collapse-btn" title="引用文件 (@)" onClick={() => setShowAtMenu((v) => !v)}>
+          <button className="collapse-btn" title="引用文件 (@)" aria-label="引用文件" onClick={() => setShowAtMenu((v) => !v)}>
             <AtSign size={16} />
           </button>
           <div style={{ flex: 1 }} />
@@ -263,19 +263,21 @@ export function InputArea({ onSend, disabled }: Props) {
           <button
             className="status-chip"
             data-chip="tasks"
+            aria-label="定时任务"
             onClick={() => useUIStore.getState().setRightTab('tasks')}
             title="定时任务（点击直达任务中心）"
           >
-            <Clock size={11} /> <span className="sc-label">定时</span>
+            <Clock size={13} />
           </button>
           <span style={{ position: 'relative' }}>
             <button
               className="status-chip"
               data-chip="runtime"
+              aria-label="运行时引擎"
               onClick={() => setRuntimeOpen((v) => !v)}
-              title="运行时引擎（驱动本会话的 Agent）"
+              title={`运行时引擎：${RUNTIME_LABELS[currentRuntime] || currentRuntime}`}
             >
-              <Settings2 size={13} /> <span className="sc-label">{RUNTIME_LABELS[currentRuntime] || currentRuntime}</span>
+              <Settings2 size={13} />
             </button>
             {runtimeOpen && (
               <div className="runtime-pop">
