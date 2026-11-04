@@ -50,9 +50,10 @@ export default function App() {
   }, []);
 
   // 启动时若右栏停在"没有页面的浏览器"，收起它——空工作台白占三分之一宽度。
-  // 只在首个 browser-tabs 事件时判断一次：之后用户手动打开的保留。
+  // 只认启动后 8 秒内的首个事件：之后用户主动打开的（哪怕还没有页面）保持原样。
   const startupPanelChecked = useRef(false);
   useEffect(() => {
+    const timer = setTimeout(() => { startupPanelChecked.current = true; }, 8000);
     const onTabs = (e: Event) => {
       if (startupPanelChecked.current) return;
       startupPanelChecked.current = true;
@@ -63,7 +64,10 @@ export default function App() {
       }
     };
     window.addEventListener('browser-tabs', onTabs);
-    return () => window.removeEventListener('browser-tabs', onTabs);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('browser-tabs', onTabs);
+    };
   }, []);
 
   // 桌面宠物：按持久化开关恢复 + 运行状态推送（气泡随任务变化）

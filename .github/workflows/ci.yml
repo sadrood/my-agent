@@ -36,9 +36,27 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
+      - name: 换到 GitHub 可达的 registry
+        working-directory: desktop
+        # 锁文件是开发者用国内镜像生成的；runner 上访问 npmmirror 不稳定
+        run: sed -i 's#https://registry.npmmirror.com#https://registry.npmjs.org#g' package-lock.json
       - name: 安装依赖
         working-directory: desktop
-        run: npm ci
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --no-audit --no-fund 2>&1 | tee npm-ci.log
+      - name: npm ci 失败摘要
+        if: failure()
+        working-directory: desktop
+        shell: bash
+        run: |
+          n=0
+          while IFS= read -r line; do
+            n=$((n + 1))
+            [ "$n" -gt 15 ] && break
+            echo "::error::${line//'%'/'%25'}"
+          done < <(tail -20 npm-ci.log 2>/dev/null || true)
       - name: 单元测试
         working-directory: desktop
         run: npx vitest run
