@@ -45,7 +45,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm ci --no-audit --no-fund 2>&1 | tee npm-ci.log
+          # 锁文件是在 Windows 上生成的，只含 win32 的 esbuild 可选依赖；
+          # Linux 上 npm ci 会报 Missing: @esbuild/linux-x64 → 用 install 补齐平台包
+          npm install --no-audit --no-fund 2>&1 | tee npm-ci.log
       - name: npm ci 失败摘要
         if: failure()
         working-directory: desktop
