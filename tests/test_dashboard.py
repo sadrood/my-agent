@@ -798,3 +798,15 @@ def test_side_browser_getter_creates_isolated_instance(monkeypatch):
         assert srv._get_side_browser() is tool
     finally:
         srv._SIDE_BROWSER = old
+
+
+def test_hub_caps_tool_calls_and_screenshots():
+    from dashboard.hub import DashboardHub
+    hub = DashboardHub()
+    for _ in range(330):
+        hub.emit("tool_call", {"tool": "terminal"})
+    for _ in range(120):
+        hub.emit("screenshot", {"path": "x"})
+    assert len(hub.get_current_state()["tool_calls"]) == 50
+    assert len(hub._tool_calls) == 300
+    assert len(hub._screenshots) == 100

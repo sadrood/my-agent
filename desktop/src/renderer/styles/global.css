@@ -54,7 +54,7 @@
   --border-strong: #383838;
   --text-primary: #f5f5f5;
   --text-secondary: #ababab;
-  --text-muted: #8c8c8c;
+  --text-muted: #9a9a9a;
   --text-on-accent: #0d0d0d;
 }
 
@@ -101,7 +101,7 @@
   --border-strong: #383838;
   --text-primary: #f5f5f5;
   --text-secondary: #ababab;
-  --text-muted: #8c8c8c;
+  --text-muted: #9a9a9a;
 
   /* 强调 = 白 */
   --accent: #f5f5f5;
@@ -290,9 +290,8 @@ body.panel-resizing {
 }
 
 .status-bar .brand {
-  font-weight: 700; font-size: 14px; letter-spacing: 0.02em;
-  background: var(--accent-gradient);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-weight: 700; font-size: 14px; letter-spacing: 0.01em;
+  color: var(--text-primary);
   margin-right: var(--sp-2);
 }
 .status-chip {
@@ -311,9 +310,9 @@ body.panel-resizing {
 .status-chip:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-strong); }
 .status-chip .sc-label { display: inline; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.status-dot.green { background: var(--color-success); box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
-.status-dot.yellow { background: var(--color-warning); box-shadow: 0 0 6px rgba(251, 191, 36, 0.6); }
-.status-dot.red { background: var(--color-error); box-shadow: 0 0 6px rgba(248, 113, 113, 0.6); }
+.status-dot.green { background: var(--color-success); }
+.status-dot.yellow { background: var(--color-warning); }
+.status-dot.red { background: var(--color-error); }
 .status-bar .spacer { flex: 1; }
 
 /* ---------- 左侧：会话列表 ---------- */
@@ -416,13 +415,13 @@ body.panel-resizing {
 
 /* ---------- 对话流 ---------- */
 .chat-flow-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
-.chat-flow { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 32px 48px 52px; scroll-behavior: smooth; }
+.chat-flow { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 24px 56px; scroll-behavior: smooth; }
 /* 主对话区隐藏滚动条（纯净阅读区）：保留滚动能力，不占视觉宽度 */
 .chat-flow { scrollbar-width: none; }
 .chat-flow::-webkit-scrollbar { display: none; width: 0; height: 0; }
 
 /* 消息流居中限宽（正文不随窗口无限拉宽，阅读节奏更稳） */
-.chat-flow { max-width: 980px; margin: 0 auto; width: 100%; }
+.chat-flow { max-width: 860px; margin: 0 auto; width: 100%; }
 /* 显式背景：防止继承链断裂时露出 :root 的深色底（浅色主题下主对话区发黑的兜底） */
 .chat-flow { background: var(--bg-app); }
 /* 无 hljs 类的代码块同样跟随主题背景（避免深色残留） */
@@ -658,7 +657,8 @@ body.panel-resizing {
 /* 按钮 */
 .btn {
   padding: 7px 16px;
-  border-radius: var(--radius-md);
+  min-height: 34px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg-card);
   color: var(--text-primary);
@@ -944,16 +944,16 @@ body.panel-resizing {
 .input-box {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 13px 16px;
-  box-shadow: none;
+  border-radius: 20px;
+  padding: 14px 18px;
+  box-shadow: var(--shadow-xs);
   max-width: 860px;
   margin: 0 auto;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .input-box:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-color: var(--accent-ring);
+  box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow-sm);
 }
 .input-textarea {
   width: 100%; border: none; background: transparent;
@@ -1970,11 +1970,11 @@ body.panel-resizing {
 
 /* 杈撳叆妗嗭細杞诲井娴捣 + 鏌斿厜鍦堬紙MyAgents 鎰燂級 */
 .input-box {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 10px 28px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-xs);
 }
 .input-box:focus-within {
   border-color: var(--accent-ring);
-  box-shadow: 0 0 0 3px var(--accent-ring), 0 2px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow-sm);
 }
 
 /* 浼氳瘽椤?hover/active 鏇存煍鍜?*/

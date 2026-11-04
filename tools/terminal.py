@@ -177,6 +177,11 @@ class TerminalTool(TerminalJobsMixin, BaseTool):
         if self._sessions:
             self._sessions.close_all()
 
+    def reset(self) -> None:
+        """超时后的清理：终止前台命令、关闭持久 shell；后台任务仍可 bg list/kill。"""
+        self.terminate_current()
+        self.close_all_sessions()
+
     def set_stop_event(self, event) -> None:
         """绑定外部停止信号（threading.Event），前台命令执行期间轮询检查。"""
         self._stop_event = event

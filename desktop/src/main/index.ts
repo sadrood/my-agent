@@ -902,8 +902,9 @@ app.whenReady().then(async () => {
   // 隐藏默认英文菜单栏（干净的桌面客户端外观）
   Menu.setApplicationMenu(null);
   startBrowserBridge();
-  await startBackend();
+  // 先出窗口，后端在后台拉起：冷启动/杀软拦截不该表现为双击图标没反应。
   createWindow();
+  void startBackend();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -65,8 +65,12 @@ class DashboardHub:
                 self._current_run["steps"].append(data)
             elif event_type == "screenshot":
                 self._screenshots.append(data)
+                if len(self._screenshots) > 100:
+                    del self._screenshots[:-100]
             elif event_type == "tool_call":
                 self._tool_calls.append(data)
+                if len(self._tool_calls) > 300:
+                    del self._tool_calls[:-300]
             elif event_type == "tool_result":
                 call_id = data.get("call_id")
                 for tc in reversed(self._tool_calls):

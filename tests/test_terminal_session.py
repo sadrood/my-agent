@@ -120,3 +120,16 @@ class TestMojibakeHint:
         from tools.terminal import _encoding_hint
         assert _encoding_hint("正常输出：命令返回码 0") == ""
         assert _encoding_hint("") == ""
+
+
+class TestTerminalReset:
+    def test_reset_kills_foreground_and_closes_shells_but_keeps_bg_jobs(self, monkeypatch):
+        from tools.terminal import TerminalTool
+        tool = TerminalTool()
+        called = []
+        monkeypatch.setattr(tool, "terminate_current", lambda: called.append("fg") or True)
+        monkeypatch.setattr(tool, "close_all_sessions", lambda: called.append("shells"))
+        tool._jobs["job-1"] = {"proc": None}
+        tool.reset()
+        assert called == ["fg", "shells"]
+        assert "job-1" in tool._jobs, "后台任务不能被超时清理顺手抹掉"
