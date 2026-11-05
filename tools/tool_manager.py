@@ -10,6 +10,7 @@ from tools.file import FileTool
 from tools.python import PythonTool
 from tools.browser import BrowserTool
 from tools.patch import EditTool
+from tools.code_index import CodeIndexTool
 from tools.todo import TodoTool
 import os
 
@@ -109,6 +110,7 @@ class ToolManager:
         self.register(DelegateTool())
         self.register(ExperienceTool())
         self.register(FileTool())
+        self.register(CodeIndexTool())
         self.register(PythonTool())
         self.register(browser)
         self.register(EditTool())

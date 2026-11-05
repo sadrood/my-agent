@@ -161,11 +161,11 @@ BROWSER_EGO_HEADLESS=false              # true = 无窗口运行，完全不弹�
 > 缺运行时不会报错，而是**静默降级到 Playwright**——所以换机器后先跑
 > `python main.py --doctor` 看「浏览器后端」那一行，它会明说是否降级、以及缺了什么。
 
-## 🧰 工具（27 个）
+## 🧰 工具（28 个）
 
-**常驻 16** —— 每轮都在提示词里，拿来就用：
+**常驻 17** —— 每轮都在提示词里，拿来就用：
 
-`terminal` · `file` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context` · `ask_user`
+`terminal` · `file` · `code_index` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context` · `ask_user`
 
 **按需装载 10** —— schema 不进提示词，用时先装载（也支持目标关键词自动装载）：
 
