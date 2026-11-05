@@ -1,0 +1,66 @@
+name: eval-nightly
+
+# 固定任务集的夜间基线：不阻塞 PR，只负责产出"当前水平的数字"。
+# 需要仓库 Secrets: LLM_API_KEY / LLM_BASE_URL（可选 vars.LLM_DEFAULT_MODEL）。
+on:
+  schedule:
+    - cron: "0 18 * * *"          # UTC 18:00 = 北京时间 02:00
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "逗号分隔的任务 id"
+        default: "count-errors,fix-off-by-one,fix-json-config"
+        required: false
+      runs:
+        description: "每个任务跑几次（pass@1 分母）"
+        default: "1"
+        required: false
+
+jobs:
+  eval:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: 检查评测密钥
+        id: key
+        shell: bash
+        env:
+          KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "has=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 LLM_API_KEY，跳过评测（在 Secrets 里加 LLM_API_KEY / LLM_BASE_URL 后自动生效）"
+          else
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 运行评测
+        if: steps.key.outputs.has == 'true'
+        shell: bash
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_DEFAULT_MODEL: ${{ vars.LLM_DEFAULT_MODEL || 'glm-5.2' }}
+        run: |
+          TASKS="${{ github.event.inputs.tasks || 'count-errors,fix-off-by-one,fix-json-config' }}"
+          RUNS="${{ github.event.inputs.runs || '1' }}"
+          ARGS=()
+          IFS=',' read -ra names <<< "$TASKS"
+          for name in "${names[@]}"; do ARGS+=(--task "$name"); done
+          python eval/run.py "${ARGS[@]}" --runs "$RUNS"
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            eval/results/*/report.json
+            eval/results/*/report.md
+          if-no-files-found: ignore
