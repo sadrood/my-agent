@@ -3,7 +3,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Send, Paperclip, AtSign, X, Square, Clock, Zap, Cpu, Settings2 } from 'lucide-react';
-import { stopRun, fetchFileTree, fetchRuntimes, fetchSkills, setPermissionMode, type FileTreeNode, type SkillInfo } from '../lib/backend';
+import { stopRun, fetchFileTree, fetchRuntimes, fetchSkills, setPermissionMode, drainQueue, type FileTreeNode, type SkillInfo } from '../lib/backend';
 import { useBackendStore, usePermissionStore, useSessionStore, useUIStore } from '../store';
 import { loadConfig, saveConfig } from '../lib/appConfig';
 import { MODE_META } from './StatusBar';
@@ -233,7 +233,7 @@ export function InputArea({ onSend, disabled }: Props) {
           </div>
         )}
         {queue.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 }}>
             {queue.map((q, i) => (
               <span key={i} className="attach-chip" title={q.text}>
                 <Clock size={11} /> {q.text.slice(0, 24) || '(附件任务)'}
@@ -241,6 +241,13 @@ export function InputArea({ onSend, disabled }: Props) {
                   onClick={() => removeQueuedAt(i)}><X size={11} /></button>
               </span>
             ))}
+            <button
+              className="status-chip"
+              title="发送排队任务（不会自动执行，需你确认）"
+              onClick={() => { void drainQueue(); }}
+            >
+              <Send size={11} /> 发送队列（{queue.length}）
+            </button>
           </div>
         )}
         <div className="input-toolbar">

@@ -97,6 +97,26 @@ jobs:
             echo "::error::${line//'%'/'%25'}"
           done < <(grep -E '^(FAILED|ERROR) ' pytest.log || true)
 
+  desktop-smoke:
+    # Electron 启动冒烟：构建过了不等于窗口能起来。先只报告不阻塞（无后端环境）。
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 换到 GitHub 可达的 registry
+        working-directory: desktop
+        run: sed -i 's#https://registry.npmmirror.com#https://registry.npmjs.org#g' package-lock.json
+      - name: 安装依赖（含 Electron 二进制）
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+      - name: Electron 启动冒烟
+        working-directory: desktop
+        run: xvfb-run -a node scripts/electron-smoke.cjs
+
   test-linux:
     # 一批 Windows 专属用例（桌面操控 / 沙箱 / Edge 路径）在 Linux 上会挂住，
     # 跑到 30 分钟被取消、把整次 CI 标成失败。Linux 支持还没做，先只在手动触发时跑。

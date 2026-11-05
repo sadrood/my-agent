@@ -423,8 +423,9 @@ export async function connectBackend(): Promise<void> {
         useBackendStore.getState().setRunning(true, sid ?? undefined);
       }
     });
-    // 恢复持久化的任务队列：后端空闲时自动续发排队任务
-    setTimeout(() => { void drainQueue(); }, 1200);
+    // 不再自动续发：排队任务必须用户明确点「发送队列」才会下发，
+    // 避免一开客户端就把上次没发的目标自动跑掉（消耗额度）。
+    // 队列只在 run_end 自动推进（那是用户已主动排队的）。
   };
   ws.onmessage = (ev) => {
     try {
@@ -438,7 +439,7 @@ export async function connectBackend(): Promise<void> {
       if (msg.type === 'state_snapshot') {
         store.setRunning(Boolean((msg.data || {}).running));
         // 队列兜底：后端空闲且有排队任务（如上次后端崩溃没等到 run_end）→ 续发
-        if (!(msg.data || {}).running) setTimeout(() => { void drainQueue(); }, 800);
+        // 不再在 state_snapshot 自动续发排队任务（同上：显式确认才发）
         return;
       }
       if (msg.type === 'run_start') {
