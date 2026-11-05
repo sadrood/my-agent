@@ -279,7 +279,9 @@ class TestNewSubsystemChecks:
                             lambda cmd, workspace: SimpleNamespace(
                                 returncode=1, stdout="", stderr="拒绝访问", error=""))
         r = doc._check_sandbox()
-        assert r["ok"] is False and "Python" in r["message"]
+        assert r["ok"] is False
+        # 有 .venv 时报 Python 不可用；无 .venv（CI）时报基础命令失败
+        assert "Python" in r["message"] or "命令执行失败" in r["message"]
 
     def test_new_checks_in_run_doctor(self):
         names = {r["name"] for r in doc.run_doctor(include_llm=False)}
