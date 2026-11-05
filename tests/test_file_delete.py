@@ -106,9 +106,10 @@ class TestDeleteGuardCaseInsensitive:
 
 class TestApprovalMetadata:
     def test_delete_is_workspace_write(self, tool, tmp_path):
+        # 工作区外删除升 high（tmp_path 不在项目内）；沙箱仍要求 workspace-write
         req = tool.build_approval_request(
             {"operation": "delete", "path": str(tmp_path / "a.txt")})
-        assert req.risk_level == "medium" and req.min_sandbox_mode == "workspace-write"
+        assert req.risk_level == "high" and req.min_sandbox_mode == "workspace-write"
 
     def test_recursive_delete_is_high_risk(self, tool, tmp_path):
         req = tool.build_approval_request(
@@ -136,3 +137,18 @@ def test_schema_exposes_delete(tool):
     ops = tool.schema["properties"]["operation"]["enum"]
     assert "delete" in ops
     assert "recursive" in tool.schema["properties"]
+
+
+class TestSensitiveDelete:
+    def test_credentials_cannot_be_deleted(self):
+        from tools.file import FileTool
+        tool = FileTool()
+        for name in (".env", ".env.local", "memory/ipc.json"):
+            assert "拒绝删除凭据文件" in tool._delete_guard(name), name
+
+    def test_outside_workspace_delete_needs_approval(self, tmp_path):
+        from tools.file import FileTool
+        req = FileTool().build_approval_request({"operation": "delete", "path": str(tmp_path / "x")})
+        assert req.risk_level == "high" and req.approval == "on-request"
+        inside = FileTool().build_approval_request({"operation": "delete", "path": "output/tmp.txt"})
+        assert inside.risk_level == "medium", "工作区内删除保持原行为"

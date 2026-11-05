@@ -74,11 +74,12 @@ class WorkerAgent:
     """Worker Agent：带特定角色的执行单元。"""
 
     def __init__(self, name: str, role: AgentRole, llm: LLM, tool_manager,
-                 approval=None):
+                 approval=None, guardian=None):
         self.name = name
         self.role = role
         self.llm = llm
         self.tool_manager = tool_manager
+        self.guardian = guardian
         # : 审批策略（ApprovalPolicy | None）。团队模式之前**完全没有**审批门，: worker 的工具调用是裸调 tool_manager.execute()。
         self.approval = approval
 
@@ -127,6 +128,13 @@ class WorkerAgent:
                 deny_reason = check_tool_execution(
                     self.approval, self.tool_manager, tool_name,
                     arguments_from_string(tool_input))
+                if not deny_reason and self.guardian is not None:
+                    request = self.tool_manager.build_approval_request(
+                        tool_name, arguments_from_string(tool_input))
+                    if request is not None and self.guardian.should_review(request.risk_level):
+                        verdict = self.guardian.review(request, task)
+                        if verdict.verdict == "block":
+                            deny_reason = f"Guardian 拦截: {verdict.reason}"
                 if deny_reason:
                     output = f"错误: 被审批策略拒绝（{deny_reason}）"
                     tool_success = False
@@ -190,9 +198,10 @@ class WorkerAgent:
 class Team:
     """Agent 团队（Manager-Worker 模式）。"""
 
-    def __init__(self, llm: LLM = None, tool_manager=None, approval=None):
+    def __init__(self, llm: LLM = None, tool_manager=None, approval=None, guardian=None):
         self.llm = llm or LLM()
         self.tool_manager = tool_manager
+        self.guardian = guardian if guardian is not None else self._build_guardian()
         # 审批策略：显式传参优先，否则按 APPROVAL_CONFIG 构造（与 Agent 同源）。团队模式是无人值守的，所以 interactive 固定 False。
         if approval is None:
             try:
@@ -250,7 +259,22 @@ class Team:
                 llm=self.llm,
                 tool_manager=self.tool_manager,
                 approval=self.approval,
+                guardian=self.guardian,
             )
+
+    def _build_guardian(self):
+        """与 Agent._build_guardian 同规则：启用且有 key 才建审校实例。"""
+        from config import GUARDIAN_CONFIG, LLM_CONFIG
+        if not GUARDIAN_CONFIG.get("enabled", True):
+            return None
+        g_key = GUARDIAN_CONFIG.get("api_key") or LLM_CONFIG.get("api_key")
+        g_base = GUARDIAN_CONFIG.get("base_url") or LLM_CONFIG.get("base_url")
+        if not g_key:
+            return None
+        from agent.guardian import Guardian
+        if g_key == LLM_CONFIG.get("api_key") and g_base == LLM_CONFIG.get("base_url"):
+            return Guardian(llm=self.llm)
+        return Guardian(llm=LLM(api_key=g_key, base_url=g_base))
 
     def run(
         self,

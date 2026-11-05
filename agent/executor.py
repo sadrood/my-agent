@@ -941,7 +941,7 @@ class Executor:
                     executed.append(self._execute_one_tool_call(
                         tc, goal, display_id=display_ids[id(tc)]))
             # 参数解析失败 / 同批去重的调用按原顺序并回结果，保证与 batch 一一对应
-            by_id = {id(tc): res for tc, res in zip(dispatch, executed)}
+            by_id = {id(tc): res for tc, res in zip(dispatch, executed, strict=True)}
             merged = []
             for tc in batch:
                 if id(tc) in bad:
@@ -955,7 +955,7 @@ class Executor:
 
             read_chars = 0
             for batch_i, (tc, (result, blocked_reason, seconds)) in enumerate(
-                    zip(batch, executed), 1):
+                    zip(batch, executed, strict=True), 1):
                 # 门控工具本轮被用到 → 续命（用到一次不会立刻被空闲回收）
                 self.tool_manager.note_tool_used(tc.name)
                 if id(tc) in bad or id(tc) in dedup_from:
@@ -1040,7 +1040,7 @@ class Executor:
             answer_nudge = answer_watch.observe(turn, question_goal, read_chars)
             stall_nudge = stall_watch.observe(
                 pending.repeated,
-                tuple(tool_signature([tc for tc, (res, blocked, _s) in zip(batch, executed)
+                tuple(tool_signature([tc for tc, (res, blocked, _s) in zip(batch, executed, strict=True)
                                       if not res.success and not blocked])),
                 errors[-1] if errors else "",
             )

@@ -127,6 +127,8 @@ class FileTool(BaseTool):
                                    min_sandbox_mode="read-only")
         hit = next((t for t in targets if t and is_security_critical_path(t)), "")
         risk, approval, reason = escalate_critical(risk, [hit] if hit else [])
+        if operation == "delete" and not self._inside_workspace(path):
+            risk, approval, reason = "high", "on-request", f"删除工作区外路径：{path}"
         return ApprovalRequest(
             tool_name=self.name,
             arguments=arguments,
@@ -262,6 +264,15 @@ class FileTool(BaseTool):
     def _project_root() -> str:
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    @classmethod
+    def _inside_workspace(cls, path: str) -> bool:
+        try:
+            target = os.path.normcase(os.path.realpath(str(path or "")))
+            root = os.path.normcase(os.path.realpath(cls._project_root()))
+            return target == root or target.startswith(root + os.sep)
+        except Exception:
+            return False
+
     def _delete_guard(self, path: str) -> str:
         """返回拒绝原因（"" = 允许删除）。"""
         if not path or not path.strip():
@@ -277,6 +288,9 @@ class FileTool(BaseTool):
             return f"拒绝删除项目根目录: {target}"
         if root_cmp.startswith(target_cmp + os.sep):
             return f"拒绝删除项目根目录的上级: {target}"
+        from agent.approval import is_sensitive_path
+        if is_sensitive_path(target):
+            return f"拒绝删除凭据文件: {target}"
         parts = [os.path.normcase(x) for x in target.replace("\\", "/").split("/") if x]
         for bad in self._PROTECTED_NAMES:
             if os.path.normcase(bad) in parts:
