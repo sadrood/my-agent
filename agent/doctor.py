@@ -565,6 +565,13 @@ def _check_sandbox() -> dict:
                 "message": f"容器启动失败：{outcome.error[:120]}",
                 "hint": "先改回 SANDBOX_EXECUTION=off，或修复 AppContainer 档案权限后重试",
             }
+        if not has_venv and outcome.returncode != 0:
+            return {
+                "name": "OS 级沙箱",
+                "ok": False,
+                "message": f"容器内命令执行失败（返回码 {outcome.returncode}）",
+                "hint": "先改回 SANDBOX_EXECUTION=off，确认 AppContainer 在本机可用后再开启",
+            }
         if has_venv and not (outcome.returncode == 0 and "1" in (outcome.stdout or "")):
             return {
                 "name": "OS 级沙箱",
