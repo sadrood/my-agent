@@ -199,7 +199,13 @@ def _grant_interpreter_aces(prefix=None, base_prefix=None, which_fn=None) -> lis
     base_prefix = base_prefix or _sys.base_prefix
     which_fn = which_fn or shutil.which
 
-    candidates = [prefix, base_prefix]
+    # 显式带上 Scripts 目录：部分 venv（uv / --symlinks）会关闭该目录的 ACL 继承，
+    # 只授权 .venv 根目录时容器内仍然「拒绝访问」。
+    candidates = [
+        prefix, base_prefix,
+        os.path.join(prefix, "Scripts"), os.path.join(prefix, "bin"),
+        os.path.join(base_prefix, "Scripts"), os.path.join(base_prefix, "bin"),
+    ]
     for name in ("python.exe", "node.exe", "git.exe"):
         found = which_fn(name)
         if found:
@@ -430,6 +436,117 @@ def run_appcontainer(command: str, workspace: str,
                     os.remove(p)
             except OSError:
                 pass
+
+
+class SandboxedProcess:
+    """后台沙箱进程的最小接口：TerminalJobs 只用 pid 与 poll()。"""
+
+    def __init__(self, pid: int):
+        self.pid = int(pid)
+
+    def poll(self):
+        """None = 仍在运行；退出码 = 已结束；查不到进程时按已结束处理。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, self.pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return 0
+            try:
+                code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return 0
+                return None if code.value == 259 else int(code.value)  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:                       # noqa: BLE001
+            return 0
+
+    def kill(self) -> None:
+        _kill_tree(self.pid)
+
+
+def run_appcontainer_detached(command: str, workspace: str, log_path: str,
+                              profile_name: str = "my_agent.sandbox") -> SandboxedProcess:
+    """在 AppContainer 内启动后台命令，立即返回。
+
+    与 run_appcontainer 共用同一套容器创建逻辑，区别是不等待、输出直接写 log_path，
+    交回 pid 给 TerminalJobs 轮询/终止。
+    """
+    if not _IS_WINDOWS:
+        raise RuntimeError("AppContainer 仅支持 Windows 平台。")
+    if not os.path.isdir(workspace):
+        raise RuntimeError(f"工作区不存在: {workspace}")
+
+    api = _load_apis()
+    ctypes = api["ctypes"]
+    kernel32 = api["kernel32"]
+
+    sid_out = _ensure_container_profile(api, profile_name)
+    _grant_workspace_ace(workspace)
+    if SANDBOX_EXEC_CONFIG.get("grant_tools", True):
+        _grant_interpreter_aces()
+    extra_dirs = SANDBOX_EXEC_CONFIG.get("grant_dirs") or []
+    if extra_dirs:
+        _grant_extra_dirs(extra_dirs)
+
+    out_handle, out_fd = _open_inherit_handle(api, log_path, write=True)
+    in_handle, in_fd = _open_inherit_handle(api, os.devnull, write=False)
+
+    comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    cmdline = ctypes.create_unicode_buffer(f'"{comspec}" /d /s /c "{command}"')
+
+    siex = api["STARTUPINFOEXW"]()
+    siex.StartupInfo.cb = ctypes.sizeof(api["STARTUPINFOEXW"])
+    siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+    siex.StartupInfo.hStdInput = in_handle
+    siex.StartupInfo.hStdOutput = out_handle
+    siex.StartupInfo.hStdError = out_handle
+
+    sec_caps = api["SECURITY_CAPABILITIES"]()
+    sec_caps.AppContainerSid = sid_out
+    cap_array, cap_keepalive = _build_capabilities(api)
+    if cap_array is not None:
+        sec_caps.Capabilities = ctypes.cast(cap_array, ctypes.c_void_p)
+        sec_caps.CapabilityCount = len(cap_array)
+
+    pi = api["PROCESS_INFORMATION"]()
+    attr_size = ctypes.c_size_t(0)
+    kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_size))
+    attr_buf = ctypes.create_string_buffer(attr_size.value)
+    siex.lpAttributeList = ctypes.cast(attr_buf, ctypes.c_void_p)
+    try:
+        if not kernel32.InitializeProcThreadAttributeList(
+                attr_buf, 1, 0, ctypes.byref(attr_size)):
+            raise RuntimeError("InitializeProcThreadAttributeList 失败")
+        if not kernel32.UpdateProcThreadAttribute(
+                attr_buf, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                ctypes.byref(sec_caps), ctypes.sizeof(sec_caps), None, None):
+            raise RuntimeError("UpdateProcThreadAttribute 失败")
+        flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+        ok = kernel32.CreateProcessW(
+            None, cmdline, None, None, True, flags, None, workspace,
+            ctypes.byref(siex), ctypes.byref(pi))
+        if not ok:
+            raise RuntimeError(f"AppContainer 内启动进程失败: WinError={ctypes.get_last_error()}")
+        return SandboxedProcess(int(pi.dwProcessId))
+    finally:
+        try:
+            kernel32.DeleteProcThreadAttributeList(attr_buf)
+        except Exception:                   # noqa: BLE001
+            pass
+        for h in (pi.hProcess, pi.hThread, out_handle, in_handle):
+            if h:
+                kernel32.CloseHandle(h)
+        for fd in (out_fd, in_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        _free_capabilities(api, cap_keepalive)
+        if sid_out:
+            api["advapi32"].FreeSid(sid_out)
 
 
 def _open_inherit_handle(api, path: str, write: bool):

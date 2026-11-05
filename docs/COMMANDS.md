@@ -679,7 +679,7 @@ edit、写文件、团队 worker 的调用不折叠（diff 与归属是要看的
 | TEAM_WORKER_TIMEOUT | 900 | 并行 Worker 硬超时秒数（超时标记该子任务失败） |
 | APPROVAL_COMMAND_WHITELIST | false | 命令白名单深度防御：终端命令未命中白名单需人工批准（never 下直接拒绝） |
 | APPROVAL_COMMAND_WHITELIST_EXTRA | 空 | 追加白名单正则（用 \| 分隔） |
-| SANDBOX_EXECUTION | off | OS 级沙箱：appcontainer = 终端前台命令进 Windows AppContainer（仅工作区可写、无网络、fail-closed） |
+| SANDBOX_EXECUTION | off | OS 级沙箱：appcontainer = 终端**前台与后台**命令都进 Windows AppContainer（仅工作区可写、无网络、fail-closed）。开启前先 `--doctor` 验证容器内能执行项目 `.venv` 的 python（Windows 上该目录常不继承 ACL） |
 | SANDBOX_EXEC_TIMEOUT | 120 | 沙箱内命令硬超时秒数 |
 | SANDBOX_GRANT_TOOLS | true | 沙箱启动时给 Python/Node/Git 解释器目录授予容器只读执行权限（icacls best-effort，false 关闭） |
 | SANDBOX_GRANT_DIRS | 空 | 额外只读授权目录清单（; 分隔，工作区之外的共享库/数据集等） |

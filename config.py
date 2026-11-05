@@ -873,6 +873,9 @@ def _normalize_sandbox_mode(raw) -> str:
 
 SANDBOX_EXEC_CONFIG = {
     # 沙箱执行模式：off（默认，行为不变）/ appcontainerappcontainer = 终端前台命令在 Windows AppContainer 内执行：默认不可访问用户文件/注册表/网络，仅可写工作区（icacls 授权）。
+    # 默认 off：AppContainer 能跑命令，但 Windows 上 .venv 常见「ACL 不继承 + 当前用户
+    # 无写 DAC 权限」，容器内 python/pytest 会拒绝访问（doctor 会实测并给出修复命令）。
+    # 确认可用后再显式开启 SANDBOX_EXECUTION=appcontainer。
     "mode": _normalize_sandbox_mode(os.getenv("SANDBOX_EXECUTION", "off")),
     # 沙箱内命令硬超时秒数
     "timeout": float(os.getenv("SANDBOX_EXEC_TIMEOUT", "120")),

@@ -543,13 +543,35 @@ def _check_sandbox() -> dict:
                 "message": "未启用（SANDBOX_EXECUTION=off）",
                 "hint": "",
             }
-        from agent.sandbox import appcontainer_available
+        from agent.sandbox import appcontainer_available, run_isolated
         if not appcontainer_available():
             return {
                 "name": "OS 级沙箱",
                 "ok": False,
                 "message": f"模式 {mode} 在当前平台不可用",
                 "hint": "AppContainer 仅支持 Windows 8+；非 Windows 请改回 off",
+            }
+        # 实跑一次：容器起不来、或容器内读不到项目 .venv 的 python，都算不可用。
+        # Windows 上 .venv 常见「ACL 不继承 + 非管理员无写 DAC 权限」，只看 API
+        # 可加载会误报"可用"，真开起来则所有 python/pytest 命令拒绝访问。
+        venv_py = os.path.join(os.getcwd(), ".venv", "Scripts", "python.exe")
+        has_venv = os.path.isfile(venv_py)
+        probe = f'"{venv_py}" -c "print(1)"' if has_venv else "cmd /c exit 0"
+        outcome = run_isolated(probe, workspace=os.getcwd())
+        if outcome.error:
+            return {
+                "name": "OS 级沙箱",
+                "ok": False,
+                "message": f"容器启动失败：{outcome.error[:120]}",
+                "hint": "先改回 SANDBOX_EXECUTION=off，或修复 AppContainer 档案权限后重试",
+            }
+        if has_venv and not (outcome.returncode == 0 and "1" in (outcome.stdout or "")):
+            return {
+                "name": "OS 级沙箱",
+                "ok": False,
+                "message": "容器内项目 Python 不可用（.venv ACL 未继承 / 当前用户无写 DAC 权限）",
+                "hint": ("以管理员身份执行一次：icacls .venv\Scripts "
+                         "/grant *S-1-15-2-1:(OI)(CI)(RX) /T；或改回 SANDBOX_EXECUTION=off"),
             }
         return {
             "name": "OS 级沙箱",

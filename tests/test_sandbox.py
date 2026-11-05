@@ -129,15 +129,29 @@ class TestTerminalIntegration:
         assert "返回码: 2" in result.error
         assert "boom" in result.output
 
-    def test_background_commands_refused_when_sandbox_enabled(self, monkeypatch):
-        """后台走裸 Popen、进不了 AppContainer → 沙箱模式下必须拒绝（fail-closed）。"""
+    def test_background_commands_run_in_sandbox(self, monkeypatch):
+        """后台命令也在 AppContainer 内 detach 启动，不再是不受管的裸 Popen。"""
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        calls = {}
+
+        class _Proc:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def _fake(command, workspace, log_path, **kwargs):
+            calls.update(command=command, workspace=workspace, log_path=log_path)
+            return _Proc()
+
+        monkeypatch.setattr(sandbox, "run_appcontainer_detached", _fake)
         tool = self._make_tool()
-        monkeypatch.setattr(tool, "_start_background",
-                            lambda cmd: pytest.fail("沙箱下不该起后台进程"))
         result = tool._run_command("echo hi", background=True)
-        assert result.success is False
-        assert "沙箱" in result.error
+        assert result.success and "4242" in result.output
+        assert calls["command"] == "echo hi" and calls["workspace"]
+        for job in list(tool._jobs.values()):
+            tool._finish_job(job)
+        tool._jobs.clear()
 
 
 class TestUnsandboxablePathsFailClosed:
@@ -350,3 +364,19 @@ class _StubAdvapi32:
 class _StubKernel32:
     def __init__(self, freed):
         self.LocalFree = lambda h: freed.append(h)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer 仅 Windows")
+def test_detached_background_runs_inside_sandbox(tmp_path, monkeypatch):
+    """后台任务也必须进容器：detach 启动、输出写日志、能轮询到退出。"""
+    monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+    if not sandbox.appcontainer_available():
+        pytest.skip("当前系统不支持 AppContainer")
+    log = tmp_path / "bg.log"
+    proc = sandbox.run_appcontainer_detached(
+        "echo detached-ok", workspace=str(tmp_path), log_path=str(log))
+    deadline = time.time() + 15
+    while time.time() < deadline and proc.poll() is None:
+        time.sleep(0.1)
+    assert proc.poll() is not None, "后台沙箱进程没有在 15s 内结束"
+    assert "detached-ok" in log.read_text(encoding="utf-8", errors="replace")

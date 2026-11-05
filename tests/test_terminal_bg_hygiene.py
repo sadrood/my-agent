@@ -137,15 +137,27 @@ class TestBackgroundSandboxFailClosed:
         from config import SANDBOX_EXEC_CONFIG
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "off")
 
-    def test_sandbox_enabled_refuses_background(self, monkeypatch, tool):
+    def test_sandbox_enabled_routes_background_into_container(self, monkeypatch, tool):
+        """后台命令也进 AppContainer（detach），不再是不受管的裸 Popen。"""
+        import agent.sandbox as sandbox
         from config import SANDBOX_EXEC_CONFIG
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
-        monkeypatch.setattr(TerminalTool, "_start_background",
-                            lambda self, cmd: pytest.fail("沙箱下不该真的起后台进程"))
+        calls = {}
+
+        class _Proc:
+            pid = 777
+
+            def poll(self):
+                return 0
+
+        def _fake(command, workspace, log_path, **kwargs):
+            calls.update(command=command, workspace=workspace, log_path=log_path)
+            return _Proc()
+
+        monkeypatch.setattr(sandbox, "run_appcontainer_detached", _fake)
         r = tool.execute_json({"command": "echo nope", "background": True})
-        assert r.success is False
-        assert "沙箱" in r.error and "前台" in r.error
-        assert "SANDBOX_EXECUTION=off" in r.error, "要给恢复途径"
+        assert r.success and "777" in r.output
+        assert calls["command"] == "echo nope" and calls["workspace"]
 
     def test_background_unchanged_when_sandbox_off(self, tool):
         jid = start_bg(tool, "echo bg-allowed")
@@ -169,14 +181,24 @@ class TestBackgroundSandboxFailClosed:
         assert "echo fg" in seen.get("cmd", ""), "前台命令必须仍走沙箱"
         assert r.success and "sandboxed-ok" in r.output
 
-    def test_embedded_terminal_shares_the_gate(self, monkeypatch):
-        """内嵌终端后台转调 super()._run_command → 同一道闸门，无旁路。"""
+    def test_embedded_terminal_background_shares_sandbox_route(self, monkeypatch):
+        """内嵌终端后台转调 super()._run_command → 同样走 AppContainer。"""
+        import agent.sandbox as sandbox
         from config import SANDBOX_EXEC_CONFIG
         from tools.embedded_terminal import EmbeddedTerminalTool
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+
+        class _Proc:
+            pid = 888
+
+            def poll(self):
+                return 0
+
+        monkeypatch.setattr(sandbox, "run_appcontainer_detached",
+                            lambda command, workspace, log_path, **kw: _Proc())
         t = EmbeddedTerminalTool(bridge_url="http://127.0.0.1:1/terminal")
         r = t._run_command("echo x", background=True)
-        assert r.success is False and "沙箱" in r.error
+        assert r.success and "888" in r.output
 
 
 class TestSecurityCriticalCommandApproval:

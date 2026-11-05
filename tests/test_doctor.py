@@ -257,11 +257,29 @@ class TestNewSubsystemChecks:
 
     def test_sandbox_appcontainer_mode(self, monkeypatch):
         from config import SANDBOX_EXEC_CONFIG
+        import agent.sandbox as sandbox
+        from types import SimpleNamespace
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
         monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "allow_network", True)
+        monkeypatch.setattr(sandbox, "appcontainer_available", lambda: True)
+        monkeypatch.setattr(sandbox, "run_isolated",
+                            lambda cmd, workspace: SimpleNamespace(
+                                returncode=0, stdout="1", stderr="", error=""))
         r = doc._check_sandbox()
         assert r["ok"] is True
         assert "网络 放行" in r["message"]
+
+    def test_sandbox_mode_fails_when_venv_python_blocked(self, monkeypatch):
+        from config import SANDBOX_EXEC_CONFIG
+        import agent.sandbox as sandbox
+        from types import SimpleNamespace
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "appcontainer")
+        monkeypatch.setattr(sandbox, "appcontainer_available", lambda: True)
+        monkeypatch.setattr(sandbox, "run_isolated",
+                            lambda cmd, workspace: SimpleNamespace(
+                                returncode=1, stdout="", stderr="拒绝访问", error=""))
+        r = doc._check_sandbox()
+        assert r["ok"] is False and "Python" in r["message"]
 
     def test_new_checks_in_run_doctor(self):
         names = {r["name"] for r in doc.run_doctor(include_llm=False)}

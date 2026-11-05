@@ -21,12 +21,18 @@ class TerminalJobsMixin:
         try:
             job_id = f"job-{int(time.time() * 1000)}-{len(self._jobs) + 1}"
             out_path = os.path.join(tempfile.gettempdir(), f"my_agent_bg_{job_id}.log")
-            f_out = open(out_path, "w", encoding="utf-8", errors="replace")
             evicted = self._prune_jobs()   # 先按上限淘汰老任务（顺带关句柄、删日志）
-            proc = subprocess.Popen(
-                command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
-                **new_process_group_kwargs(),
-            )
+            from agent.sandbox import run_appcontainer_detached, sandbox_enabled
+            if sandbox_enabled():
+                # 沙箱模式：后台命令也在 AppContainer 内启动，输出直接写日志
+                proc = run_appcontainer_detached(
+                    command, workspace=os.getcwd(), log_path=out_path)
+            else:
+                f_out = open(out_path, "w", encoding="utf-8", errors="replace")
+                proc = subprocess.Popen(
+                    command, shell=True, stdout=f_out, stderr=subprocess.STDOUT,
+                    **new_process_group_kwargs(),
+                )
         except Exception as e:
             # Popen 抛错时句柄既不 close、也没进 `_jobs`（后续 _prune_jobs 永远碰不到它）—— 每失败一次就漏一个句柄 + 一个空日志文件。
             if f_out is not None:

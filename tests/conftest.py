@@ -22,6 +22,17 @@ from config import TOOL_CONFIG
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_off_in_tests(monkeypatch):
+    """测试默认关闭 OS 沙箱：Windows 默认已改为 appcontainer，而用例会写临时目录、
+    起后台进程；统一在用例内显式关闭，沙箱专项用例自行覆盖。"""
+    try:
+        from config import SANDBOX_EXEC_CONFIG
+        monkeypatch.setitem(SANDBOX_EXEC_CONFIG, "mode", "off")
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _keep_main_thread_event_loop():
     """保证主线程始终有一个可用的事件循环。
 

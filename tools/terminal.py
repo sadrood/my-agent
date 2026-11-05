@@ -416,14 +416,8 @@ class TerminalTool(TerminalJobsMixin, BaseTool):
             command = _win_unix_shim(command)
         from agent.sandbox import sandbox_enabled
         if background:
-            # 后台走裸 Popen，不受 AppContainer 约束 → 沙箱开启时 fail-closed 拒绝，
-            # 否则"后台"就是绕过 OS 沙箱的口子。run_isolated 是同步模型，不支持后台。
-            if sandbox_enabled():
-                return ToolResult(
-                    success=False, output="",
-                    error=("沙箱模式下不支持后台命令；请改为前台执行，"
-                           "或显式关闭沙箱 SANDBOX_EXECUTION=off 后重试。"),
-                )
+            # 后台同样走 OS 沙箱：AppContainer 内 detach 启动，输出写日志；
+            # 沙箱关闭时退回普通 Popen。
             return self._start_background(command)
         # OS 级沙箱（可选，SANDBOX_EXECUTION=appcontainer）：前台命令进 Windows AppContainer 执行；fail-closed，沙箱失败不回退明文执行。
         if sandbox_enabled():
