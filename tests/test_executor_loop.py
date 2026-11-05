@@ -480,7 +480,7 @@ class TestGoalLoop:
         ex = _make_executor(llm)
         try:
             ex.execute_goal_loop(**_loop_args())
-            assert False, "应当抛出异常"
+            raise AssertionError("应当抛出异常")
         except NotImplementedError:
             pass
 

@@ -164,7 +164,7 @@ class VisionModel:
         try:
             response = client.chat.completions.create(**kwargs)
         except Exception as e:
-            raise RuntimeError(f"视觉模型调用失败: {str(e)}")
+            raise RuntimeError(f"视觉模型调用失败: {str(e)}") from e
 
         # 纯文本模型收到图片、或被安全拦截时，常见返回空 choices/空 content，直接下标访问会抛晦涩的 NoneType 错误——这里转成可读的明确提示
         choices = getattr(response, "choices", None)
@@ -285,7 +285,7 @@ class VisionModel:
         try:
             frame_paths = VideoEditor().extract_frames(video_path, count=frames)
         except VideoEditError as e:
-            raise RuntimeError(f"视频抽帧失败: {e}")
+            raise RuntimeError(f"视频抽帧失败: {e}") from e
 
         try:
             images = []

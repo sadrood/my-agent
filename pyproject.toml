@@ -13,11 +13,14 @@ exclude = [
 
 [tool.ruff.lint]
 # F = Pyflakes：未使用导入、未定义名、重复定义、未使用变量、f-string 无占位符
-select = ["F"]
+# B = flake8-bugbear：可变默认值、静默解包、循环变量闭包、zip 长度不匹配等"一定是 bug"
+select = ["F", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 # 测试里常有"为了让脚本能跑"的中间赋值
 "tests/*" = ["F841"]
+# FastAPI 用 Body(...) 作参数默认值是官方写法，B008 在这里是误报
+"dashboard/server.py" = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

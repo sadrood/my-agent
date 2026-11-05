@@ -487,7 +487,7 @@ class Team:
         for t in threads:
             t.join(max(0.0, deadline - time.time()))
 
-        for st, t in zip(subtasks, threads):
+        for st, t in zip(subtasks, threads, strict=True):
             # "pending" 也要算：worker 线程是先 start 再在函数体里置 "running" 的，只判 "running" 会漏掉"线程已起但还没跑到置状态"那一小段窗口。
             if t.is_alive() and st.status in ("pending", "running"):
                 # 线程是 daemon，这里**取消不掉**它 —— 只能标记放弃并置协作式取消，

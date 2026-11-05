@@ -53,7 +53,7 @@ def main() -> int:
             errors.append(f"LRC 只有 {len(entries)} 行（歌词共 {len(lyrics)} 行）")
         if entries:
             times = [time for time, _ in entries]
-            if any(later <= earlier for earlier, later in zip(times, times[1:])):
+            if any(later <= earlier for earlier, later in zip(times, times[1:], strict=False)):
                 errors.append("LRC 时间戳没有严格递增")
             if times[0] > 5:
                 errors.append(f"第一句在 {times[0]:.2f}s 才开始（要求 <=5s）")

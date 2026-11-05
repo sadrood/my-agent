@@ -34,7 +34,7 @@ def test_failed_write_keeps_original(mem, monkeypatch):
         raise KeyboardInterrupt("模拟写入中断")
 
     monkeypatch.setattr(json, "dump", boom)
-    with pytest.raises(BaseException):
+    with pytest.raises(KeyboardInterrupt):
         mem.remember("新内容", role="user")
 
     assert p.read_text(encoding="utf-8") == before, "原文件被写坏了"

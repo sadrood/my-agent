@@ -548,6 +548,22 @@ class Agent:
             if tool is not None and getattr(tool, "_vision_model", None) is not None:
                 tool._vision_model = None
 
+    def _enrich_goal_by_intent(self, goal: str, sync_state: bool = False) -> str:
+        """中文站名 → URL 的意图检测：规划路径与单循环共用同一份实现。"""
+        intent_result = get_intent_detector().detect(goal)
+        if not intent_result.detected_sites:
+            return goal
+        site_names = [s['name'] for s in intent_result.detected_sites]
+        site_urls = [s['url'] for s in intent_result.detected_sites]
+        print_info(
+            f"意图识别: {', '.join(f'{n}→{u}' for n, u in zip(site_names, site_urls, strict=True))}",
+            style="accent", use_rich=self.config.verbose,
+        )
+        enriched = intent_result.enriched_goal
+        if sync_state:
+            self.state.goal = enriched
+        return enriched
+
     def _build_guardian(self):
         """构建 Guardian（支持独立端点：GUARDIAN_API_KEY / GUARDIAN_BASE_URL）。
         若 Guardian 端点与主 LLM 相同则共用实例，否则用独立端点建新客户端。"""
@@ -747,17 +763,8 @@ class Agent:
         experience_context = self.memory.recall_experiences(goal, n=3, llm=self.llm)
         failure_warnings = self.memory.get_failure_warnings(goal)
 
-        # 意图检测：识别中文网站名并翻译为 URL
-        intent_detector = get_intent_detector()
-        intent_result = intent_detector.detect(goal)
-        if intent_result.detected_sites:
-            site_names = [s['name'] for s in intent_result.detected_sites]
-            site_urls = [s['url'] for s in intent_result.detected_sites]
-            print_info(f"意图识别: {', '.join(f'{n}→{u}' for n, u in zip(site_names, site_urls))}", style="accent", use_rich=self.config.verbose)
-            planning_goal = intent_result.enriched_goal
-            self.state.goal = planning_goal
-        else:
-            planning_goal = goal
+        # 意图检测：识别中文网站名并翻译为 URL（与单循环共用同一实现）
+        planning_goal = self._enrich_goal_by_intent(goal, sync_state=True)
 
         # 策略建议
         task_category = self.memory._classify_task(goal)
@@ -1601,18 +1608,7 @@ class Agent:
                 pass
 
         # 2. 意图检测（中文网站名 → URL）
-        intent_detector = get_intent_detector()
-        intent_result = intent_detector.detect(goal)
-        if intent_result.detected_sites:
-            site_names = [s['name'] for s in intent_result.detected_sites]
-            site_urls = [s['url'] for s in intent_result.detected_sites]
-            print_info(
-                f"意图识别: {', '.join(f'{n}→{u}' for n, u in zip(site_names, site_urls))}",
-                style="accent", use_rich=self.config.verbose,
-            )
-            planning_goal = intent_result.enriched_goal
-        else:
-            planning_goal = goal
+        planning_goal = self._enrich_goal_by_intent(goal)
 
         # 3. 上下文：会话历史 + 经验 + 策略 + 失败警告
         context_parts = []

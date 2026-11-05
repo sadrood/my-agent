@@ -49,7 +49,7 @@ def _create_server():
     except ImportError:
         raise ImportError(
             "未找到可用的 MCP SDK。请安装官方 SDK: pip install 'mcp>=1.0'"
-        )
+        ) from None
 
 
 def _run_agent(

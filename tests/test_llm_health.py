@@ -55,7 +55,7 @@ def test_flush_and_reload_accumulates(tmp_path):
 
 def test_events_ring_buffer_capped(tmp_path):
     h = _health(tmp_path, max_events=5)
-    for i in range(20):
+    for _ in range(20):
         h.record({"label": "主端点", "event": "quota_limited", "wait": 1.0,
                   "message": "429 rate limit"})
     assert len(h.events) == 5, "事件环形缓冲必须有上限（否则文件无限增长）"

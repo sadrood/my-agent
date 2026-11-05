@@ -191,7 +191,7 @@ class DeepResearcher:
             # 尝试从搜索结果中提取标题和摘要
             page_text = text_result.output
 
-            for i, url in enumerate(urls[:limit]):
+            for url in urls[:limit]:
                 if any(noise in url.lower() for noise in [
                     "google.com", "bing.com", "youtube.com",
                     "facebook.com", "twitter.com", "instagram.com",

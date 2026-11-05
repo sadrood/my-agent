@@ -1297,7 +1297,7 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             if hasattr(self._browser, "is_connected"):
                 conn = self._browser.is_connected
                 return bool(conn() if callable(conn) else conn)
-            self._browser.contexts
+            _ = self._browser.contexts       # 访问即验证连接可用（属性可能抛错）
             return True
         except Exception:
             return False

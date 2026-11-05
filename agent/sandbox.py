@@ -268,7 +268,7 @@ def _build_capabilities(api):
     advapi32 = api["advapi32"]
     entries = []
     keepalive = []
-    for name, sid_string in _NETWORK_CAPABILITY_SIDS.items():
+    for _name, sid_string in _NETWORK_CAPABILITY_SIDS.items():
         sid = ctypes.c_void_p()
         try:
             ok = bool(advapi32.ConvertStringSidToSidW(

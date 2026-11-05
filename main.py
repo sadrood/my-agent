@@ -527,8 +527,8 @@ def run_interactive(enable_team: bool = False, auto_mode: bool = False,
                   else ("│ [bold white]>[/bold white] " if _box else "[bold white]>[/bold white] "))
             _c = ("│ [dim]… [/dim]" if _box else "[dim]… [/dim]")
             goal = input_reader.read_goal(
-                prompt_primary=lambda: primary_prompt(_p),
-                prompt_continuation=lambda: continuation_prompt(_c),
+                prompt_primary=lambda _p=_p, primary_prompt=primary_prompt: primary_prompt(_p),
+                prompt_continuation=lambda _c=_c, continuation_prompt=continuation_prompt: continuation_prompt(_c),
             )
             _box_mid_line = False        # 用户按了回车：光标已在新行
         except (EOFError, KeyboardInterrupt):

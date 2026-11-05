@@ -102,7 +102,7 @@ class TestDriftedLaunchInSubprocess:
         assert lines[0] == REPO, "PROJECT_ROOT 应始终是仓库根"
         values = lines[1:]
         assert len(values) == len(ANCHORED_PATHS)
-        for (cfg_name, key), value in zip(ANCHORED_PATHS, values):
+        for (cfg_name, key), value in zip(ANCHORED_PATHS, values, strict=True):
             assert value.startswith(REPO), \
                 "cwd 漂移后 %s[%s] 跑到了 %r" % (cfg_name, key, value)
             assert str(tmp_path) not in value, \

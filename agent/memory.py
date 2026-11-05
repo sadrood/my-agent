@@ -375,7 +375,7 @@ class Memory:
                 + (f"\n  错误: {'; '.join((e.errors or [])[:2])[:200]}" if e.errors else "")
                 for e in recent)
             raw = ""
-            for attempt in (1, 2):
+            for _attempt in (1, 2):
                 try:
                     raw = llm.chat(
                         [{"role": "system", "content": EXPERIENCE_DISTILL_SYSTEM_PROMPT},
