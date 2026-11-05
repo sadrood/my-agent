@@ -113,6 +113,9 @@ jobs:
       - name: 安装依赖（含 Electron 二进制）
         working-directory: desktop
         run: npm install --no-audit --no-fund
+      - name: 构建（冒烟必须有 dist）
+        working-directory: desktop
+        run: npm run build
       - name: Electron 启动冒烟
         working-directory: desktop
         shell: bash
