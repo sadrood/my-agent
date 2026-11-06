@@ -177,3 +177,12 @@ class TestLlmConfigProvenance:
     def test_key_shadowing_only_when_both_set(self):
         from config import llm_config_provenance
         assert llm_config_provenance({"ANTHROPIC_API_KEY": "k"})["shadowed"] == []
+
+
+def test_normalize_no_proxy_drops_ipv6_only():
+    from config import normalize_no_proxy
+    raw = "localhost,.localhost,127.0.0.1,127.0.0.0/8,[::1],::1"
+    out = normalize_no_proxy(raw)
+    assert "[::1]" not in out and "::1" not in out.split(",")
+    assert "127.0.0.1" in out and "localhost" in out and "127.0.0.0/8" in out
+    assert normalize_no_proxy("") == ""

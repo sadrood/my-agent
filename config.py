@@ -17,6 +17,18 @@ if os.getenv("MY_AGENT_PY_RUNNER") != "1":
 # 留空的项当"未设置"：否则 int()/float() 解析会抛 ValueError，整个配置导入即崩
 _drop_empty_env_values()
 
+
+def normalize_no_proxy(raw) -> str:
+    """去掉 NO_PROXY 里的 IPv6 项：httpx 0.28 会把 `[::1]` / `::1` 解析成
+    `Invalid port: ':1]'`，导致 LLM 客户端一构造就崩。IPv4/CIDR/域名原样保留。"""
+    parts = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+    return ",".join(p for p in parts if not p.startswith("[") and ":" not in p)
+
+
+for _proxy_key in ("NO_PROXY", "no_proxy"):
+    if os.environ.get(_proxy_key):
+        os.environ[_proxy_key] = normalize_no_proxy(os.environ[_proxy_key])
+
 # 项目根目录（config.py 位于仓库顶层）：默认存储路径（记忆/会话/缓存）统一锚定到这里，杜绝进程 cwd 漂移导致数据写到 output/ 等子目录造成分叉。
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
