@@ -109,6 +109,9 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
         viewport_height: int = None,
         persistent: bool = None,
         download_dir: str = None,
+        network_restricted: bool = False,
+        allowed_origins: tuple = (),
+        profile_dir: str = None,
     ):
         self._headless = (
             headless
@@ -126,7 +129,10 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
         else:
             self._persistent = bool(BROWSER_CONFIG.get("persistent", True))
         self._profile_dir = _resolve_under_root(
-            BROWSER_CONFIG.get("profile_dir", "./memory/browser_profile"))
+            profile_dir or BROWSER_CONFIG.get("profile_dir", "./memory/browser_profile"))
+        self._network_restricted = network_restricted
+        self._network_origins = tuple(allowed_origins)
+        self._network_proxy = None
 
         self._playwright = None
         self._browser = None
@@ -357,6 +363,26 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
                 return recovered
         return result
 
+    def _network_launch_options(self) -> dict:
+        if not getattr(self, "_network_restricted", False):
+            return {}
+        from tools.browser_network import BrowserNetworkProxy
+        if self._network_proxy is None:
+            self._network_proxy = BrowserNetworkProxy(self._network_origins)
+        return {
+            "proxy": {"server": self._network_proxy.start(), "bypass": "<-loopback>"},
+            "args": ["--disable-quic",
+                     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+        }
+
+    def _check_navigation(self, url: str):
+        if not getattr(self, "_network_restricted", False) or url == "about:blank":
+            return
+        from urllib.parse import urlsplit
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in ("http", "https") or parsed.username or parsed.password:
+            raise ValueError("QQ 浏览器只允许 HTTP(S) 页面，不允许本地文件或含凭据的地址")
+
     # ================================================================
     # 生命周期管理
     # ================================================================
@@ -387,6 +413,8 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             from playwright.sync_api import sync_playwright
 
             self._playwright = sync_playwright().start()
+            network_options = dict(self._network_launch_options())
+            launch_args = ["--disable-crashpad", *network_options.pop("args", [])]
             if self._persistent:
                 # 持久模式：用户数据目录落盘，登录态（cookie/localStorage）跨次启动保留——网页型分身先 headed 手动登录一次，之后 agent 复用会话。返回值直接是 BrowserContext（没有独立 Browser 对象）。
                 os.makedirs(self._profile_dir, exist_ok=True)
@@ -401,10 +429,12 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
                         "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
                     ),
                     # crashpad 管道初始化失败（TransactNamedPipe: 管道已结束）会让 chromium 启动即退出（exitCode 21），加此参数禁用崩溃上报模块后恢复。crashpad 仅用于崩溃收集，禁掉不影响功能。
-                    args=["--disable-crashpad"],
+                    args=launch_args,
+                    **network_options,
                 )
             else:
-                self._browser = self._playwright.chromium.launch(headless=self._headless)
+                self._browser = self._playwright.chromium.launch(
+                    headless=self._headless, args=launch_args, **network_options)
                 self._context = self._browser.new_context(
                     viewport={"width": self._viewport_width, "height": self._viewport_height},
                     user_agent=(
@@ -419,6 +449,12 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             else:
                 self._pages = [self._context.new_page()]
             self._current_page_idx = 0
+            if getattr(self, "_network_restricted", False):
+                # 只挡真正能读到本机文件/绕过代理的协议；data:/blob: 是页面内联内容，
+                # 拦了会误伤正常网页（blob 不能用来读本地文件）。
+                import re
+                self._context.route(re.compile(r"^(?:file|ftp):", re.I),
+                                    lambda route: route.abort("blockedbyclient"))
 
             mode = "无头" if self._headless else "可视化"
             profile_note = f"，持久 profile: {self._profile_dir}" if self._persistent else ""
@@ -468,6 +504,10 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             self._pages = []
             self._current_page_idx = 0
             self._playwright = None
+            proxy = getattr(self, "_network_proxy", None)
+            if proxy is not None:
+                proxy.close()
+                self._network_proxy = None
         killed = self._force_cleanup_residual()
         if graceful and killed == 0:
             return ToolResult(success=True, output="浏览器已关闭。")
@@ -640,7 +680,10 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             if url:
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
-                new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                self._check_navigation(url)
+                response = new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if response is not None and response.status == 403 and getattr(self, "_network_restricted", False):
+                    return ToolResult(success=False, output="", error="页面被拒绝访问（HTTP 403，可能被网络策略拦截）")
 
             return ToolResult(
                 success=True,
@@ -740,7 +783,10 @@ class BrowserTool(BrowserWorkerMixin, BaseTool, ComputerUseMixin):
             else:
                 url = "https://" + url
         try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            self._check_navigation(url)
+            response = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if response is not None and response.status == 403 and getattr(self, "_network_restricted", False):
+                return ToolResult(success=False, output="", error="页面被拒绝访问（HTTP 403，可能被网络策略拦截）")
             return ToolResult(
                 success=True,
                 output=f"已导航到: {url}\n页面标题: {self._page.title()}",

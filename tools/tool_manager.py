@@ -94,7 +94,7 @@ def _create_terminal_tool() -> BaseTool:
 class ToolManager:
     """工具管理器，负责工具注册、查找和执行调度。"""
 
-    def __init__(self, output_max_chars: int = None):
+    def __init__(self, output_max_chars: int = None, browser_tool: BaseTool = None):
         self._tools: dict[str, BaseTool] = {}
         self.output_max_chars = output_max_chars or TOOL_CONFIG.get("output_max_chars", 8000)
         #: 本会话已装载的门控工具（只影响 schema 发不发，不影响可调用性）
@@ -105,7 +105,7 @@ class ToolManager:
         self._round: int = 0
 
         # 注册默认内置工具
-        browser = _create_browser_tool()
+        browser = browser_tool if browser_tool is not None else _create_browser_tool()
         self.register(_create_terminal_tool())
         self.register(DelegateTool())
         self.register(ExperienceTool())

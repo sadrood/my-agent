@@ -217,6 +217,10 @@ QQBOT_CONFIG = {
     "permission": os.getenv("QQBOT_PERMISSION", "ask"),
     "max_chars": int(os.getenv("QQBOT_MAX_CHARS", "2000")),
     "rate_per_minute": int(os.getenv("QQBOT_RATE_PER_MINUTE", "6")),
+    "active_monthly_limit": int(os.getenv("QQBOT_ACTIVE_MONTHLY_LIMIT", "0")),
+    "active_usage_file": resolve_under_root(os.getenv(
+        "QQBOT_ACTIVE_USAGE_FILE", "memory/qqbot_active_usage.sqlite3")),
+    "browser_allowed_origins": os.getenv("QQBOT_BROWSER_ALLOWED_ORIGINS", ""),
     # 同时执行的 agent 循环上限（小机器上用）：超出的请求排队等待，等不到就回"任务较多"。
     "max_concurrent_tasks": int(os.getenv("QQBOT_MAX_CONCURRENT_TASKS", "2")),
     # 等待空闲执行位的最长秒数（等不到就回"任务较多"）

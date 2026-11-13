@@ -531,6 +531,17 @@ class _FakeApi:
             raise RuntimeError("boom")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_active_usage(tmp_path, monkeypatch):
+    from agent.qqbot_usage import ActiveMessageUsage
+    original = ActiveMessageUsage.__init__
+
+    def initialize(self, path, app_id, monthly_limit=0):
+        original(self, str(tmp_path / "active.sqlite3"), app_id, monthly_limit)
+
+    monkeypatch.setattr(ActiveMessageUsage, "__init__", initialize)
+
+
 class TestDelivery:
     """发送层：msg_seq 递增、被动窗口降级、失败不炸、上下文按会话隔离。"""
 

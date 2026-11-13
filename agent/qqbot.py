@@ -6,11 +6,13 @@
 - `QQBOT_ALLOW_FROM` 白名单（openid，逗号分隔）——为空时拒绝所有人并在日志里提示怎么加；
 - 每个 QQ 用户**独立会话**，互不串上下文；
 - 权限档只允许 `ask` / `block`，**不接受 full**（来自聊天通道的请求不允许提权）；
+- QQ 拉起的浏览器走**独立 profile + 受限出口**：默认拒绝内网/回环/元数据地址，
+  只有 `QQBOT_BROWSER_ALLOWED_ORIGINS` 里逐个列出的 origin 才放行；
 - AppID/AppSecret 只从环境变量读，日志与回执都不打印密钥。
 
 平台硬约束（决定了实现形态）：
-- 被动回复有效期 **单聊 60 分钟 / 群聊 5 分钟**，超窗口只能改用主动消息，而主动消息
-  **每个用户/每个群每月仅 4 条**，极其稀缺——所以窗口要按场景分开算，别动不动就降级；
+- 被动回复有效期按单聊与群聊分别计算，超窗口发送会作为主动消息单独记账；
+- 主动消息权限与频控由平台决定，本地可配置额外上限；
 - 同一条消息最多回复 **5 次**（2026-01 更新说明调整为 4 次），超出会导致整条发送失败；
 - 同一 `msg_id` 下 `msg_seq` 必须递增，重复会发送失败——分块回复靠它区分；
 - 新机器人默认只在**沙箱**：`QQBOT_SANDBOX` 连错环境会"连上了却收不到任何消息"。
@@ -21,6 +23,7 @@ import asyncio
 import hashlib
 import os
 import re
+import sqlite3
 import threading
 import time
 from typing import Dict, List, Optional
@@ -32,7 +35,6 @@ TASK_TIMEOUT = 1800
 #: 审批等待上限（秒）
 APPROVE_TIMEOUT = 180
 #: 被动回复有效期（官方：单聊 60 分钟 / 群聊 5 分钟）。各留一分钟余量，超了才改主动消息。
-#: 主动消息极稀缺（单聊/群聊各每月 4 条），能被动回复就别动用它。
 PASSIVE_REPLY_WINDOW_C2C = 3540.0
 PASSIVE_REPLY_WINDOW_GROUP = 240.0
 #: 同一条消息最多回复几条（官方写 5 次；2026-01 更新说明调整为 4 次，取更严的）
@@ -389,6 +391,15 @@ class QQBotConfig:
         self.preset = preset if preset in ALLOWED_PRESETS else "ask"
         self.max_chars = int(env.get("QQBOT_MAX_CHARS") or env.get("max_chars") or 2000)
         self.per_minute = int(env.get("QQBOT_RATE_PER_MINUTE") or env.get("rate_per_minute") or 6)
+        self.active_monthly_limit = max(0, _int_or(
+            env, "QQBOT_ACTIVE_MONTHLY_LIMIT", "active_monthly_limit", 0))
+        from config import resolve_under_root
+        self.active_usage_file = resolve_under_root(str(
+            env.get("QQBOT_ACTIVE_USAGE_FILE") or env.get("active_usage_file")
+            or "memory/qqbot_active_usage.sqlite3"))
+        raw_origins = env.get("QQBOT_BROWSER_ALLOWED_ORIGINS", env.get("browser_allowed_origins", ""))
+        self.browser_allowed_origins = tuple(
+            x.strip() for x in str(raw_origins or "").split(",") if x.strip())
         # 并发闸门：同时最多跑几个 agent 循环（2 核机器上别让它无限并发）
         self.max_concurrent_tasks = max(1, int(env.get("QQBOT_MAX_CONCURRENT_TASKS")
                                               or env.get("max_concurrent_tasks") or 2))
@@ -470,7 +481,8 @@ class UserSession:
 
     def __init__(self, openid: str, preset: str = "ask", verbose: bool = False,
                  approver=None, task_timeout: float = TASK_TIMEOUT,
-                 mode: str = "task", chat_turns: int = 10, chat_max_tokens: int = 1000):
+                 mode: str = "task", chat_turns: int = 10, chat_max_tokens: int = 1000,
+                 browser_allowed_origins: tuple = ()):
         self.openid = openid
         self.preset = preset
         self.mode = mode if mode in ALLOWED_MODES else "task"
@@ -493,6 +505,19 @@ class UserSession:
         self._stop_pressed = False
         self._approver = approver
         self._verbose = verbose
+        self.browser_allowed_origins = browser_allowed_origins
+        self.last_usage = None
+        self.total_usage = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+
+    def _record_usage(self, metrics):
+        values = {name: max(0, int(getattr(metrics, name, 0) or 0))
+                  for name in self.total_usage} if metrics is not None else {}
+        if not any(values.values()):
+            self.last_usage = None
+            return
+        self.last_usage = values
+        for name, value in self.last_usage.items():
+            self.total_usage[name] += value
 
     def session_name(self) -> str:
         digest = hashlib.sha256(self.openid.encode("utf-8")).hexdigest()[:10]
@@ -511,7 +536,12 @@ class UserSession:
             approver=self._approver,            # 疑问推到 QQ，由用户回 y/a/n
             session_name=self.session_name(),
         )
-        agent = Agent(config=config)
+        from tools.browser import BrowserTool
+        from tools.tool_manager import ToolManager
+        manager = ToolManager(browser_tool=BrowserTool(
+            network_restricted=True, allowed_origins=self.browser_allowed_origins,
+            profile_dir=os.path.join("memory", "qqbot_browser", self.session_name())))
+        agent = Agent(config=config, tool_manager=manager)
         try:
             agent.approval.apply_preset(self.preset)   # ask / block（不含 full）
         except Exception:                              # noqa: BLE001
@@ -538,6 +568,7 @@ class UserSession:
             stop_event = threading.Event()
             self._current_stop_event = stop_event       # 暴露给 /stop
             timer = None
+            previous_metrics = getattr(agent, "metrics", None)
             if self.task_timeout and self.task_timeout > 0:
                 timer = threading.Timer(self.task_timeout, stop_event.set)
                 timer.daemon = True
@@ -556,6 +587,11 @@ class UserSession:
             except Exception as e:                     # noqa: BLE001
                 self.last_output = f"执行失败：{type(e).__name__}: {str(e)[:200]}"
             finally:
+                # 只在 agent.run 真的换了新 RunMetrics 时记账：run 早期抛错时
+                # metrics 还是上一轮的实例，重复记账会把历史用量算两遍。
+                current = getattr(agent, "metrics", None)
+                if current is not None and current is not previous_metrics:
+                    self._record_usage(current)
                 if timer is not None:
                     timer.cancel()
                 self._current_stop_event = None         # 本轮结束，/stop 该回"没有在跑的"
@@ -593,13 +629,28 @@ class UserSession:
         走 agent 的同一个 LLM 实例（沿用端点/备用链/限流重试），但不进工具循环。
         """
         from models.prompts import QQ_CHAT_SYSTEM_PROMPT
-        agent = self.ensure_agent()
-        self.chat_history.append({"role": "user", "content": text})
-        messages = [{"role": "system", "content": QQ_CHAT_SYSTEM_PROMPT},
-                    *self.chat_history[-self.chat_turns * 2:]]
-        reply = str(agent.llm.chat(messages, max_tokens=self.chat_max_tokens) or "").strip()
-        self.chat_history.append({"role": "assistant", "content": reply})
-        return reply
+        from agent.metrics import RunMetrics
+        # 任务正在跑时别排队等锁（可能等到 TASK_TIMEOUT）：共用同一个 llm 实例并发聊天
+        # 既会抢统计口径，也可能与流式请求互相干扰。直接告诉用户稍后再说。
+        if not self.lock.acquire(blocking=False):
+            return "这个会话正在跑任务，等它结束我再和你聊。"
+        try:
+            agent = self.ensure_agent()
+            self.chat_history.append({"role": "user", "content": text})
+            messages = [{"role": "system", "content": QQ_CHAT_SYSTEM_PROMPT},
+                        *self.chat_history[-self.chat_turns * 2:]]
+            metrics = RunMetrics()
+            previous = getattr(agent.llm, "metrics", None)
+            agent.llm.metrics = metrics
+            try:
+                reply = str(agent.llm.chat(messages, max_tokens=self.chat_max_tokens) or "").strip()
+            finally:
+                agent.llm.metrics = previous
+                self._record_usage(metrics)
+            self.chat_history.append({"role": "assistant", "content": reply})
+            return reply
+        finally:
+            self.lock.release()
 
 
 class QQBotBridge:
@@ -627,6 +678,9 @@ class QQBotBridge:
         self._last_prune = 0.0                      # 上次回收的时间（限频）
         self._recent_at_ids: set = set()            # 近期已处理的 @ 消息 id（全量消息去重用）
         self._robot_id = None                       # 机器人自身 id（on_ready 记下，识别全量消息里的 @机器人）
+        from agent.qqbot_usage import ActiveMessageUsage
+        self._active_usage = ActiveMessageUsage(
+            self.config.active_usage_file, self.config.app_id, self.config.active_monthly_limit)
 
     # ---------------- 门控 ----------------
 
@@ -678,12 +732,33 @@ class QQBotBridge:
         state["next"] = seq + 1
         return seq
 
-    def _reply_plan(self, key: str, ctx: dict) -> tuple:
-        """回报策略：还在被动窗口内就带 msg_id 回复，超了才改主动消息。
+    async def _post_message(self, key: str, api, **payload):
+        reservation = None
+        if not payload.get("msg_id"):
+            reservation = self._active_usage.reserve(self.norm_key(key))
+        group, user = self.split_key(key)
+        try:
+            if group:
+                result = await api.post_group_message(group_openid=group, **payload)
+            else:
+                result = await api.post_c2c_message(openid=user, **payload)
+        except BaseException:
+            if reservation is not None:
+                try:
+                    self._active_usage.finish(reservation, False)
+                except (OSError, sqlite3.Error):
+                    pass
+            raise
+        if reservation is not None:
+            try:
+                self._active_usage.finish(reservation, True)
+            except (OSError, sqlite3.Error):
+                from agent import run_log
+                run_log.log("QQ 主动消息已发出，统计记录暂未确认", "warn")
+        return result
 
-        窗口按场景不同（官方：单聊 60 分钟 / 群聊 5 分钟）。超窗口后仍带原 msg_id 会被
-        平台拒掉，用户只看到"已收到"却永远等不到结果。主动消息每月仅 4 条，是最后退路。
-        """
+    def _reply_plan(self, key: str, ctx: dict) -> tuple:
+        """按场景计算被动窗口，超时的主动发送由统一出口统计。"""
         group_openid, _ = self.split_key(self.norm_key(key))
         window = PASSIVE_REPLY_WINDOW_GROUP if group_openid else PASSIVE_REPLY_WINDOW_C2C
         fresh = (time.time() - float(ctx.get("recv_at") or 0.0)) <= window
@@ -880,29 +955,19 @@ class QQBotBridge:
             run_log.log(f"QQ 回复无处可发（没有事件循环）：会话 {key[:12]}…，已丢弃", "warn")
             return
         msg_id, fresh = self._reply_plan(key, ctx)
-        group_openid, user_openid = self.split_key(key)
-        # 官方 2026-04-23 起单聊/群聊支持自定义 Markdown：msg_type=2 传 markdown.content，
-        # ** / # 等会真正渲染成粗体与标题。传了 markdown 时 content 必须为空（见官方接口文档）。
-        if USE_MARKDOWN:
-            pieces = _chunks_markdown(text)
-        else:
-            pieces = _chunks_capped(_md_to_text(text))
+        budget = self._remaining_replies(key)
+        if budget <= 0:
+            return
+        pieces = (_chunks_markdown(text, max_pieces=budget) if USE_MARKDOWN
+                  else _chunks_capped(_md_to_text(text), budget))
         for piece in pieces:
             seq = self._next_seq(key, msg_id)
+            payload = {"msg_id": msg_id, "msg_seq": seq}
             if USE_MARKDOWN:
-                md = {"content": piece}
-                if group_openid:
-                    coro = api.post_group_message(group_openid=group_openid, msg_type=2,
-                                                  msg_id=msg_id, msg_seq=seq, markdown=md)
-                else:
-                    coro = api.post_c2c_message(openid=user_openid, msg_type=2, msg_id=msg_id,
-                                                msg_seq=seq, markdown=md)
-            elif group_openid:
-                coro = api.post_group_message(group_openid=group_openid, msg_type=0,
-                                              msg_id=msg_id, msg_seq=seq, content=piece)
+                payload.update(msg_type=2, markdown={"content": piece})
             else:
-                coro = api.post_c2c_message(openid=user_openid, msg_type=0, msg_id=msg_id,
-                                            msg_seq=seq, content=piece)
+                payload.update(msg_type=0, content=piece)
+            coro = self._post_message(key, api, **payload)
             guarded = _log_send_errors(coro, seq, fresh)
             try:
                 if running is not None:
@@ -1008,12 +1073,12 @@ class QQBotBridge:
                      "用 `python -m agent.qqbot --probe-media` 探测；"
                      "或配置 QQBOT_PUBLIC_FRAME_URL 指向能被 QQ 服务器抓取的图片地址。")
             return
+        if self._remaining_replies(key) <= 0:
+            return
+        msg_id, _fresh = self._reply_plan(key, ctx)
         try:
-            if group_openid:
-                await api.post_group_message(group_openid=group_openid, msg_type=7,
-                                             media=media)
-            else:
-                await api.post_c2c_message(openid=user_openid, msg_type=7, media=media)
+            await self._post_message(key, api, msg_type=7, media=media,
+                                     msg_id=msg_id, msg_seq=self._next_seq(key, msg_id))
         except Exception as e:                        # noqa: BLE001
             run_log.log(f"QQ 发图失败：{type(e).__name__}: {str(e)[:160]}", "warn")
             await self._send_plain(key, f"图片上传成功但发送失败：{type(e).__name__}。")
@@ -1106,17 +1171,12 @@ class QQBotBridge:
             if media is None:
                 run_log.log(f"QQ 补发{kind}失败（{path}）：无可用上传通道", "warn")
                 continue
-            # 必须带 msg_id/msg_seq 走**被动回复**：群主动消息每月只有 4 条，
-            # 不带 msg_id 的富媒体会被当主动消息直接拒掉（单聊同理）。
+            # 媒体与文字共用这条来信的被动回复额度。
             msg_id, _fresh = self._reply_plan(key, ctx)
             seq = self._next_seq(key, msg_id)
             try:
-                if group_openid:
-                    await api.post_group_message(group_openid=group_openid, msg_type=7,
-                                                 media=media, msg_id=msg_id, msg_seq=seq)
-                else:
-                    await api.post_c2c_message(openid=user_openid, msg_type=7, media=media,
-                                               msg_id=msg_id, msg_seq=seq)
+                await self._post_message(key, api, msg_type=7, media=media,
+                                         msg_id=msg_id, msg_seq=seq)
                 sent.append(raw)                    # 回原始片段，调用方据此替换文字
             except Exception as e:              # noqa: BLE001
                 run_log.log(f"QQ 补发图片失败（{path}）：{type(e).__name__}: {str(e)[:120]}",
@@ -1181,16 +1241,13 @@ class QQBotBridge:
         if media is None:
             run_log.log("QQ 语音上传失败：无可用上传通道", "warn")
             return False
-        # 带 msg_id 走被动回复（群聊窗口只有 5 分钟，且主动消息要占每日配额）
+        if self._remaining_replies(key) <= 0:
+            return False
         msg_id, _fresh = self._reply_plan(key, ctx)
         seq = self._next_seq(key, msg_id)
         try:
-            if group_openid:
-                await api.post_group_message(group_openid=group_openid, msg_type=7,
-                                             media=media, msg_id=msg_id, msg_seq=seq)
-            else:
-                await api.post_c2c_message(openid=user_openid, msg_type=7, media=media,
-                                           msg_id=msg_id, msg_seq=seq)
+            await self._post_message(key, api, msg_type=7, media=media,
+                                     msg_id=msg_id, msg_seq=seq)
             return True
         except Exception as e:                  # noqa: BLE001
             run_log.log(f"QQ 语音发送失败：{type(e).__name__}: {str(e)[:120]}", "warn")
@@ -1239,15 +1296,7 @@ class QQBotBridge:
 
     async def push_media(self, openid: str, path: str, file_type: int = 1,
                          group_openid: str = "") -> bool:
-        """**主动**把本地媒体推给用户（不经用户触发）。
-
-        官方频控（2026-07 文档）：单聊/群聊每日上限 1000 条/用户|群，
-        单关系维度 20qpm、Bot 维度群 60qpm（未认证 30）—— 远比"每月 4 条"宽裕。
-        真正的前置条件：**用户没在 QQ 客户端关掉"允许主动发送"**，关了会一律失败。
-
-        主动消息**不带 msg_id**（那是被动回复专用字段），所以它不吃"每条消息回 4 次"的额度，
-        只吃每日/每分钟的主动频控。
-        """
+        """主动推送媒体，受平台权限和本地配置上限约束。"""
         import base64 as _b64
         from agent import run_log
         if not openid or not path or not os.path.isfile(path):
@@ -1270,10 +1319,8 @@ class QQBotBridge:
             run_log.log("QQ 主动推媒体失败：上传通道无返回", "warn")
             return False
         try:
-            if group_openid:
-                await api.post_group_message(group_openid=group_openid, msg_type=7, media=media)
-            else:
-                await api.post_c2c_message(openid=openid, msg_type=7, media=media)
+            await self._post_message(self.scope_key(openid, group_openid), api,
+                                     msg_type=7, media=media)
             run_log.log(f"QQ 主动推送{'群' if group_openid else '私聊'}媒体成功：{path}")
             return True
         except Exception as e:                  # noqa: BLE001
@@ -1438,7 +1485,6 @@ class QQBotBridge:
         if api is None:
             return
         msg_id, fresh = self._reply_plan(key, ctx)
-        group_openid, user_openid = self.split_key(key)
         # 额度：回执 / 补发的图 / 语音与正文共用同一份（同一条消息最多回 4 次，超了整条失败）
         budget = self._remaining_replies(key)
         if budget <= 0:
@@ -1451,20 +1497,12 @@ class QQBotBridge:
         for piece in pieces:
             seq = self._next_seq(key, msg_id)
             try:
+                payload = {"msg_id": msg_id, "msg_seq": seq}
                 if USE_MARKDOWN:
-                    md = {"content": piece}
-                    if group_openid:
-                        await api.post_group_message(group_openid=group_openid, msg_type=2,
-                                                     msg_id=msg_id, msg_seq=seq, markdown=md)
-                    else:
-                        await api.post_c2c_message(openid=user_openid, msg_type=2, msg_id=msg_id,
-                                                   msg_seq=seq, markdown=md)
-                elif group_openid:
-                    await api.post_group_message(group_openid=group_openid, msg_type=0,
-                                                 msg_id=msg_id, msg_seq=seq, content=piece)
+                    payload.update(msg_type=2, markdown={"content": piece})
                 else:
-                    await api.post_c2c_message(openid=user_openid, msg_type=0,
-                                               msg_id=msg_id, msg_seq=seq, content=piece)
+                    payload.update(msg_type=0, content=piece)
+                await self._post_message(key, api, **payload)
             except Exception as e:                   # noqa: BLE001
                 from agent import run_log
                 run_log.log(f"QQ 回复发送失败（第 {seq} 块，被动={fresh}）："
@@ -1561,7 +1599,8 @@ class QQBotBridge:
                              task_timeout=self.config.task_timeout,
                              mode=self.config.default_mode,
                              chat_turns=self.config.chat_turns,
-                             chat_max_tokens=self.config.chat_max_tokens))
+                             chat_max_tokens=self.config.chat_max_tokens,
+                             browser_allowed_origins=self.config.browser_allowed_origins))
 
     def _touch(self, key: str) -> None:
         """记一次活动时间；顺带按 TTL 回收空闲会话（限频扫描，不必每条消息都全扫）。"""
@@ -1693,17 +1732,38 @@ class QQBotBridge:
             if not session:
                 return "还没有会话（发一条任务就建）。"
             tail = (session.last_output or "").strip().replace("\n", " ")[-160:]
+            usage = session.last_usage
+            usage_text = "最近用量：暂无供应商用量数据"
+            if usage is not None:
+                cached = usage["cached_tokens"]
+                inputs = usage["input_tokens"]
+                hit_rate = min(cached / inputs, 1.0) if inputs else 0
+                usage_text = (f"最近用量：输入 {inputs} / 输出 {usage['output_tokens']} token"
+                              f"；缓存 {cached}（{hit_rate:.0%}）")
+            total = session.total_usage
+            usage_text += (f"\n本会话累计：输入 {total['input_tokens']} / "
+                           f"输出 {total['output_tokens']} token（已上报部分）")
+            try:
+                active = self._active_usage.summary(self.norm_key(key))
+                limit = str(active["limit"]) if active["limit"] else "未设置"
+                usage_text += (f"\n本月主动发送：成功 {active['sent']} / 失败 {active['failed']} / "
+                               f"待确认 {active['pending']}；本地尝试上限 {limit}")
+            except (OSError, ValueError, sqlite3.Error):
+                usage_text += "\n主动发送记录暂时不可读"
             return (f"会话 {session.session_name()} · 模式 {session.mode}/{self.config.chat_engine} · 档位 {session.preset} · "
                     f"已完成 {session.turns} 轮 · 上次 "
                     f"{time.strftime('%H:%M:%S', time.localtime(session.last_run_at))}"
+                    + f"\n{usage_text}"
                     + (f"\n上次结果尾部：{tail}" if tail else ""))
         if cmd == "/new":
             if session:
                 session.agent = None
                 session.turns = 0
                 session.chat_history = []
+                session.last_usage = None
+                session.total_usage = dict.fromkeys(session.total_usage, 0)
             return "已开新会话。"
-        return f"未知指令 {cmd}（可用：/status /new /help）"
+        return f"未知指令 {cmd}。发送 /help 查看完整命令。"
 
 
 def _build_client(bridge: QQBotBridge):

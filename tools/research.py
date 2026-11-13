@@ -216,7 +216,9 @@ class DeepResearcher:
     def _extract_page_content(self, url: str) -> str:
         """访问页面并提取正文内容。"""
         try:
-            self._browse(f"goto {url}")
+            result = self._browse(f"goto {url}")
+            if not result.success:
+                return ""
             time.sleep(0.5)
 
             # 尝试提取主要文本

@@ -28,6 +28,7 @@ SECURITY_CRITICAL_PATHS = (
     "tools/python.py",
     "tools/py_runner.py",
     "tools/tool_manager.py",
+    "tools/browser_network.py",
     "dashboard/server.py",
     "config.py",
     ".env",

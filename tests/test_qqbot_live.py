@@ -9,6 +9,14 @@ from agent.qqbot import QQBotBridge, QQBotConfig
 
 
 @pytest.fixture(autouse=True)
+def _isolate_active_usage(tmp_path, monkeypatch):
+    from agent.qqbot_usage import ActiveMessageUsage
+    original = ActiveMessageUsage.__init__
+    monkeypatch.setattr(ActiveMessageUsage, "__init__", lambda self, path, app_id, monthly_limit=0:
+                        original(self, str(tmp_path / "active.sqlite3"), app_id, monthly_limit))
+
+
+@pytest.fixture(autouse=True)
 def _keep_an_event_loop():
     """asyncio.run() 会关掉线程的 loop；botpy.Client 之后要靠 get_event_loop() 建实例。
 

@@ -22,6 +22,14 @@ class _FakeLLM:
         return self.reply
 
 
+@pytest.fixture(autouse=True)
+def _isolate_active_usage(tmp_path, monkeypatch):
+    from agent.qqbot_usage import ActiveMessageUsage
+    original = ActiveMessageUsage.__init__
+    monkeypatch.setattr(ActiveMessageUsage, "__init__", lambda self, path, app_id, monthly_limit=0:
+                        original(self, str(tmp_path / "active.sqlite3"), app_id, monthly_limit))
+
+
 class TestChitchatDetection:
     @pytest.mark.parametrize("text", ["你好", "您好", "hi", "Hi", "hello", "在吗",
                                       "在吗？", "谢谢", "thanks", "辛苦了", "哈喽"])
