@@ -94,17 +94,19 @@ if rid:
         print("consistency run",json.dumps(info,ensure_ascii=False)[:1000],flush=True)
 
 # export
+OUT_DIR = os.getenv("NOVELFLOW_OUT_DIR", "output/novelflow").strip() or "output/novelflow"
+os.makedirs(OUT_DIR, exist_ok=True)     # 不写 /tmp：原生 Windows 没有那个路径
 r=req("GET",f"/api/projects/{PID}/export")
 if isinstance(r,dict) and "raw" in r:
     out=r["raw"]
 else:
     out=json.dumps(r,ensure_ascii=False)
-with open("/tmp/novel_export.txt","w",encoding="utf-8") as f:
+with open(os.path.join(OUT_DIR,"novel_export.txt"),"w",encoding="utf-8") as f:
     f.write(out)
-print("export saved len",len(out),flush=True)
+print("export saved len",len(out),"->",OUT_DIR,flush=True)
 
 # also save full chapter content
-with open("/tmp/novel_full.txt","w",encoding="utf-8") as f:
+with open(os.path.join(OUT_DIR,"novel_full.txt"),"w",encoding="utf-8") as f:
     for c in items:
         f.write(f"\n\n===== 第{c.get('idx')}章 {c.get('title')} =====\n\n")
         content=req("GET",f"/api/chapters/{c.get('id')}")
