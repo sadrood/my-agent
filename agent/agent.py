@@ -1142,21 +1142,28 @@ class Agent:
         if not servers:
             return
 
-        self._log(f"\n[MCP] 正在连接 {len(servers)} 个 MCP 服务器...")
+        # 全部是按需连接时不打印启动日志：并没有真的连服务器
+        if not all(bool(item.get("lazy", False)) for item in servers):
+            self._log(f"\n[MCP] 正在连接 {len(servers)} 个 MCP 服务器...")
         for server_cfg in servers:
             name = server_cfg.get("name", "unknown")
             command = server_cfg.get("command", "")
             args = server_cfg.get("args", [])
             env = server_cfg.get("env")
+            exclude = server_cfg.get("exclude") or []
+            timeout = server_cfg.get("timeout")
+            lazy = bool(server_cfg.get("lazy", False))
 
             if not command:
                 self._log(f"  [警告] 服务器 '{name}' 缺少 command 配置，跳过。")
                 continue
 
-            ok = self.tool_manager.connect_mcp_server(name, command, args, env)
+            ok = self.tool_manager.connect_mcp_server(name, command, args, env, exclude,
+                                                      timeout=timeout, lazy=lazy)
             if ok:
                 self._mcp_connected = True
-                self._log(f"  [成功] MCP 服务器 '{name}' 已连接。")
+                if not lazy:
+                    self._log(f"  [成功] MCP 服务器 '{name}' 已连接。")
             else:
                 self._log(f"  [失败] MCP 服务器 '{name}' 连接失败。")
 
@@ -1509,8 +1516,16 @@ class Agent:
         if metrics is not None and self.config.verbose:
             try:
                 from agent.metrics import humanize_duration_cn
-                print_info(f"用时 {humanize_duration_cn(metrics.elapsed)}",
-                           style="info", use_rich=True)
+                marks = {
+                    "completed": ("✓", "success", "完成"),
+                    "failed": ("✗", "error", "失败"),
+                    "error": ("✗", "error", "失败"),
+                    "interrupted": ("⏹", "warning", "中断"),
+                    "stopped": ("⏹", "warning", "中断"),
+                }
+                icon, style, word = marks.get(str(status), ("·", "info", str(status)))
+                print_info(f"{icon} {word} · 用时 {humanize_duration_cn(metrics.elapsed)}",
+                           style=style, use_rich=True)
                 print_info(_time.strftime("%H:%M"), style="info", use_rich=True)
             except Exception:
                 pass

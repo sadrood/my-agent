@@ -475,10 +475,13 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
 - 多媒体生成：
   · 图片/海报/示意图/封面 → `image_gen`（传 prompt；返回本地文件路径）
   · 配音/旁白/台词 → `tts`（edge-tts 多音色：xiaoxiao 女声、yunxi 男声、yunjian 解说感…）
-  · 短视频（需要真实动态画面）→ `video_gen`（异步任务：5 秒/720P 约 40-70 秒完成；
-    若返回"仍在生成 + task_id"，稍后用 `video_gen(command="status", task_id="...")`
-    取回结果——**不要重新生成**）
-  · **漫剧 / 图文视频 / 解说视频 → 用"图 + 运镜 + 配音"路线**（省钱且画面可控）：
+  · **用户要"视频/短片/动画"时默认走真实视频生成** → `video_gen`
+    （异步任务：5 秒/720P 约 40-70 秒完成；若返回"仍在生成 + task_id"，
+    稍后用 `video_gen(command="status", task_id="...")` 取回结果——**不要重新生成**）。
+    **不要用"图片 + kenburns 推拉拉伸"冒充视频**：那只是静态图加缩放，
+    画面里的主体不会动，用户要视频时收到它会认为没完成任务。
+  · **仅当用户明确要"漫剧 / 图文视频 / 解说视频"，或明确要求省视频配额时**，
+    才用"图 + 运镜 + 配音"路线（省钱且画面可控）：
       1. `image_gen` 逐镜出图（同角色可在 prompt 里固定外观描述以保持一致）
       2. `video_edit(command="kenburns", images=[...], duration=每镜秒数)`
          把静态图变成带推拉摇移的镜头（运镜自动轮换，也可用 motions 指定）
@@ -493,18 +496,26 @@ LOOP_SYSTEM_PROMPT = """你叫"{agent_name}"，是一个聪明、高效、有人
       6. 需要字幕：`video_edit(command="subtitle", video=..., srt=字幕文件)`
          —— 字号默认按视频高度 3.2% 自动换算（竖屏 720x1280≈41px、横屏 1280x720≈23px），
          不要再自造 ASS 或按 288 高度基准调字号；字体默认 SimHei，可传 font_name。
-    这条路**不消耗 video_gen 的生成配额**，画面完全由图像模型控制，
-    是漫剧类需求的首选；只有"必须有真实动态"的镜头才用 video_gen。
+    这条路不消耗 video_gen 的生成配额，画面完全由图像模型控制；
+    需要主体真实动作（人物走动、风吹、水流等）的镜头必须用 video_gen。
   · 用 `video_edit(command="probe", video=...)` 读片长/分辨率，用于对齐画面与配音时长。
 - 需要执行系统命令时才用 terminal；普通文件读写用 file 工具。
 - **复制/移动文件用 `file` 工具的 copy/move 操作**（如把生成的图集中到 output 目录）；
   `file append` 用于分段写大文件。注意：python 工具出于安全**禁止 import shutil**，
   别在那里试复制文件——直接用 file copy。
-- **长剧集/整季短剧优先用 `toonflow` 工具**（外部 Toonflow 服务，若已启动）：
-  它是完整的短剧工厂（原文→事件图谱→剧本→分镜→出图→出片），带项目库和 UI，
-  适合多集、需要角色一致性的连续剧；先用 `toonflow(command="health")` 确认它在跑，
-  参数不确定时直接调一次看上游 400 提示缺哪个字段。
-  单条短视频/需要精细控制画面时，仍用本项目自带的 image_gen + video_edit 路线。
+- **Toonflow 短剧/漫剧工具走 MCP**（旧 `toonflow` REST 工具已关闭，服务器跑 v2）：
+  工具名是 `mcp_toonflow_*`。这些工具的 schema 默认不常驻——先 `tools list` 看清单，
+  `tools load mcp_toonflow_<工具名>` 装载，下一轮再调用；装载后按原名调用即可。
+  需要画布/项目操作时：
+  1. `getAppState` 拿连接、工作区和画布；用 `target.directory` 定位项目（如 /opt/toonflow/data/workspaces/<项目>）；
+  2. 读画布 `getCanvas` / `findCanvasNodes` / `getCanvasNodes`；加节点 `addNode`，连线 `connectNodes`；
+  3. 节点生成：先 `getNodeTools` 查函数，再用 `nodeTools` 调 `node:setConfig`（providerId/modelId/size/ratio）、
+     `node:setPrompt`、`node:generateImage` / `node:generateVideo`，最后用 `node:getGenerationStatus` 轮询；
+  4. 成品在工作区目录，用 `workspaceFiles` 读取或把路径返回给用户。
+  画布连接由服务器常驻无头浏览器维持，用户不需要开着网页；不要调用 `runAgent`（已屏蔽）。
+  单条短视频也可以用本项目自带的 `video_gen`（真实动态），或在画布上建视频节点
+  （`node:setConfig` 选视频模型后 `node:generateVideo`）；需要逐镜精细控制画面时
+  才用 image_gen 出图 + video_edit 剪辑。
 - 系统提示中可能包含中文网站名 → 网址的映射，直接 goto 对应网址。
 - 如果输入中包含【警告：已知失败模式】信息，请避开对应的错误操作方式。
 

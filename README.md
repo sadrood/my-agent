@@ -8,8 +8,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B%20(建议%203.11%2B)-3776AB?logo=python&logoColor=white)](#-快速开始)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)](#-快速开始)
-[![Tests](https://img.shields.io/badge/tests-2177%20passed-brightgreen)](#-开发约定)
-[![Tools](https://img.shields.io/badge/tools-26-4B8BBE)](#-能力总览)
+[![Tests](https://img.shields.io/badge/tests-3104%20collected-brightgreen)](#-开发约定)
+[![Tools](https://img.shields.io/badge/tools-30-4B8BBE)](#-能力总览)
 [![Browser](https://img.shields.io/badge/browser-ego%20%7C%20bridge%20%7C%20Playwright-9cf)](#-浏览器三种后端)
 
 </div>
@@ -99,7 +99,7 @@ $EDITOR .env                            # 填 LLM_API_KEY（至少这一项）
 <tr><td rowspan="3"><b>能力扩展</b></td>
     <td>Skills：SKILL.md 按关键词注入系统提示，可附带脚本；安装带完整性校验</td><td><code>SKILLS_ENABLED</code></td></tr>
 <tr><td>浏览器自动化：ego / 内置桥 / Playwright 三后端</td><td><code>BROWSER_BACKEND</code></td></tr>
-<tr><td>桌面操控、图像/视频生成、剪辑、配音、OCR、文档工坊等 26 个工具</td><td>见工具表</td></tr>
+<tr><td>桌面操控、图像/视频生成、剪辑、配音、OCR、文档工坊等 30 个工具</td><td>见工具表</td></tr>
 <tr><td rowspan="4"><b>上下文与成本</b></td>
     <td>工具 schema 按需装载（<code>tools load</code>），低频大工具不进提示词</td><td><code>CONTEXT_*</code></td></tr>
 <tr><td>零驻留上下文：大输出只留指针，<code>context recall</code> 逐字取回</td><td><code>CONTEXT_STORE_*</code></td></tr>
@@ -161,15 +161,17 @@ BROWSER_EGO_HEADLESS=false              # true = 无窗口运行，完全不弹�
 > 缺运行时不会报错，而是**静默降级到 Playwright**——所以换机器后先跑
 > `python main.py --doctor` 看「浏览器后端」那一行，它会明说是否降级、以及缺了什么。
 
-## 🧰 工具（28 个）
+## 🧰 工具（30 个）
 
-**常驻 17** —— 每轮都在提示词里，拿来就用：
+**常驻 19** —— 每轮都在提示词里，拿来就用：
 
-`terminal` · `file` · `code_index` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context` · `ask_user`
+`terminal` · `file` · `code_index` · `edit` · `python` · `browser` · `see` · `ocr` · `image_gen` · `todo_write` · `task` · `thought` · `memory` · `experience` · `delegate` · `context` · `ask_user` · `gui_task` · `tools`
 
-**按需装载 10** —— schema 不进提示词，用时先装载（也支持目标关键词自动装载）：
+**按需装载 9** —— schema 不进提示词，用时先装载（也支持目标关键词自动装载）：
 
-`zhihu` · `zhihu_draft` · `toonflow` · `video_edit` · `video_gen` · `tts` · `article` · `computer` · `installer` · 示例工具
+`zhihu` · `zhihu_draft` · `toonflow` · `video_edit` · `video_gen` · `tts` · `article` · `computer` · `installer`
+
+> 另有 `tools/local/` 下的本地工具（如 `workbuddy`、`hello_local`），按需生成、不入库。
 
 **元工具** —— `tools`（`list` / `load` / `unload`）就是按需区的入口。
 
@@ -198,7 +200,7 @@ python -m agent.recover --run <run-id> --dry-run :: 先从事件流还原，确�
 
 ## 🤝 开发约定
 
-- 一次只改一个模块，改完立刻跑相关用例；**提交前跑全量**（当前 2177 passed / 6 skipped）。
+- 一次只改一个模块，改完立刻跑相关用例；**提交前跑全量**（当前 3104 个用例 / 7 skipped）。
 - 改 `.py` 用精确替换；新配置进 `config.py` 并同步 `.env.example`；新提示词进 `models/prompts.py`。
 - 安全功能必须走 `agent/approval.py` 审批门；黑名单与沙箱等级不可被任何扩展层豁免。
 - 公共文件（`config.py` / `.env.example` / `AGENTS.md` / `main.py`）提交时**逐 hunk 暂存**，避免把别人未完成的改动卷进来。

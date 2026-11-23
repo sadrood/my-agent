@@ -23,6 +23,43 @@ def _resolve_argv(command: str, args: list) -> tuple:
     return [resolved] + list(args), False
 
 
+def _cache_dir() -> str:
+    """按需连接服务器的工具清单缓存目录（与用户级 MCP 配置同级）。"""
+    from config import MCP_USER_CONFIG_FILE
+    return os.path.join(os.path.dirname(MCP_USER_CONFIG_FILE), "mcp_cache")
+
+
+def _coerce_timeout(value, server_name: str = "") -> Optional[float]:
+    """把配置里的 timeout 解析成秒；非法值告警后按默认值处理，绝不抛异常。
+
+    配置常被手写成 "120s" / "2m"，而 float() 在 Popen 之后才执行 —— 抛错会留下
+    没人认领的子进程，且整个 agent 启动随之中断。这里降级而不是拒绝启动。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        print(f"[MCP] 警告：服务器 '{server_name}' 的 timeout={value!r} 不是数字，按默认 15s 处理")
+        return None
+    if seconds <= 0:
+        print(f"[MCP] 警告：服务器 '{server_name}' 的 timeout={value!r} 不为正，按默认 15s 处理")
+        return None
+    return seconds
+
+
+def _norm_exclude(value) -> list:
+    """exclude 支持列表或逗号分隔字符串；写成字符串时不要被逐字符拆开。"""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [s.strip() for s in value.split(",") if s.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(s) for s in value if str(s).strip()]
+    print(f"[MCP] 警告：exclude={value!r} 类型不支持（应为列表），已忽略")
+    return []
+
+
 class MCPTool(BaseTool):
     """MCP 远程工具包装器。将 MCP 服务器的工具包装为本地 BaseTool。"""
 
@@ -142,6 +179,8 @@ class MCPClient:
         self._request_id = 0
         self._lock = threading.Lock()
         self._tool_manager = tool_manager
+        # 按需连接（lazy）服务器的启动配置：工具已注册但进程未起，首次调用时才连
+        self._lazy_configs: Dict[str, Dict[str, Any]] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -156,10 +195,38 @@ class MCPClient:
     # ================================================================
 
     def connect_stdio(self, server_name: str, command: str, args: list = None,
-                      env: dict = None) -> bool:
-        """通过 stdio 连接 MCP 服务器。"""
+                      env: dict = None, exclude: list = None,
+                      timeout: float = None, lazy: bool = False) -> bool:
+        """通过 stdio 连接 MCP 服务器。exclude 中的工具名不会被注册。
+        timeout 为该服务器每次请求的等待上限（远程 SSH 桥接需要放宽）。
+        lazy=True 时不立即起进程：先用缓存的工具清单注册占位工具，首次调用才连接。"""
         args = args or []
-        
+        exclude = _norm_exclude(exclude)
+        timeout = _coerce_timeout(timeout, server_name)
+
+        if lazy:
+            self._lazy_configs[server_name] = {
+                "command": command, "args": args, "env": env,
+                "exclude": exclude, "timeout": timeout,
+            }
+            cached = self._load_tool_cache(server_name)
+            if cached is None:
+                # 无缓存：连一次取工具清单，缓存后立即断开
+                if not self.connect_stdio(server_name, command, args, env, exclude, timeout):
+                    return False
+                self._save_tool_cache(server_name)
+                cached = self._load_tool_cache(server_name) or []
+                self.disconnect(server_name)
+            # disconnect 会反注册工具：这里统一重建占位条目并注册（进程为 None）
+            self._servers[server_name] = {
+                "type": "stdio", "process": None, "name": server_name,
+                "lock": threading.Lock(),
+                "exclude": {str(n) for n in exclude},
+                "timeout": timeout,
+            }
+            self._register_tool_infos(server_name, cached, quiet=True)
+            return True
+
         try:
             argv, use_shell = _resolve_argv(command, args)
             process = subprocess.Popen(
@@ -187,6 +254,8 @@ class MCPClient:
             # 每台服务器各自一把锁：之前所有服务器共用实例级 _lock，一台慢服务器会把其它服务器的请求一起卡住（最长 15s/次）
             "name": server_name,
             "lock": threading.Lock(),
+            "exclude": {str(name) for name in exclude},
+            "timeout": timeout,
         }
 
         # 初始化握手
@@ -258,6 +327,7 @@ class MCPClient:
                     self._tool_manager.unregister(k)
                 self._tools.pop(k, None)
             
+            had_process = server.get("process") is not None
             if server["type"] == "stdio":
                 process = server.get("process")
                 if process:
@@ -269,7 +339,8 @@ class MCPClient:
                     except Exception:
                         process.kill()
             
-            print(f"[MCP] 已断开服务器 '{name}' ({len(removed)} 个工具已卸载)")
+            if had_process:
+                print(f"[MCP] 已断开服务器 '{name}' ({len(removed)} 个工具已卸载)")
 
     # ================================================================
     # 工具管理
@@ -280,12 +351,24 @@ class MCPClient:
         result = self._send_request(server_name, "tools/list", {})
         if result is None:
             return None
-        registered = 0
-
         tools_list = result.get("tools", [])
+        server = self._servers.get(server_name)
+        if server is not None:
+            server["tools_raw"] = tools_list
+        return self._register_tool_infos(server_name, tools_list)
+
+    def _register_tool_infos(self, server_name: str, tools_list: list, quiet: bool = False) -> int:
+        """按原始 tools/list 条目注册工具（实时发现与 lazy 缓存共用）。"""
+        registered = 0
+        skipped = []
+
+        exclude = self._servers.get(server_name, {}).get("exclude") or set()
         for tool_info in tools_list:
             tool_name = tool_info.get("name", "")
             if not tool_name:
+                continue
+            if tool_name in exclude:
+                skipped.append(tool_name)
                 continue
             try:
                 mcp_tool = MCPTool(
@@ -302,6 +385,15 @@ class MCPClient:
             except Exception as e:
                 # 单个工具构造/注册失败不阻塞整批（坏 schema 等）
                 print(f"[MCP] 跳过工具 '{tool_name}': {e}")
+        if skipped and not quiet:
+            print(f"[MCP] 已按配置跳过 {len(skipped)} 个工具：{', '.join(skipped)}")
+        # exclude 是安全阀（挡掉会二次调用模型的委托工具），拼错一个字母就等于没配。
+        # 只在未命中时告警，正常配置下启动依旧安静。
+        present = {str(t.get("name")) for t in tools_list if t.get("name")}
+        missing = sorted(n for n in exclude if n not in present)
+        if missing:
+            print(f"[MCP] 警告：服务器 '{server_name}' 的 exclude 里有不存在的工具："
+                  f"{', '.join(missing)}（拼写错误？该工具仍会注册）")
         return registered
 
     def call_tool(self, tool_full_name: str, arguments: dict) -> Any:
@@ -312,7 +404,8 @@ class MCPClient:
                     "content": [{"text": f"无效的 MCP 工具名: {tool_full_name}"}]}
         body = tool_full_name[4:]
         server_name = tool_name = ""
-        for name in sorted(self._servers, key=len, reverse=True):
+        known = set(self._servers) | set(self._lazy_configs)
+        for name in sorted(known, key=len, reverse=True):
             prefix = f"{name}_"
             if body.startswith(prefix):
                 server_name, tool_name = name, body[len(prefix):]
@@ -325,10 +418,65 @@ class MCPClient:
                         "content": [{"text": f"无效的 MCP 工具名格式: {tool_full_name}"}]}
             server_name, tool_name = parts
 
+        if not self._ensure_lazy_connected(server_name):
+            return {"isError": True,
+                    "content": [{"text": f"MCP 服务器 '{server_name}' 按需连接失败，无法调用 {tool_name}。"}]}
+
         return self._send_request(server_name, "tools/call", {
             "name": tool_name,
             "arguments": arguments,
         })
+
+    def _ensure_lazy_connected(self, server_name: str) -> bool:
+        """lazy 服务器首次调用（或断线后重试）时才真正建立连接。"""
+        cfg = self._lazy_configs.get(server_name)
+        if cfg is None:
+            return True
+        server = self._servers.get(server_name)
+        # check-then-act 必须串行：两个线程同时首调会各起一个进程，
+        # 后者覆盖 _servers 条目，前者没人认领（子进程泄漏）。
+        lock = (server or {}).get("lock") or self._lock
+        with lock:
+            server = self._servers.get(server_name)
+            proc = server.get("process") if server else None
+            if proc is not None and proc.poll() is None:
+                return True
+            print(f"[MCP] 首次使用，正在连接服务器 '{server_name}' ...")
+            ok = self.connect_stdio(server_name, cfg["command"], cfg["args"],
+                                    cfg.get("env"), cfg.get("exclude"), cfg.get("timeout"))
+            if ok:
+                self._save_tool_cache(server_name)
+            return ok
+
+    # ------------------------------------------------------------
+    # lazy 工具清单缓存（只存 schema，不存命令/token）
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _cache_path(server_name: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in server_name)
+        return os.path.join(_cache_dir(), f"{safe}.json")
+
+    def _load_tool_cache(self, server_name: str) -> Optional[list]:
+        try:
+            with open(self._cache_path(server_name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            tools = data.get("tools")
+            return tools if isinstance(tools, list) else None
+        except Exception:
+            return None
+
+    def _save_tool_cache(self, server_name: str) -> None:
+        tools = (self._servers.get(server_name) or {}).get("tools_raw")
+        if not tools:
+            return
+        try:
+            path = self._cache_path(server_name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"tools": tools}, f, ensure_ascii=False)
+        except Exception:
+            pass
 
     def list_tools(self) -> Dict[str, MCPTool]:
         """列出所有已发现的 MCP 工具。"""
@@ -380,8 +528,10 @@ class MCPClient:
             except Exception as e:
                 print(f"[MCP] 发送通知失败: {e}")
 
-    def _stdio_request(self, server: dict, request: dict, timeout: float = 15.0) -> Optional[dict]:
+    def _stdio_request(self, server: dict, request: dict, timeout: float = None) -> Optional[dict]:
         """通过 stdio 发送请求并获取响应。"""
+        # 服务器级超时可配置：SSH 远程桥接握手/调用都可能超过本地默认的 15s
+        timeout = float(timeout or server.get("timeout") or 15.0)
         process = server.get("process")
         if process is None or process.poll() is not None:
             print("[MCP] stdio 进程已退出")

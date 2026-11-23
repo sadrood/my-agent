@@ -577,7 +577,7 @@ def _check_sandbox() -> dict:
                 "name": "OS 级沙箱",
                 "ok": False,
                 "message": "容器内项目 Python 不可用（.venv ACL 未继承 / 当前用户无写 DAC 权限）",
-                "hint": ("以管理员身份执行一次：icacls .venv\Scripts "
+                "hint": ("以管理员身份执行一次：icacls .venv\\Scripts "
                          "/grant *S-1-15-2-1:(OI)(CI)(RX) /T；或改回 SANDBOX_EXECUTION=off"),
             }
         return {

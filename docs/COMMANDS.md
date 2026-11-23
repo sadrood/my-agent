@@ -344,6 +344,53 @@ ARTICLE_FALLBACK_ENDPOINT=auto      # 某阶段被限流时自动换另一家把
 > 机械类问题（半角标点、引号不配对、叠字、省略号写法）由**规则**直接判定，不花 token、
 > 可复现；语义与措辞问题才交给审阅模型——实测模型会漏掉"全文都用半角逗号"这种惯例问题。
 
+## 三·十·五、桌面操控：两条通道 + 任务级 GUI agent
+
+`computer` 工具有两条互斥的输入通道，以及在其上封装的 `gui_task` 任务级工具。
+
+### 共享通道 vs 非抢占通道
+
+| 动作 | 通道 | 会动真实光标/键盘？ | 目标窗口需在前台？ |
+|---|---|---|---|
+| `screenshot` `a11y` `window` | 共享（只读） | 否 | 是（`a11y` 读前台） |
+| `click` `type` `key` `scroll` | 共享（写） | **是** | 是 |
+| `shot` `inspect` | 非抢占（只读） | 否 | 否 |
+| `invoke` `fill` `pick` `sendkey` `wheel` | 非抢占（写） | 否 | 否 |
+
+- 非抢占通道走 `tools/desktop_quiet.py`：感知用 `PrintWindow` 只截目标窗口，动作走 UIA
+  control patterns（Invoke/Toggle/Value/ExpandCollapse/SelectionItem），兜底定向窗口消息
+  （`BM_CLICK` / `WM_SETTEXT` / `WM_KEYDOWN`）。
+- 典型用法：`inspect` 拿元素清单（每行带 `#序号` 与支持的 patterns）→ `invoke`/`fill` 用
+  `#序号` 或 `id:xxx` / `name=xxx` / `type=Button` / `class=Edit` 寻址 → `shot` 复查画面。
+- 局限：纯自绘界面（游戏、Canvas/GPU 合成且不支持 `PrintWindow` 的窗口）可能读不到或点不动，
+  此时回退共享通道。
+- 两条通道共用同一套"用户优先"闸门：控制权在用户手里时写类动作全部拒绝（`resume` 交还）。
+
+```json
+{"action":"inspect","title":"记事本"}
+{"action":"fill","title":"记事本","target":"#3","text":"你好"}
+{"action":"invoke","title":"记事本","target":"name=保存"}
+{"action":"shot","title":"记事本","question":"当前界面状态如何"}
+```
+
+### 任务级 GUI agent（`gui_task`）
+
+给一句话，自己反复「观察 → VLM 决策 → 执行 → 再观察」直到完成：
+
+```cmd
+GUI_TASK_ENABLED=true    :: 默认开；关掉后 gui_task 不注册，computer 不受影响
+```
+
+```json
+{"action":"start","goal":"打开记事本并新建一个文件写 hello","window_title":"记事本"}
+{"action":"continue","max_steps":8}
+{"action":"continue","hint":"刚才点错了，应该点 文件 菜单"}
+{"action":"close"}
+```
+
+> `gui_task` 内部复用 `computer` 的动作，所以同样受审批门（`risk_level=high` /
+> `approval=on-request`）约束；只读观察不消耗动作额度，危险动作才计入步数。
+
 ## 三·十一之前：两道门，别搞混（审批门 vs Guardian）
 
 **对话内切权限**（只有你在提示符里能切，模型没有提权工具）：

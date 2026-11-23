@@ -320,8 +320,19 @@ class TestToolCommands:
             {"command": "call", "method": "GET"}).risk_level == "low"
 
     def test_registered_in_tool_manager(self):
+        """注册与否由 TOONFLOW_ENABLED 决定：开关关掉时不该注册，开着时必须注册。
+
+        （旧断言写死了"一定注册"，在 .env 里 TOONFLOW_ENABLED=false 的机器上必红——
+        这不是功能坏了，是测试没有尊重自己的配置开关。）
+        """
+        from config import TOONFLOW_CONFIG
         from tools.tool_manager import ToolManager
-        assert "toonflow" in ToolManager().list_tools()
+
+        names = ToolManager().list_tools()
+        if TOONFLOW_CONFIG.get("enabled", True):
+            assert "toonflow" in names
+        else:
+            assert "toonflow" not in names
 
 
 class TestChapterSplit:

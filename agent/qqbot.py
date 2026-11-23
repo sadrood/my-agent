@@ -1515,6 +1515,13 @@ class QQBotBridge:
         if not openid:
             return ""
         key = self.scope_key(openid, group_openid)
+        # 任务级 GUI 会话按 QQ 会话隔离：gui_task 的续跑状态不会串到别的群/私聊。
+        # handle_text 跑在 asyncio.to_thread 的独立线程里，thread-local key 稳定。
+        try:
+            from tools.gui_task import set_session_key
+            set_session_key(key)
+        except Exception:
+            pass
         if not self.allowed(openid, group_openid):
             run_log.log(f"QQ 消息被拒（不在白名单）: 用户尾号 {openid[-6:]}"
                         + (f"，群尾号 {group_openid[-6:]}" if group_openid else ""), "warn")

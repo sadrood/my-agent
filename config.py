@@ -516,6 +516,7 @@ VIDEO_EDIT_CONFIG = {
 # ============================================================
 # 示例 .env 配置:
 #   MCP_SERVERS=[{"name":"filesystem","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp"]}]
+# 条目可加 "exclude":["工具名"]，该工具不会被注册给模型（例如屏蔽会二次调用模型的委托工具）。
 # 用户级插件（installer 工具安装）持久化在 ~/.my_agent/mcp_servers.json，
 # 可用环境变量 MCP_USER_CONFIG_FILE 覆盖路径；重启后自动恢复连接。
 import json
@@ -572,6 +573,8 @@ MCP_CONFIG = {
 COMPUTER_USE_CONFIG = {
     # 关掉则不注册 computer 工具（模型看不到它）
     "enabled": os.getenv("COMPUTER_USE_ENABLED", "true").lower() == "true",
+    # 任务级 GUI agent（gui_task）：给一句话自己看屏操作到完成。默认开，单独可关。
+    "gui_task_enabled": os.getenv("GUI_TASK_ENABLED", "true").lower() == "true",
     "default_steps": int(os.getenv("COMPUTER_USE_DEFAULT_STEPS", "10")),
     # 光标可视化浮层：操作键鼠时显示跟随真实光标的橙色光环 + 点击涟漪。默认关 ——浮层点击穿透一旦失效会吞掉整屏鼠标事件并抢焦点，风险高于收益。取值宽容（1/true/on/yes）：文档与该键的 docstring 一直写的是 =1
     "cursor_overlay": os.getenv("COMPUTER_CURSOR_OVERLAY", "").strip().lower()
@@ -969,6 +972,15 @@ TOOL_GATING_CONFIG = {
         "zhihu", "zhihu_draft", "toonflow", "video_edit", "video_gen", "tts",
         "article", "installer", "computer", "hello_local",
     }),
+    # 前缀命中的工具同样按需装载：MCP 一台服务器动辄几十个工具，全常驻会把提示词
+    # 撑满（实测两台 77 个约占 4 万字符）。留空则只按上面的精确名单门控。
+    "prefixes": tuple(
+        p.strip() for p in os.getenv("TOOL_GATING_PREFIXES", "mcp_").split(",") if p.strip()
+    ),
+    # 命中前缀但仍要常驻的工具名（高频使用的 MCP 工具放这里）。
+    "always": frozenset(
+        n.strip() for n in os.getenv("TOOL_GATING_ALWAYS", "").split(",") if n.strip()
+    ),
     "keywords": {
         "zhihu": ("知乎", "zhihu"),
         "zhihu_draft": ("知乎草稿", "存草稿"),

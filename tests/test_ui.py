@@ -484,3 +484,16 @@ class TestPromptBoxPreDraw:
         ui.prompt_box_close(drawn=False)
         out = buf.getvalue()
         assert "╰" in out and "\x1b[" not in out
+
+
+def test_failure_hint_quote_error():
+    assert "引号" in ui.failure_hint('bash: -c: line 1: unexpected EOF while looking for matching `"')
+
+
+def test_failure_hint_unknown_returns_empty():
+    assert ui.failure_hint("all good") == ""
+
+
+def test_tool_result_prints_failure_hint(buf):
+    ui.print_tool_result(False, 'bash: -c: line 1: unexpected EOF while looking for matching `"`', use_rich=True)
+    assert "引号" in buf.getvalue()

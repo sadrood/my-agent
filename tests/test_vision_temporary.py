@@ -9,6 +9,16 @@ from models.vision import VisionModel
 INTRANET = "http://172.16.10.242:3000/v1"
 
 
+def _env_base_url() -> str:
+    """当前 .env 配置的视觉主端点（不同机器各不相同，不能写死）。"""
+    from config import VISION_CONFIG
+    return str(VISION_CONFIG.get("base_url") or "").rstrip("/")
+
+
+def _same_endpoint(actual, expected: str) -> bool:
+    return str(actual).rstrip("/") == expected.rstrip("/")
+
+
 @pytest.fixture(autouse=True)
 def _reset_override():
     vision_mod.set_temporary_primary()
@@ -39,20 +49,24 @@ class TestTemporaryPrimary:
         entries = VisionModel()._fallback_clients()
         assert entries, "备用链不该为空（.env 里配了 VISION_FALLBACK_MODELS）"
         bases = [str(client.base_url) for _, client in entries]
-        assert not any("172.16.10.242" in b for b in bases), "临时主端点不该再出现在备用链里"
+        # 临时主端点（模型 + 端点这一对）不该在备用链里重复出现
+        assert not any(_same_endpoint(b, INTRANET) for b in bases), \
+            "临时主端点不该再出现在备用链里"
 
     def test_partial_override_keeps_env_for_rest(self):
         """只给模型名（没给端点）时，端点仍取 .env。"""
+        env_base = _env_base_url()
         vision_mod.set_temporary_primary(model="deepseek-flash")
         m = VisionModel()
         assert m.vision_model == "deepseek-flash"
-        assert "172.16" not in str(m.client.base_url)
+        assert env_base and _same_endpoint(m.client.base_url, env_base)
 
     def test_clearing_restores_env(self):
+        env_base = _env_base_url()
         vision_mod.set_temporary_primary(model="x", base_url=INTRANET, api_key="k")
         vision_mod.set_temporary_primary()
         assert vision_mod.temporary_primary() == {"model": "", "base_url": "", "api_key": ""}
-        assert "172.16" not in str(VisionModel().client.base_url)
+        assert env_base and _same_endpoint(VisionModel().client.base_url, env_base)
 
 
 class TestSwitchModelSyncsVision:

@@ -10,6 +10,7 @@ class _Client(MCPClient):
 
     def __init__(self, server_names):
         self._servers = {n: {} for n in server_names}
+        self._lazy_configs = {}
         self.sent = []
 
     def disconnect(self, *a, **k):

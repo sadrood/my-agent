@@ -26,6 +26,9 @@ skills/
 tools/local/
 *.log
 
+# 本地工作记录与 SSH known_hosts（机器专属，不入库）
+.workbuddy/
+
 # 调试/临时脚本与输出（开发过程产生的一次性文件）
 _*.py
 _*.txt

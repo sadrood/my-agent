@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from tools.base import BaseTool, ToolResult
 from tools.cursor_overlay import get_overlay
 
+try:
+    from tools import desktop_quiet as quiet
+except Exception:          # 非 Windows 或 GDI 依赖不可用
+    quiet = None
+
 
 class ComputerUseMixin:
     """Computer Use 混入类，为 BrowserTool 添加精确鼠标/键盘操作能力。"""
@@ -319,6 +324,10 @@ _MOUSE_DOWN_UP = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010), "middle":
 _MOUSEEVENTF_WHEEL = 0x0800
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_UNICODE = 0x0004
+
+#: 非抢占（quiet）动作：不移动光标、不注入按键、不切前台，全部走 tools.desktop_quiet。
+#: 与共享通道（click/type/key/scroll…）互斥；目标窗口无需在前台。
+_QUIET_ACTIONS = frozenset({"shot", "inspect", "invoke", "fill", "pick", "sendkey", "wheel"})
 
 
 def _user32():
@@ -666,13 +675,20 @@ class DesktopTool(BaseTool):
     def description(self) -> str:
         return (
             "桌面操控工具：像人一样操作电脑（区别于 browser——那个只管浏览器页面）。\n"
-            "能力：screenshot（截图给视觉模型分析）、a11y（读前台窗口无障碍树，拿到"
-            "按钮/输入框的类型、名称和精确坐标）、click/type/key/scroll（OS 级鼠标键盘，"
-            "type 支持中文）、window（列出/激活窗口）。\n"
-            "用法建议：先 a11y 或 screenshot 看清界面 → 用树里/截图里的坐标 click → "
-            "type 输入 → 再 screenshot 验证效果。操作的目标窗口最好先用 window 动作激活。\n"
+            "有两条互斥的输入通道：\n"
+            "【共享通道】click/type/key/scroll + screenshot/a11y/window——注入系统输入队列，"
+            "真光标会被搬走、键盘会发到前台窗口，期间用户不能同时用电脑（检测到用户活动会自动让路）。\n"
+            "【非抢占通道】shot/inspect/invoke/fill/pick/sendkey/wheel——不移动光标、不注入按键、"
+            "不切换前台，用户可以照常在自己这边用电脑。感知用 PrintWindow 只截目标窗口，"
+            "动作走 UIA control patterns（Invoke/Toggle/Value/ExpandCollapse/SelectionItem），"
+            "兜底走定向窗口消息（BM_CLICK/WM_SETTEXT/WM_KEYDOWN）。目标窗口无需在前台。\n"
+            "非抢占通道用法：inspect 拿元素清单（每行带 #序号 与支持的 patterns）→ "
+            "invoke/fill 用 #序号 或 id:xxx / name:xxx 寻址 → shot 复查画面。\n"
+            "非抢占通道的局限：纯自绘界面（游戏、Canvas/GPU 合成且不支持 PrintWindow 的窗口）"
+            "可能读不到或点不动，此时回退共享通道。\n"
             "坐标口径：x/y 是**屏幕绝对坐标**（逻辑像素）；若来自 DPI 感知的截图/a11y"
             "（物理像素），click/scroll 传 physical=true 让工具按系统缩放换算。"
+            "非抢占通道的 x/y 直接用 inspect 返回的 box（物理像素），不做换算。"
         )
 
     @property
@@ -683,11 +699,15 @@ class DesktopTool(BaseTool):
                 "action": {
                     "type": "string",
                     "enum": ["screenshot", "a11y", "click", "type", "key", "scroll",
-                             "window", "resume"],
-                    "description": "screenshot=截图分析; a11y=读前台窗口元素树; click=点击; "
-                                   "type=输入文本; key=按组合键; scroll=滚轮; "
-                                   "window=列出/激活窗口; resume=把控制权交回 agent"
-                                   "（你接管期间 agent 不会抢回）",
+                             "window", "resume",
+                             "shot", "inspect", "invoke", "fill", "pick", "sendkey", "wheel"],
+                    "description": "共享通道：screenshot=全屏截图分析; a11y=前台窗口元素树; "
+                                   "click/type/key/scroll=真实鼠标键盘; window=列出/激活窗口; "
+                                   "resume=控制权交回 agent。"
+                                   "非抢占通道（不动光标不抢键盘）：shot=只截目标窗口; "
+                                   "inspect=读目标窗口元素树(含 #序号与可用 patterns); "
+                                   "invoke=零输入触发按钮/复选框/菜单项; fill=零输入写文本框; "
+                                   "pick=定向坐标点击; sendkey=定向按键; wheel=定向滚轮",
                 },
                 "x": {"type": "number", "description": "屏幕横坐标（click/scroll 用，屏幕绝对坐标）"},
                 "y": {"type": "number", "description": "屏幕纵坐标"},
@@ -700,7 +720,11 @@ class DesktopTool(BaseTool):
                 "text": {"type": "string", "description": "type 要输入的文本（支持中文，\\n=回车）"},
                 "combo": {"type": "string", "description": "key 的组合键，如 ctrl+s / alt+tab / enter"},
                 "notches": {"type": "number", "description": "scroll 滚动格数（正=向上，默认 3）"},
-                "title": {"type": "string", "description": "window 动作的窗口标题（模糊匹配；空=列出全部）"},
+                "title": {"type": "string", "description": "window 动作：要激活的标题（空=列出全部）。"
+                            "非抢占动作：目标窗口标题（模糊匹配），不传则用当前前台窗口"},
+                "target": {"type": "string", "description": "非抢占动作的元素寻址：#3=inspect 的序号，"
+                             "id:OKButton=AutomationId，name=确定，type=Button，class=Edit；"
+                             "裸字符串按 Name 匹配"},
                 "question": {"type": "string", "description": "screenshot 附加给视觉模型的具体问题"},
             },
             "required": ["action"],
@@ -734,6 +758,8 @@ class DesktopTool(BaseTool):
             return ToolResult(success=False, output="",
                               error="computer 工具目前仅支持 Windows。")
         action = str(arguments.get("action", "")).strip().lower()
+        if action in _QUIET_ACTIONS:
+            return self._run_quiet(action, arguments)
         handlers = {
             "screenshot": self._act_screenshot,
             "a11y": self._act_a11y,
@@ -783,13 +809,12 @@ class DesktopTool(BaseTool):
         except Exception as e:
             return ToolResult(success=False, output="", error=f"computer {action} 失败: {str(e)[:200]}")
 
-    def _act_screenshot(self, args: Dict[str, Any]) -> ToolResult:
-        path = _take_screenshot()
-        if not path:
-            return ToolResult(success=False, output="", error="截图失败（ImageGrab 不可用？）")
-        title = _active_window_title()
-        question = str(args.get("question", "") or "").strip() or _COMPUTER_SCREEN_QUESTION
+    def _analyze_capture(self, path: str, title: str, question: str) -> ToolResult:
+        """把一张已保存的截图交给视觉模型；不可用/失败时降级本地 OCR。
 
+        静默通道（shot）与共享通道（screenshot）共用这一条读图链路，
+        保证两条通道的"能看见屏幕"能力一致。
+        """
         # 视觉模型不可用/失败时降级到本地 OCR：桌面截图的价值大半就是"屏幕上写了什么"，因为一次多模态调用超时就整个放弃（用户痛点）是不可接受的。
         def _ocr_fallback(why: str) -> Optional[ToolResult]:
             try:
@@ -828,6 +853,14 @@ class DesktopTool(BaseTool):
         return ToolResult(success=True, output=(
             f"前台窗口: {title or '（未知）'}\n【屏幕分析】"
             f"{getattr(vision, 'fallback_note', lambda: '')()}\n{analysis}\n[截图: {path}]"))
+
+    def _act_screenshot(self, args: Dict[str, Any]) -> ToolResult:
+        path = _take_screenshot()
+        if not path:
+            return ToolResult(success=False, output="", error="截图失败（ImageGrab 不可用？）")
+        title = _active_window_title()
+        question = str(args.get("question", "") or "").strip() or _COMPUTER_SCREEN_QUESTION
+        return self._analyze_capture(path, title, question)
 
     def _act_a11y(self, args: Dict[str, Any]) -> ToolResult:
         try:
@@ -913,3 +946,119 @@ class DesktopTool(BaseTool):
         _release_all_inputs()
         return ToolResult(success=True,
                           output=f"键鼠控制权已交回 agent（先前归属：{previous}），可以继续操作了。")
+
+    # ── 非抢占（quiet）通道 ────────────────────────────────────────────────
+    # 全部动作走 tools.desktop_quiet：不移动光标、不注入系统按键、不切前台。
+    # 用户可以在自己那边照常操作电脑；目标窗口无需在前台。
+
+    def _quiet_target(self, args: Dict[str, Any]) -> Tuple[Optional[int], str]:
+        """按 title 解析目标窗口句柄（不传则用当前前台窗口）；第二个返回值是窗口标题。"""
+        title = str(args.get("title", "") or "").strip()
+        if title:
+            hwnd = quiet.find_hwnd(title)
+            if not hwnd:
+                return None, f"没有标题包含 {title!r} 的可见窗口（先 window 不带 title 列出）。"
+            return hwnd, quiet.window_title(hwnd) or title
+        hwnd = _user32().GetForegroundWindow()
+        if not hwnd:
+            return None, "当前没有前台窗口；请用 title 指定目标窗口。"
+        return hwnd, quiet.window_title(hwnd)
+
+    def _quiet_out(self, res: dict, subject: str) -> ToolResult:
+        """把 desktop_quiet 的 dict 结果转成 ToolResult。"""
+        if not res.get("ok"):
+            return ToolResult(success=False, output="",
+                              error=str(res.get("reason") or "非抢占动作失败"))
+        head = f"{subject}（非抢占通道：未移动真实光标、未注入按键、未切换前台）"
+        extra = [f"{k}={v}" for k, v in res.items() if k not in ("ok", "note") and v not in ("", None)]
+        note = str(res.get("note") or "").strip()
+        body = "\n".join(x for x in ("；".join(extra), note) if x)
+        return ToolResult(success=True, output=f"{head}\n{body}" if body else head)
+
+    def _run_quiet(self, action: str, args: Dict[str, Any]) -> ToolResult:
+        """非抢占通道的入口：与共享通道共用 user-first 闸门，但不碰输入队列。"""
+        if quiet is None:
+            return ToolResult(success=False, output="",
+                              error="非抢占通道不可用（desktop_quiet 导入失败：非 Windows 或缺依赖）。")
+        # 控制权已交给用户：写类动作一律拒绝（读类的 shot/inspect 仍放行，便于继续观察）。
+        mutating = ("invoke", "fill", "pick", "sendkey", "wheel")
+        if action in mutating and ownership() == "user":
+            return ToolResult(
+                success=False, output="",
+                error=f"控制权在用户手里（你之前让路或被接管），已停止桌面动作。{HAND_BACK_HINT}")
+        hwnd, title_or_err = self._quiet_target(args)
+        if hwnd is None:
+            return ToolResult(success=False, output="", error=title_or_err)
+        try:
+            if action == "shot":
+                from config import TOOL_CONFIG
+                out_dir = TOOL_CONFIG.get("computer_screenshot_dir") or os.path.join(
+                    "generated_images", "computer")
+                path = os.path.join(out_dir, f"quiet_{int(time.time() * 1000)}.png")
+                cap = quiet.capture(hwnd, path)
+                if not cap.get("ok"):
+                    return ToolResult(success=False, output="", error=str(cap.get("reason") or "截图失败"))
+                question = str(args.get("question", "") or "").strip() or _COMPUTER_SCREEN_QUESTION
+                res = self._analyze_capture(path, title_or_err, question)
+                if cap.get("blank"):
+                    res.output = f"【注意】{cap.get('note')}\n" + res.output
+                return res
+
+            if action == "inspect":
+                from config import TOOL_CONFIG
+                max_elements = int(TOOL_CONFIG.get("computer_a11y_max_elements", 120))
+                max_depth = int(TOOL_CONFIG.get("computer_a11y_max_depth", 8))
+                tree = quiet.inspect(hwnd, max_elements=max_elements, max_depth=max_depth)
+                if not tree.get("ok"):
+                    return ToolResult(success=False, output="",
+                                      error=str(tree.get("reason") or "读取元素树失败"))
+                lines = [f"窗口: {tree.get('title') or title_or_err}（{tree.get('count')} 个元素）",
+                         "用 #序号 / id:xxx / name=xxx / type=Button / class=Edit 寻址"]
+                for el in tree.get("elements", []):
+                    box = el.get("box")
+                    rect = f"({box[0]},{box[1]})-({box[2]},{box[3]})" if box else "?"
+                    pats = ",".join(el.get("patterns") or []) or "-"
+                    lines.append(f"#{el['i']} {el['type']} '{el['name']}' id={el['id']!r} "
+                                 f"class={el['class']!r} {rect} patterns=[{pats}]")
+                return ToolResult(success=True, output="\n".join(lines))
+
+            target = str(args.get("target", "") or "").strip()
+            if action in ("invoke", "fill") and not target:
+                return ToolResult(success=False, output="",
+                                  error=f"{action} 需要 target（先 inspect 拿 #序号）。")
+
+            if action == "invoke":
+                return self._quiet_out(quiet.invoke(hwnd, target), f"已触发 {target}")
+            if action == "fill":
+                res = quiet.fill(hwnd, target, str(args.get("text", "")))
+                return self._quiet_out(res, f"已写入 {target}")
+            if action == "pick":
+                try:
+                    x, y = int(float(args.get("x"))), int(float(args.get("y")))
+                except (TypeError, ValueError):
+                    return ToolResult(success=False, output="", error="pick 需要 x/y 屏幕坐标。")
+                button = str(args.get("button", "left") or "left").lower()
+                if button not in ("left", "right", "middle"):
+                    button = "left"
+                res = quiet.pick(hwnd, x, y, button=button, double=bool(args.get("double")))
+                return self._quiet_out(res, f"已在 ({x},{y}) 定向点击")
+            if action == "sendkey":
+                combo = str(args.get("combo", "") or "").strip()
+                if not combo:
+                    return ToolResult(success=False, output="", error="sendkey 需要 combo（如 ctrl+s）。")
+                return self._quiet_out(quiet.sendkey(hwnd, combo), f"已定向发送 {combo}")
+            if action == "wheel":
+                try:
+                    x, y = int(float(args.get("x"))), int(float(args.get("y")))
+                except (TypeError, ValueError):
+                    return ToolResult(success=False, output="", error="wheel 需要 x/y 屏幕坐标。")
+                notches = args.get("notches", 3)
+                try:
+                    notches = int(float(notches))
+                except (TypeError, ValueError):
+                    notches = 3
+                return self._quiet_out(quiet.scroll(hwnd, x, y, notches),
+                                       f"已在 ({x},{y}) 定向滚动 {abs(notches)} 格")
+        except Exception as e:
+            return ToolResult(success=False, output="",
+                              error=f"computer {action}（非抢占）失败: {str(e)[:200]}")

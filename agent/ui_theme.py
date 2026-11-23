@@ -421,6 +421,24 @@ def print_unified_diff(old_text: str, new_text: str, use_rich: bool = True,
         c.print(f"[dim]{tail}[/dim]" if use_rich else tail)
 
 
+_FAILURE_HINTS = (
+    ("unexpected eof while looking for matching", "命令引号嵌套有误：改用单引号，或先把脚本写到文件再执行。"),
+    ("no such file or directory", "路径不存在：确认文件/目录是否在当前工作区。"),
+    ("connection refused", "连接被拒绝：目标服务没运行或端口不对。"),
+    ("timed out", "等待超时：操作或网络过慢，可重试或缩小范围。"),
+    ("http 5", "服务端错误（5xx）：稍后重试或换端点。"),
+)
+
+
+def failure_hint(output: str) -> str:
+    """常见失败给一句可操作提示（原文仍由调用方完整展示）。"""
+    text = str(output or "").lower()
+    for needle, hint in _FAILURE_HINTS:
+        if needle in text:
+            return hint
+    return ""
+
+
 def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
                       max_lines: int = 4, max_chars: int = 400,
                       label: str = "", index: int = 0, total: int = 0):
@@ -452,6 +470,11 @@ def print_tool_result(success: bool, output: str = "", use_rich: bool = True,
             c.print(Text(f"{prefix}{line}", style=style))
         else:
             c.print(f"{prefix}{line}")
+
+    if not success:
+        hint = failure_hint(output)
+        if hint:
+            c.print(Text(f"  ↳ {hint}", style="dim") if use_rich else f"  ↳ {hint}")
 
 
 def print_final_result(result: str, use_rich: bool = True):

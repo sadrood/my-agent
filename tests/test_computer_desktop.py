@@ -74,8 +74,9 @@ def test_schema_actions():
     tool = DesktopTool()
     s = tool.schema
     assert s["type"] == "object"
-    assert set(s["properties"]["action"]["enum"]) == {
-        "screenshot", "a11y", "click", "type", "key", "scroll", "window", "resume"}
+    shared = {"screenshot", "a11y", "click", "type", "key", "scroll", "window", "resume"}
+    quiet = {"shot", "inspect", "invoke", "fill", "pick", "sendkey", "wheel"}
+    assert set(s["properties"]["action"]["enum"]) == shared | quiet
 
 
 def test_unknown_action(tool):
@@ -172,3 +173,54 @@ def test_screenshot_with_vision(tool, monkeypatch, tmp_path):
     assert "【屏幕分析】" in r.output
     assert "测试窗口" in r.output
     assert str(png) in r.output
+
+
+# ── 非抢占（quiet）通道 ──────────────────────────────────────────────────
+# 这组断言存在的理由：quiet 动作曾经在 execute_json 里被 _QUIET_ACTIONS 分支吃掉，
+# 但分发胶水（_QUIET_ACTIONS / _run_quiet）没落地 —— 整个 computer 工具每个 action
+# 都抛 NameError。下面的用例把"分发表里出现 quiet 名 → 真的走到 _run_quiet"钉住。
+
+def test_quiet_actions_are_dispatched_not_unknown(tool):
+    """回归：quiet 名必须走 quiet 通道，不能落到"未知 action"或 NameError。"""
+    r = tool.execute_json({"action": "inspect", "title": "不存在的窗口zzz"})
+    assert not r.success
+    assert "未知 action" not in r.error
+
+
+def test_quiet_read_actions_skip_ownership_gate(tool, monkeypatch):
+    """控制权在用户手里时，读类（shot/inspect）仍放行，写类被拒。"""
+    import tools.computer_use as cu
+    monkeypatch.setattr(cu, "ownership", lambda: "user")
+    r = tool.execute_json({"action": "pick", "x": 1, "y": 2})
+    assert not r.success and "控制权在用户手里" in r.error
+    r2 = tool.execute_json({"action": "inspect"})
+    assert "控制权在用户手里" not in (r2.error or "")
+
+
+def test_invoke_requires_target(tool):
+    r = tool.execute_json({"action": "invoke"})
+    assert not r.success and "target" in r.error
+
+
+def test_pick_requires_coords(tool):
+    r = tool.execute_json({"action": "pick"})
+    assert not r.success and "坐标" in r.error
+
+
+def test_quiet_invoke_delegates_to_desktop_quiet(tool, monkeypatch):
+    import tools.desktop_quiet as q
+    seen = []
+    monkeypatch.setattr(q, "find_hwnd", lambda t: 1234)
+    monkeypatch.setattr(q, "window_title", lambda h: "记事本")
+    monkeypatch.setattr(q, "invoke", lambda hwnd, target: seen.append((hwnd, target)) or
+                        {"ok": True, "via": "InvokePattern.Invoke", "target": target})
+    r = tool.execute_json({"action": "invoke", "title": "记事本", "target": "#3"})
+    assert r.success and seen == [(1234, "#3")]
+    assert "非抢占" in r.output
+
+
+def test_quiet_unavailable_reports_cleanly(tool, monkeypatch):
+    """desktop_quiet 导入失败（非 Windows）时给出明确错误，而不是 NameError。"""
+    monkeypatch.setattr("tools.computer_use.quiet", None)
+    r = tool.execute_json({"action": "shot"})
+    assert not r.success and "非抢占通道不可用" in r.error

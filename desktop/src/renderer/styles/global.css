@@ -2,11 +2,38 @@
 @import "tailwindcss";
 
 @theme {
-  /* 只注册实际使用的工具类 token，且引用设计令牌（:root / [data-theme] 级联）：
-     写死色值时 bg-app 永远固定深色——浅色主题下窗口两侧发黑的根因。 */
+  /* 设计令牌桥接：把 :root/[data-theme] 的主题变量暴露为 Tailwind v4 utility，
+     组件即可写 bg-card / text-ink-3 / border-line / rounded-md 并随主题自动级联。
+     颜色一律引用 var()（不写死，否则浅色主题下两侧发黑）；圆角用字面值（不随主题变）。 */
   --color-app: var(--bg-app);
+  --color-panel: var(--bg-panel);
+  --color-card: var(--bg-card);
+  --color-hover: var(--bg-hover);
+  --color-input: var(--bg-input);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-on-accent: var(--text-on-accent);
+
+  /* 语义色两主题同值（:root 定义、[data-theme] 不覆盖），用字面值桥接避免与 :root 同名 var 自引用 */
+  --color-success: #34a56f;
+  --color-warning: #cf8d21;
+  --color-error: #dd5252;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
   --font-sans: 'Inter', 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-fade-in: fade-in 0.18s var(--ease-out-soft);
 }
 
 /* ============================================================
@@ -1522,7 +1549,7 @@ body.panel-resizing {
 .welcome { max-width: 720px; margin: 0 auto; padding: 96px 24px 40px; }
 .welcome-hero { text-align: center; color: var(--text-primary); }
 .welcome-hero svg { color: var(--accent); opacity: 0.85; }
-.welcome-title { font-size: 21px; font-weight: 600; margin-top: 14px; letter-spacing: 0.01em; }
+.welcome-title { font-size: 25px; font-weight: 650; margin-top: 14px; letter-spacing: 0.01em; }
 .welcome-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
 .welcome-sub code { background: var(--bg-hover); padding: 1px 6px; border-radius: 6px; font-size: 11.5px; }
 .welcome-recent { margin-top: 44px; }

@@ -17,6 +17,16 @@ import os
 #: 门控名单 / 自动装载关键词 / 空闲阈值统一放 config.TOOL_GATING_CONFIG，这里只做再导出。
 #: 名字保留在模块级：既有调用方与测试按 tools.tool_manager.GATED_TOOLS 引用。
 GATED_TOOLS = TOOL_GATING_CONFIG.get("tools") or frozenset()
+GATED_PREFIXES = tuple(TOOL_GATING_CONFIG.get("prefixes") or ())
+GATED_ALWAYS = frozenset(TOOL_GATING_CONFIG.get("always") or ())
+
+
+def is_gated(name: str) -> bool:
+    """该工具是否走按需装载：精确名或前缀命中，`always` 里的除外。"""
+    key = str(name or "")
+    if key in GATED_ALWAYS:
+        return False
+    return key in GATED_TOOLS or any(key.startswith(p) for p in GATED_PREFIXES if p)
 GATED_KEYWORDS = TOOL_GATING_CONFIG.get("keywords") or {}
 GATED_IDLE_TURNS = int(TOOL_GATING_CONFIG.get("idle_turns", 5))
 
@@ -157,6 +167,11 @@ class ToolManager:
             from tools.computer_use import COMPUTER_SUPPORTED, DesktopTool
             if COMPUTER_SUPPORTED and COMPUTER_USE_CONFIG.get("enabled", True):
                 self.register(DesktopTool())
+                # 任务级 GUI agent（在动作级 computer 之上）：受 GUI_TASK_ENABLED 单独控制，
+                # 默认开。它把「给一句话自己操作到完成」的循环暴露成 gui_task 工具。
+                if COMPUTER_USE_CONFIG.get("gui_task_enabled", True):
+                    from tools.gui_task import GUITaskTool
+                    self.register(GUITaskTool())
         except Exception:
             pass
 
@@ -383,11 +398,11 @@ class ToolManager:
 
     def gated_names(self) -> list:
         """被门控的工具名（已注册、但 schema 默认不发）。"""
-        return [n for n in self._tools if n in GATED_TOOLS]
+        return [n for n in self._tools if is_gated(n)]
 
     def core_names(self) -> list:
         """常驻工具名（schema 每轮都发）。"""
-        return [n for n in self._tools if n not in GATED_TOOLS and n != META_TOOL_NAME]
+        return [n for n in self._tools if not is_gated(n) and n != META_TOOL_NAME]
 
     def loaded_gated(self) -> list:
         """本会话已装载的门控工具（保持注册顺序，便于对照）。"""
@@ -398,7 +413,7 @@ class ToolManager:
         loaded, unknown = [], []
         for name in names or []:
             key = str(name).strip()
-            if key in self._tools and key in GATED_TOOLS:
+            if key in self._tools and is_gated(key):
                 if key not in self._loaded_gated:
                     loaded.append(key)
                 self._loaded_gated.add(key)
@@ -492,7 +507,7 @@ class ToolManager:
         """
         out = []
         for name, tool in self._tools.items():
-            if all_tools or name not in GATED_TOOLS or name in self._loaded_gated:
+            if all_tools or not is_gated(name) or name in self._loaded_gated:
                 out.append(tool.to_openai_schema())
         return out
 
@@ -599,12 +614,15 @@ class ToolManager:
     # ================================================================
 
     def connect_mcp_server(self, server_name: str, command: str,
-                           args: list = None, env: dict = None) -> bool:
-        """连接 MCP 服务器并自动注册其工具。"""
+                           args: list = None, env: dict = None,
+                           exclude: list = None, timeout: float = None,
+                           lazy: bool = False) -> bool:
+        """连接 MCP 服务器并自动注册其工具（exclude 中的工具不注册）。"""
         from tools.mcp_client import MCPClient
 
         client = MCPClient(tool_manager=self)
-        result = client.connect_stdio(server_name, command, args or [], env or {})
+        result = client.connect_stdio(server_name, command, args or [], env or {}, exclude or [],
+                                      timeout=timeout, lazy=lazy)
         if result:
             # 保存客户端引用防止被 GC
             if not hasattr(self, "_mcp_clients"):
